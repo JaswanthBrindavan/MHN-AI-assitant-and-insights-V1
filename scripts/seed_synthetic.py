@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_sessionmaker
@@ -58,7 +58,17 @@ _USER_META = {
 }
 
 
+async def _user_table_exists(db: AsyncSession) -> bool:
+    conn = await db.connection()
+    return await conn.run_sync(lambda c: inspect(c).has_table("user"))
+
+
 async def _ensure_user(db: AsyncSession, user_id: uuid.UUID) -> None:
+    # The `user` table is owned by the core app (Flyway) and is absent in a
+    # standalone AI deployment. Our tables reference user_id by uuid with no FK,
+    # so seeding users is optional — skip it when the table isn't present.
+    if not await _user_table_exists(db):
+        return
     existing = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalars().first()

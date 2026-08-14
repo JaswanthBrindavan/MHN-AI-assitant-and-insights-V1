@@ -101,5 +101,6 @@ async def upsert_condition(
     row.provenance = provenance
     row.consent_grant_id = consent_grant_id
     row.soft_deleted = False
+    row.soft_deleted_at = None
     await db.flush()
     return row

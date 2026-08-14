@@ -11,6 +11,7 @@ core schema.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
@@ -51,7 +52,7 @@ class User(Base):
     user_name: Mapped[str] = mapped_column(sa.String(20), nullable=False)
     health_card_number: Mapped[str] = mapped_column(sa.String(100), nullable=False)
     hashcode: Mapped[str] = mapped_column(sa.String(255), nullable=False)
-    created_at: Mapped[sa.DateTime | None] = mapped_column(
+    created_at: Mapped[datetime | None] = mapped_column(
         sa.DateTime(timezone=True), nullable=True
     )
 
@@ -107,4 +108,8 @@ class PedigreeCondition(Base, UUIDPrimaryKey, CreatedAt):
     )
     soft_deleted: Mapped[bool] = mapped_column(
         sa.Boolean, nullable=False, default=False
+    )
+    # Set when soft-deleted; the nightly sweep hard-purges rows past 30 days.
+    soft_deleted_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
     )

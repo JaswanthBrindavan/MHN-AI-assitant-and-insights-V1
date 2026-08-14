@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
@@ -33,7 +34,7 @@ class ActiveSymptomState(Base, UUIDPrimaryKey, CreatedAt):
     user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
     symptom: Mapped[str] = mapped_column(sa.String(128), nullable=False)
     risk_level: Mapped[str] = mapped_column(sa.String(16), nullable=False)
-    last_seen_at: Mapped[sa.DateTime] = mapped_column(
+    last_seen_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False
     )
 

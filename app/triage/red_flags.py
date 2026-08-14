@@ -113,13 +113,21 @@ class TriageResult:
         return self.level != NONE
 
 
+def _norm(s: str) -> str:
+    """Lowercase and drop apostrophes so 'can't', 'cant', 'can’t' all match."""
+    return s.lower().replace("'", "").replace("’", "")
+
+
 def _find(text: str, phrases: tuple[str, ...]) -> list[str]:
-    return [p for p in phrases if p in text]
+    # text is already normalized; normalize each phrase for comparison but
+    # return the human-readable phrase for the receipt/summary.
+    return [p for p in phrases if _norm(p) in text]
 
 
 def triage(message: str) -> TriageResult:
-    """Return the severity floor for a message (case-insensitive substring)."""
-    text = message.lower()
+    """Return the severity floor for a message (case-insensitive, apostrophe-
+    insensitive substring)."""
+    text = _norm(message)
     matched: list[str] = []
     level = NONE
 

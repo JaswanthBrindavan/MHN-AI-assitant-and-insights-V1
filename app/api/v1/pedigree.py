@@ -17,6 +17,7 @@ from app.api.v1.schemas import (
 from app.auth import authorize_user, get_current_user_id
 from app.db import get_db
 from app.insights.engine import recompute_insights
+from app.models.common import utcnow
 from app.models.core import PedigreeCondition, PedigreeMember
 from app.services.pedigree import (
     get_or_create_family_risk_grant,
@@ -125,6 +126,7 @@ async def delete_condition(
     authorize_user(row.user_id, current_user)
 
     row.soft_deleted = True
+    row.soft_deleted_at = utcnow()
     await db.flush()
     await recompute_insights(db, row.user_id, reason="condition_deleted")
     await db.commit()

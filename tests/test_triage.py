@@ -74,6 +74,12 @@ def test_case_insensitive():
     assert triage("I CAN'T BREATHE").level == EMERGENCY
 
 
+def test_apostrophe_insensitive():
+    # Missing/curly apostrophes must not bypass the emergency floor.
+    assert triage("i cant breathe").level == EMERGENCY
+    assert triage("i can’t breathe").level == EMERGENCY
+
+
 def test_max_level_never_downgrades():
     assert max_level(EMERGENCY, HIGH) == EMERGENCY
     assert max_level(HIGH, EMERGENCY) == EMERGENCY

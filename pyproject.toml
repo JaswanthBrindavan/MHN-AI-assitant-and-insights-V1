@@ -65,3 +65,8 @@ addopts = "-m 'not pg'"
 [tool.coverage.run]
 source = ["app"]
 omit = ["app/alembic/*"]
+
+[tool.coverage.report]
+# Coverage gate — enforced whenever coverage runs, e.g.:
+#   pytest --cov=app
+fail_under = 80
