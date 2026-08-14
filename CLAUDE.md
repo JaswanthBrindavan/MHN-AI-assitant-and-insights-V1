@@ -93,9 +93,16 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
 - **Triage is a floor** that runs before scope/route/LLM; downstream may raise
   the level, never lower it. Emergencies are answered deterministically (no LLM).
 - **One vocabulary**: compaction detects flags with the SAME triage tables.
-- **Fail open**: grounding/validation/receipts/compaction crashes → safe reply +
-  WARNING, never an exception to the caller.
+- **Fail open**: grounding/validation/receipts/compaction/provider crashes →
+  safe reply + WARNING, never an exception to the caller.
 - **No PHI in logs / receipts**: receipts store SHA-256 of the message only.
+- **Drug path is deterministic**: drug-information questions are answered from
+  drug_reference (never the LLM), only at NONE risk (the triage floor wins),
+  gated by NON_DRUG_TERMS, with ordered candidate windows for reproducibility.
+- **Registry keyword matching is guarded**: word boundaries, plural tolerance,
+  ≥4-char keywords (3-char only for ALL-CAPS abbreviations, matched
+  case-sensitively — "ARM" ≠ "arm"), stoplist for everyday words, and
+  parenthetical qualifiers like "(child)" never become keywords.
 
 ## Current state
 
