@@ -53,6 +53,36 @@ _SCOPE: dict[str, str] = {
 }
 
 
+_SELF_HARM: dict[str, str] = {
+    "en": (
+        "I'm really glad you told me — what you're feeling matters. You are "
+        "not alone, and support is available right now: please call the "
+        "Tele-MANAS mental-health helpline at 14416 (toll-free, 24x7, in your "
+        "language), or your local emergency number if you are in immediate "
+        "danger. If you can, reach out to someone you trust and let them know "
+        "how you're feeling. Talking to a mental-health professional can "
+        "genuinely help."
+    ),
+    "hi": (
+        "आपने बताया, यह बहुत अच्छा किया — आपकी भावनाएँ मायने रखती हैं। आप "
+        "अकेले नहीं हैं। कृपया अभी Tele-MANAS हेल्पलाइन 14416 (टोल-फ्री, "
+        "24x7) पर कॉल करें, या तुरंत खतरे में हों तो अपना स्थानीय आपातकालीन "
+        "नंबर मिलाएँ। किसी भरोसेमंद व्यक्ति से भी बात करें।"
+    ),
+    "hi-Latn": (
+        "Aapne bataya, yeh bahut accha kiya — aapki feelings maayne rakhti "
+        "hain. Aap akele nahi hain. Kripya abhi Tele-MANAS helpline 14416 "
+        "(toll-free, 24x7) par call karein, ya turant khatre mein hon to "
+        "apna local emergency number milayein. Kisi bharosemand vyakti se "
+        "bhi baat karein."
+    ),
+}
+
+
+def localized_self_harm(lang: str) -> str:
+    return _SELF_HARM.get(lang, _SELF_HARM["en"])
+
+
 def localized_emergency(lang: str) -> str:
     return _EMERGENCY.get(lang, _EMERGENCY["en"])
 

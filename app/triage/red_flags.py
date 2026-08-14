@@ -124,6 +124,30 @@ ACS_ASSOCIATED_PHRASES: tuple[str, ...] = (
     "सांस फूल",
 )
 
+# Self-harm / suicide risk phrases (DRAFT — pending clinician sign-off).
+# Matching any of these is an EMERGENCY with a dedicated supportive directive.
+SELF_HARM_PHRASES: tuple[str, ...] = (
+    "hurt myself",
+    "harm myself",
+    "kill myself",
+    "end my life",
+    "suicide",
+    "suicidal",
+    "want to die",
+    "dont want to live",
+    "don't want to live",
+    "no reason to live",
+    # Hindi / Hinglish (DRAFT)
+    "khudkushi",
+    "atmahatya",
+    "आत्महत्या",
+    "खुदकुशी",
+    "मरना चाहता",
+    "मरना चाहती",
+    "jeena nahi chahta",
+    "jeena nahi chahti",
+)
+
 # The fixed directive that leads every EMERGENCY response.
 EMERGENCY_DIRECTIVE = (
     "This may be a medical emergency. Please call your local emergency number "
@@ -135,6 +159,7 @@ EMERGENCY_DIRECTIVE = (
 class TriageResult:
     level: str
     matched_terms: list[str] = field(default_factory=list)
+    self_harm: bool = False
 
     @property
     def is_emergency(self) -> bool:
@@ -163,6 +188,11 @@ def triage(message: str) -> TriageResult:
     matched: list[str] = []
     level = NONE
 
+    self_harm_hits = _find(text, SELF_HARM_PHRASES)
+    if self_harm_hits:
+        level = max_level(level, EMERGENCY)
+        matched += self_harm_hits
+
     emergency_hits = _find(text, EMERGENCY_PHRASES)
     if emergency_hits:
         level = max_level(level, EMERGENCY)
@@ -180,4 +210,8 @@ def triage(message: str) -> TriageResult:
         matched += chest_hits + assoc_hits
 
     # Deterministic, de-duplicated ordering for reproducible receipts/summaries.
-    return TriageResult(level=level, matched_terms=sorted(set(matched)))
+    return TriageResult(
+        level=level,
+        matched_terms=sorted(set(matched)),
+        self_harm=bool(self_harm_hits),
+    )

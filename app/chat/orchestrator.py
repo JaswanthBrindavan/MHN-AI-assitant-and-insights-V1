@@ -52,10 +52,12 @@ from app.i18n.replies import (
     localized_emergency,
     localized_high_escalation,
     localized_scope_decline,
+    localized_self_harm,
 )
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
 from app.models.chat import RagTurnReceipt
+from app.rag.extractive import build_extractive_answer
 from app.rag.prompt import build_correction_directive, build_system_prompt
 from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
 from app.triage.red_flags import EMERGENCY, HIGH, NONE, triage
@@ -74,6 +76,9 @@ class ChatResult:
     citations: list[dict] | None = None
     visual: dict | None = None
     language: str = "en"
+    # Truthful decision trace (the pipeline's actual steps, not simulated
+    # reasoning) — rendered as the "thinking" chain in clients.
+    trace: list[dict] = field(default_factory=list)
 
 
 def _hash(text: str) -> str:
@@ -179,8 +184,22 @@ async def _dispatch(
     risk = tr.level
     lang = detect_language(message)
 
+    from app.i18n.language import LANGUAGE_NAMES
+    trace: list[dict] = []
+
+    def t(step: str, detail: str) -> None:
+        trace.append({"step": step, "detail": detail})
+
+    if tr.matched:
+        t("Safety triage",
+          f"{risk.upper()} — matched: {', '.join(repr(m) for m in tr.matched_terms[:4])}")
+    else:
+        t("Safety triage", "no red flags detected")
+    t("Language", LANGUAGE_NAMES.get(lang, lang))
+
     # 1) Off-topic decline — only when the triage floor did not match.
     if not tr.matched and is_off_topic(message):
+        t("Scope guard", "not a health question — declining politely")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
             model_name=provider.model_name, retrieved=None, grounding=None,
@@ -192,27 +211,40 @@ async def _dispatch(
             recommended_action="out_of_scope",
             provenance={"path": "scope_declined"},
             language=lang,
+            trace=trace,
         )
 
     intent = route(message, tr.matched)
 
-    # 2) Emergency — deterministic directive, never an LLM.
+    # 2) Emergency — deterministic directive, never an LLM. Self-harm risk
+    #    gets a dedicated supportive directive with the Tele-MANAS helpline.
     if risk == EMERGENCY:
+        if tr.self_harm:
+            t("Emergency response",
+              "self-harm risk — supportive helpline directive (deterministic)")
+        else:
+            t("Emergency response",
+              "deterministic directive — the LLM is never the arbiter of emergencies")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
             model_name=provider.model_name, retrieved=None, grounding=None,
             grounding_status="n/a", used_rag=False,
         )
         return ChatResult(
-            response_message=localized_emergency(lang),
+            response_message=(
+                localized_self_harm(lang) if tr.self_harm
+                else localized_emergency(lang)
+            ),
             risk_level=EMERGENCY,
             recommended_action="call_emergency_services",
             provenance={"path": "triage_emergency", "matched": tr.matched_terms},
             language=lang,
+            trace=trace,
         )
 
     # 3) Conversational (greeting / identity).
     if intent == CONVERSATIONAL:
+        t("Intent", "greeting / identity — canned reply")
         reply = IDENTITY_REPLY if is_identity_question(message) else GREETING_REPLY
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
@@ -225,10 +257,12 @@ async def _dispatch(
             recommended_action="none",
             provenance={"path": "conversational"},
             language=lang,
+            trace=trace,
         )
 
     # 4) Data query — serve stored insights/pedigree; never compute.
     if intent == DATA_QUERY:
+        t("Intent", "question about the user's own records — serving stored data")
         reply = await _data_query_reply(db, user_id)
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
@@ -241,6 +275,7 @@ async def _dispatch(
             recommended_action="review_with_clinician",
             provenance={"path": "data_query"},
             language=lang,
+            trace=trace,
         )
 
     # 4.5) Deterministic data abilities — documents, tracker adds, metric
@@ -266,6 +301,22 @@ async def _dispatch(
                         db, user_id, message, user_codes
                     )
             if ability is not None:
+                path = ability["provenance"].get("path", "ability")
+                t("Data ability",
+                  f"handled deterministically by the {path.replace('_', ' ')} "
+                  "handler (no LLM)")
+                verdict = validate_reply(ability["reply"], risk)
+                if not verdict.ok:
+                    t("Output validation",
+                      f"blocked ({verdict.reason}) — replaced with safe reply")
+                    ability = {
+                        "reply": safe_reply(risk),
+                        "action": ability["action"],
+                        "provenance": {**ability["provenance"],
+                                       "degraded": "validation"},
+                    }
+                else:
+                    t("Output validation", "passed all safety checks")
                 await _write_receipt(
                     db, user_id=user_id, session_id=session_id, message=message,
                     model_name=provider.model_name, retrieved=None,
@@ -279,6 +330,7 @@ async def _dispatch(
                     citations=ability.get("citations"),
                     visual=ability.get("visual"),
                     language=lang,
+                    trace=trace,
                 )
         except Exception:  # noqa: BLE001 — abilities must never break a reply
             logger.warning("data ability failed; continuing", exc_info=True)
@@ -296,6 +348,9 @@ async def _dispatch(
                     drug = await find_drug(db, term)
             if term:
                 if drug is not None:
+                    t("Drug lookup",
+                      f"'{term}' matched {drug.name} in the validated medicines "
+                      "database — deterministic reply (no LLM)")
                     reply = build_drug_reply(drug)
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
@@ -313,6 +368,7 @@ async def _dispatch(
                             "source": "drug_reference",
                         },
                         language=lang,
+                        trace=trace,
                     )
         except Exception:  # noqa: BLE001 — drug lookup must never break a reply
             logger.warning("drug lookup failed; continuing to RAG", exc_info=True)
@@ -322,6 +378,89 @@ async def _dispatch(
     codes = await resolve_scope(db, message, user_codes)
     chunks = await retrieve_chunks(db, codes, message)
     used_rag = bool(chunks)
+    try:
+        _idx = await load_condition_index(db)
+        _names = sorted(
+            _idx.by_code[c].display_name for c in codes if _idx and c in _idx.by_code
+        ) if _idx else []
+    except Exception:  # noqa: BLE001
+        _names = []
+    if _names:
+        t("Knowledge scope", "matched conditions: " + ", ".join(_names[:4]))
+    elif codes:
+        t("Knowledge scope", "conditions: " + ", ".join(sorted(codes)[:4]))
+    else:
+        t("Knowledge scope",
+          "no condition named — broad search over the validated corpus")
+    if chunks:
+        _sections = sorted({c.chunk_type.rsplit("_", 1)[0] for c in chunks})
+        t("Retrieval",
+          f"{len(chunks)} chunks from clinically reviewed profiles "
+          f"({', '.join(_sections[:4])})")
+    else:
+        t("Retrieval", "nothing retrieved — answering with general guidance only")
+
+    # Extractive mode: with no live model configured (LLM_PROVIDER=fake),
+    # serve the retrieved validated content directly — different question,
+    # different content — instead of one canned line for everything.
+    if get_settings().llm_provider == "fake" and chunks:
+        extractive = build_extractive_answer(chunks)
+        if extractive is not None:
+            t("Generate",
+              "no live model configured — serving validated profile content "
+              "directly (extractive mode)")
+            display = extractive
+            if risk == HIGH:
+                display = f"{localized_high_escalation(lang)} {display}"
+            verdict = validate_reply(display, risk)
+            if not verdict.ok:
+                t("Output validation",
+                  f"blocked ({verdict.reason}) — replaced with the safe reply")
+                display = safe_reply(risk)
+            else:
+                t("Output validation", "passed all safety checks")
+            try:
+                _index = await load_condition_index(db)
+            except Exception:  # noqa: BLE001
+                _index = None
+            extractive_citations = [
+                {
+                    "marker": str(i + 1),
+                    "source": "mcp_master_profile",
+                    "condition_code": c.condition_code,
+                    "section": c.chunk_type,
+                    "display_name": (
+                        _index.by_code[c.condition_code].display_name
+                        if _index and c.condition_code in _index.by_code
+                        else c.condition_code
+                    ),
+                }
+                for i, c in enumerate(chunks[:3])
+            ]
+            await _write_receipt(
+                db, user_id=user_id, session_id=session_id, message=message,
+                model_name="extractive",
+                retrieved=[c.to_dict() for c in chunks],
+                grounding=None, grounding_status="extractive", used_rag=True,
+            )
+            action = (
+                "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+            )
+            return ChatResult(
+                response_message=display,
+                risk_level=risk,
+                recommended_action=action,
+                provenance={
+                    "path": "symptom_rag",
+                    "mode": "extractive",
+                    "used_rag": True,
+                    "conditions": sorted(codes),
+                    "chunks": [c.id for c in chunks],
+                },
+                citations=extractive_citations or None,
+                language=lang,
+                trace=trace,
+            )
 
     # Prepend COMPACTED_CONTEXT_JSON when a summary exists for this session.
     compacted_summary, _recent = await assemble_context(db, session_id)
@@ -333,10 +472,12 @@ async def _dispatch(
 
     # A provider outage must degrade to the deterministic safe reply, never
     # crash a patient-facing endpoint.
+    t("Generate", f"asking the model ({provider.model_name})")
     try:
         answer = await provider.generate(system=system, user=message)
     except Exception:  # noqa: BLE001 — fail open
         logger.warning("LLM provider failed; safe reply", exc_info=True)
+        t("Generate", "provider failed — degrading to the deterministic safe reply")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
             model_name=provider.model_name,
@@ -350,6 +491,7 @@ async def _dispatch(
             recommended_action=action,
             provenance={"path": "symptom_rag", "degraded": "provider_error"},
             language=lang,
+            trace=trace,
         )
 
     report: GroundingReport | None = None
@@ -359,7 +501,16 @@ async def _dispatch(
             provider, system, message, answer, chunks, patient_text
         )
         grounding_status = report.status if report else "off"
+        if report is not None:
+            if report.status == "grounded":
+                t("Claim grounding",
+                  f"every clinical claim is cited ({len(report.cited)} sources)")
+            else:
+                t("Claim grounding",
+                  f"{len(report.violations)} violation(s) found "
+                  f"({get_settings().grounding_mode} mode)")
         if grounded_answer is None:
+            t("Safety net", "grounding could not be repaired — safe reply instead")
             display = safe_reply(risk)
         else:
             display = strip_markers(grounded_answer)
@@ -374,8 +525,13 @@ async def _dispatch(
                     extra = index.diagnostic_terms()
             except Exception:  # noqa: BLE001
                 extra = None
-            if not validate_reply(display, risk, extra).ok:
+            verdict = validate_reply(display, risk, extra)
+            if not verdict.ok:
+                t("Output validation",
+                  f"blocked ({verdict.reason}) — replaced with the safe reply")
                 display = safe_reply(risk)
+            else:
+                t("Output validation", "passed all safety checks")
     except Exception:  # noqa: BLE001 — safety layers fail open
         logger.warning("grounding/validation failed; safe reply", exc_info=True)
         display = safe_reply(risk)
@@ -404,6 +560,7 @@ async def _dispatch(
         grounding=report.to_dict() if report else None,
         citations=citations,
         language=lang,
+        trace=trace,
     )
 
 

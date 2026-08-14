@@ -63,7 +63,11 @@ _COND_RE = "|".join(re.escape(c) for c in _CONDITION_LEXICON)
 
 # "you have/are/... <up to a few words> <condition>" — diagnostic assertion.
 # Requires a condition token nearby so benign "you have questions" is not flagged.
+# Conditional/educational phrasings ("if you have X, do Y", "when you have",
+# "people like you have") are not diagnostic assertions — exclude them with
+# fixed-width lookbehinds.
 _DIAG_PREFIX = (
+    r"(?<![Ii]f )(?<![Ww]hen )(?<!ther )(?<![Oo]nce )"
     r"\byou(?:'ve got| are| are suffering from|'re suffering from"
     r"|(?: most| almost)?"
     r"(?: surely| certainly| clearly| obviously| probably| likely| definitely"

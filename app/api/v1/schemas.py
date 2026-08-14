@@ -107,3 +107,5 @@ class ChatResponse(BaseModel):
     visual: dict | None = None
     # Detected user language (BCP-47ish; "hi-Latn" = romanized Hindi).
     language: str = "en"
+    # Truthful pipeline decision trace (rendered as the "thinking" chain).
+    trace: list[dict] = Field(default_factory=list)

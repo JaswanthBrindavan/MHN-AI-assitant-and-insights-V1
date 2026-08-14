@@ -29,6 +29,23 @@ MIN_SINGLE_WORD_ALIAS_LEN = 6
 # ("hindi" appeared as an alias of 22 conditions) — drop it entirely.
 AMBIGUITY_LIMIT = 3
 
+# Adjective-like first words of display names that must never become
+# standalone keywords ("Chronic X", "Allergic Y"). DRAFT.
+_GENERIC_HEAD_WORDS = {
+    "chronic", "acute", "primary", "secondary", "congenital", "allergic",
+    "severe", "benign", "malignant", "viral", "bacterial", "fungal",
+    "hereditary", "autoimmune", "occupational", "seasonal", "gestational",
+    "traumatic", "essential", "juvenile", "senile", "peripheral", "central",
+    "systemic", "cutaneous", "visceral", "pulmonary", "cerebral", "renal",
+    "hepatic", "cardiac", "gastric", "oral", "nasal", "vocal", "male",
+    "female", "childhood", "adolescent", "perinatal", "postpartum",
+    "recurrent", "functional", "generalised", "generalized", "abdominal",
+    "diabetic", "alcoholic", "medication", "drug-resistant", "other",
+    "uncorrected", "missed", "poor", "physical", "internet", "smokeless",
+    "vaccine-preventable", "noise-induced", "age-related", "end-stage",
+    "iron", "vitamin", "calcium", "zinc", "folate", "early",
+}
+
 # Corpus aliases that are common English words and would over-match everyday
 # messages (verified against the live 511-condition registry). DRAFT.
 _ALIAS_STOPLIST = {
@@ -82,6 +99,17 @@ class ConditionIndex:
                     ch.isupper() for ch in inner
                 ) >= 2:
                     keywords.append((inner, True))
+            # Head noun of a multi-word display name ("Typhoid Enteric Fever"
+            # → "typhoid") so bare mentions still scope. Generic adjectives
+            # are excluded here; the ambiguity filter below catches the rest.
+            head = re.sub(r"[^A-Za-z\-]", "", e.display_name.split(" ")[0]).lower()
+            if (
+                " " in e.display_name.strip()
+                and len(head) >= 4
+                and head not in _GENERIC_HEAD_WORDS
+                and head not in _ALIAS_STOPLIST
+            ):
+                keywords.append((head, True))
             keywords += [(a, False) for a in e.aliases]
 
             for kw, from_display in keywords:
@@ -103,6 +131,9 @@ class ConditionIndex:
                     and not is_abbrev
                     and " " not in kw_clean
                     and len(kw_clean) < MIN_SINGLE_WORD_ALIAS_LEN
+                    # Capitalised short aliases ("Boil", "CKDu", "Acne") are
+                    # deliberate names, not enumeration debris — allow ≥4.
+                    and not (kw_stripped[:1].isupper() and len(kw_clean) >= 4)
                 ):
                     continue
                 key = (kw_clean, e.condition_code)
@@ -157,13 +188,23 @@ class ConditionIndex:
 
     def match_message(self, message: str) -> set[str]:
         """Condition codes whose display name or an alias appears in the text."""
-        found: set[str] = set()
+        return set(self.match_message_ranked(message))
+
+    def match_message_ranked(self, message: str) -> dict[str, int]:
+        """Matched codes → specificity (length of the longest matched keyword).
+
+        "Polycystic Kidney Disease" matches PKD via its full name (specific)
+        and PCOS only via the shared head noun "polycystic" (weak) — rankers
+        use the score to prefer the condition the message actually names.
+        """
+        scores: dict[str, int] = {}
         for pattern, code in self._patterns:
-            if code in found:
-                continue
-            if pattern.search(message):
-                found.add(code)
-        return found
+            m = pattern.search(message)
+            if m:
+                length = len(m.group(0))
+                if length > scores.get(code, 0):
+                    scores[code] = length
+        return scores
 
     def map_engine_codes(self, codes: set[str]) -> set[str]:
         """Translate legacy engine codes (T2DM…) to registry codes; keep both."""

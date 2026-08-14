@@ -123,6 +123,25 @@
   .empty { color: var(--muted); font-size: 13px; }
   .note { font-size: 11px; color: var(--muted); margin-top: 8px; }
   .spinner { color: var(--muted); font-size: 12px; padding: 4px 0; }
+  /* thinking chain */
+  details.thinking {
+    max-width: 100%; margin: 0 0 6px; font-size: 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: #fafbfe;
+  }
+  details.thinking summary {
+    cursor: pointer; padding: 7px 12px; color: var(--muted); user-select: none;
+    list-style: none; display: flex; align-items: center; gap: 6px;
+  }
+  details.thinking summary::before { content: "▸"; transition: transform .15s; }
+  details.thinking[open] summary::before { transform: rotate(90deg); }
+  details.thinking ol { margin: 0; padding: 2px 14px 10px 30px; }
+  details.thinking li { margin: 5px 0; color: var(--muted); line-height: 1.45; }
+  details.thinking li b { color: var(--ink); font-weight: 600; }
+  /* rendered rich text inside bot bubbles */
+  .bubble h4 { margin: 12px 0 4px; font-size: 13px; }
+  .bubble ul { margin: 4px 0 8px; padding-left: 20px; }
+  .bubble li { margin: 3px 0; }
+  .bubble p { margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -261,13 +280,47 @@ function addUserMsg(text) {
   messagesEl.appendChild(d); messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+function esc(t) {
+  return t.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+}
+function mdLite(text) {
+  // escape first, then apply minimal formatting: **bold** headers + bullets.
+  const lines = esc(text).split("\n");
+  let html = "", inList = false;
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.startsWith("• ")) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += "<li>" + t.slice(2) + "</li>";
+      continue;
+    }
+    if (inList) { html += "</ul>"; inList = false; }
+    if (!t) continue;
+    const m = t.match(/^\*\*(.+)\*\*$/);
+    if (m) { html += "<h4>" + m[1] + "</h4>"; continue; }
+    html += "<p>" + t.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") + "</p>";
+  }
+  if (inList) html += "</ul>";
+  return html;
+}
+
 function addBotMsg(data) {
   const d = document.createElement("div");
   d.className = "msg bot " + (data.risk_level === "emergency" ? "emergency" :
                               data.risk_level === "high" ? "high" : "");
+
+  if (data.trace && data.trace.length) {
+    const det = document.createElement("details");
+    det.className = "thinking";
+    det.innerHTML = `<summary>Thought for ${data.trace.length} steps</summary>
+      <ol>${data.trace.map(s =>
+        `<li><b>${esc(s.step)}</b> — ${esc(s.detail)}</li>`).join("")}</ol>`;
+    d.appendChild(det);
+  }
+
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = data.response_message;
+  bubble.innerHTML = mdLite(data.response_message);
   d.appendChild(bubble);
 
   if (data.visual && data.visual.svg) {

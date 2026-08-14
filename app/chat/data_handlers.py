@@ -355,11 +355,83 @@ async def handle_summary_query(
 
 
 # --------------------------------------------------------------------------- #
-# MCP suggestions (clinically validated corpus, served verbatim)
+# MCP suggestions (clinically validated corpus, rendered readably)
 # --------------------------------------------------------------------------- #
-_SUGGESTION_LEAD = (
-    "Here are relevant points from our clinically reviewed condition profiles"
+_SUGGESTION_SEGMENT_RE = re.compile(
+    r";\s*(?=(?:LHP|Type|Suggestion|Profile|Importance):)"
 )
+# Friendly section headers for the corpus LHP categories.
+_LHP_HEADERS = {
+    "food": "Food & diet",
+    "physical activity": "Staying active",
+    "education": "Know the basics",
+    "sleep": "Sleep",
+    "smoking": "Tobacco",
+    "alcohol": "Alcohol",
+    "mental health": "Mind & stress",
+    "water": "Hydration",
+    "hygiene": "Hygiene",
+}
+_MAX_SECTIONS = 4
+_MAX_BULLETS_PER_SECTION = 4
+
+
+def _parse_suggestion_line(line: str) -> tuple[str, list[str]] | None:
+    """One flattened table row → (section header, clean bullets)."""
+    fields: dict[str, str] = {}
+    for segment in _SUGGESTION_SEGMENT_RE.split(line):
+        key, _, value = segment.partition(":")
+        fields[key.strip().lower()] = value.strip()
+    suggestion = fields.get("suggestion")
+    if not suggestion:
+        return None
+    bullets = [
+        re.sub(r"^[•\s]+", "", b).strip()
+        for b in re.split(r"\s*/\s*•", suggestion)
+    ]
+    bullets = [b for b in bullets if len(b) > 10]
+    if not bullets:
+        return None
+    lhp = fields.get("lhp", "").strip().lower()
+    header = _LHP_HEADERS.get(lhp, lhp.title() if lhp else "General")
+    return header, bullets
+
+
+def format_suggestions(rows_content: list[str], display_names: list[str]) -> str:
+    """Render suggestions chunks as clean, sectioned, readable text."""
+    sections: dict[str, list[str]] = {}
+    order: list[str] = []
+    for content in rows_content:
+        body = content.split("\n", 1)[1] if "\n" in content else content
+        for line in body.split("\n"):
+            parsed = _parse_suggestion_line(line)
+            if parsed is None:
+                continue
+            header, bullets = parsed
+            if header not in sections:
+                sections[header] = []
+                order.append(header)
+            for b in bullets:
+                if b not in sections[header]:
+                    sections[header].append(b)
+
+    if not sections:
+        return ""
+    names = " and ".join(display_names[:2]) if display_names else "your conditions"
+    parts = [
+        f"Based on our clinically reviewed profiles for {names}, "
+        "here's what generally helps:"
+    ]
+    for header in order[:_MAX_SECTIONS]:
+        bullets = sections[header][:_MAX_BULLETS_PER_SECTION]
+        parts.append(
+            f"**{header}**\n" + "\n".join(f"• {b}" for b in bullets)
+        )
+    parts.append(
+        "These are general, educational pointers — not a personal "
+        "prescription. Your doctor can tailor them to you."
+    )
+    return "\n\n".join(parts)
 
 
 async def handle_suggestion_query(
@@ -372,17 +444,32 @@ async def handle_suggestion_query(
     if not codes or index is None:
         return None  # fall through to the RAG path
 
-    rows = (
-        await db.execute(
-            select(McpChunk)
-            .where(
-                McpChunk.condition_code.in_(codes),
-                McpChunk.chunk_type.like("suggestions%"),
+    # Conditions the MESSAGE itself names outrank the user's background
+    # conditions — "tips for polycystic kidney disease" must not lose its
+    # chunk budget to an alphabetically-earlier background condition.
+    ranked = index.match_message_ranked(message)
+    if ranked:
+        best = max(ranked.values())
+        # Keep only the most specifically-named conditions (full-name matches
+        # beat shared head-noun matches by length).
+        preferred = {c for c, score in ranked.items() if score >= best - 2} & codes
+        preferred = preferred or codes
+    else:
+        preferred = codes
+
+    rows = list(
+        (
+            await db.execute(
+                select(McpChunk)
+                .where(
+                    McpChunk.condition_code.in_(preferred),
+                    McpChunk.chunk_type.like("suggestions%"),
+                )
+                .order_by(McpChunk.condition_code, McpChunk.chunk_type)
+                .limit(4)
             )
-            .order_by(McpChunk.condition_code, McpChunk.chunk_type)
-            .limit(4)
-        )
-    ).scalars().all()
+        ).scalars().all()
+    )
     if not rows:
         return None
 
@@ -393,17 +480,9 @@ async def handle_suggestion_query(
             if r.condition_code in index.by_code
         }
     )
-    body_parts: list[str] = []
-    for r in rows[:2]:  # keep the reply readable; citations carry the rest
-        text = r.content.split("\n", 1)[1] if "\n" in r.content else r.content
-        body_parts.append(text[:700])
-    reply = (
-        f"{_SUGGESTION_LEAD} ({', '.join(display_names)}):\n\n"
-        + "\n\n".join(body_parts)
-        + "\n\nThese are general, educational suggestions from the validated "
-        "profiles — not a personal prescription. Your doctor can tailor them "
-        "to you."
-    )
+    reply = format_suggestions([r.content for r in rows], display_names)
+    if not reply:
+        return None
     return {
         "reply": reply,
         "action": "discuss_with_clinician",

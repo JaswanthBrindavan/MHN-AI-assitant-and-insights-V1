@@ -47,4 +47,5 @@ async def chat(
         citations=result.citations,
         visual=result.visual,
         language=result.language,
+        trace=result.trace,
     )

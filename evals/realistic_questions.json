@@ -1,0 +1,271 @@
+{
+  "description": "User-curated realistic question bank (2026-08-14) — run by scripts/question_sweep.py as the 'realistic' category.",
+  "groups": {
+    "Chronic — Diabetes": [
+      "What should my blood sugar be after meals?",
+      "Can I eat sweets occasionally if I'm diabetic?",
+      "Why does my sugar spike even when I eat healthy?",
+      "Is Type 2 diabetes reversible?",
+      "What's the best time to take metformin?"
+    ],
+    "Chronic — Hypertension": [
+      "My BP is 150/95. Should I go to the hospital?",
+      "Can stress alone cause high BP?",
+      "Which foods are worst for blood pressure?",
+      "Is it okay to exercise with high BP?",
+      "My BP is normal in the morning but high at night. Why?"
+    ],
+    "Chronic — Thyroid": [
+      "I was just diagnosed with hypothyroidism. What does that mean?",
+      "Can thyroid problems cause weight gain?",
+      "Should I take my thyroid tablet on an empty stomach?",
+      "Can I eat soya if I have thyroid issues?",
+      "How often should I get my TSH tested?"
+    ],
+    "Chronic — Asthma & COPD": [
+      "What triggers an asthma attack?",
+      "Is it safe to exercise if I have asthma?",
+      "What's the difference between a reliever and preventer inhaler?",
+      "Can air pollution worsen my breathing condition?",
+      "How do I know if my COPD is getting worse?"
+    ],
+    "Chronic — Heart Disease": [
+      "I had a heart attack 6 months ago. What foods should I avoid?",
+      "Can I climb stairs if I have a heart condition?",
+      "What does a low ejection fraction mean?",
+      "Is chest tightness always a heart problem?",
+      "Can I fly with a heart condition?"
+    ],
+    "Chronic — Arthritis": [
+      "What's the difference between rheumatoid and osteoarthritis?",
+      "Which exercises are safe with knee arthritis?",
+      "Does cold weather really worsen joint pain?",
+      "Are there foods that reduce inflammation?",
+      "Can I stop my arthritis medication once the pain goes?"
+    ],
+    "Chronic — Kidney (CKD)": [
+      "My creatinine is 1.8. Is that concerning?",
+      "What foods should I avoid with kidney disease?",
+      "How much water should I drink if my kidneys are weak?",
+      "Can CKD be reversed?",
+      "What does protein in urine mean?"
+    ],
+    "Chronic — Liver / Fatty Liver": [
+      "My ultrasound says Grade 1 fatty liver. What should I do?",
+      "Can fatty liver be reversed with diet?",
+      "Is it okay to drink alcohol with fatty liver?",
+      "What does high SGPT mean?",
+      "Does fatty liver cause pain?"
+    ],
+    "Cancer (General)": [
+      "I just finished chemotherapy. What diet should I follow?",
+      "Can stress cause cancer?",
+      "What foods are linked to lower cancer risk?",
+      "How often should I go for cancer screenings?",
+      "What are early warning signs I should never ignore?"
+    ],
+    "Medications & Supplements": [
+      "What's the difference between paracetamol and ibuprofen?",
+      "Can I take two different painkillers together?",
+      "I missed my BP medication today. Should I take double tomorrow?",
+      "Can I drink alcohol while on antibiotics?",
+      "Is it safe to take vitamin D supplements long term?",
+      "My doctor prescribed statins. Do I really need them?",
+      "What are the side effects of steroids?",
+      "Can I take antacids with my other medications?",
+      "Are generic medicines as effective as branded ones?",
+      "I'm pregnant. Which medicines are safe to take for a cold?",
+      "Can I take melatonin every night for sleep?",
+      "Is ashwagandha safe with my BP medication?",
+      "What supplements help with joint pain?",
+      "Can fish oil interact with blood thinners?",
+      "I've been on antidepressants for 6 months. Can I stop now?"
+    ],
+    "Nutrition — General": [
+      "How many calories should I eat per day?",
+      "Is intermittent fasting healthy?",
+      "What's a balanced Indian diet?",
+      "How much protein do I need daily?",
+      "Is ghee healthy or harmful?",
+      "Are eggs safe to eat every day?",
+      "What's the healthiest cooking oil to use?",
+      "How much salt is too much?",
+      "What are high-fiber foods I can add to my diet?",
+      "How do I read a food nutrition label?"
+    ],
+    "Nutrition — Weight": [
+      "I want to lose 10 kg. Where do I start?",
+      "Why am I not losing weight even though I'm dieting?",
+      "Is skipping dinner a good way to lose weight?",
+      "Does eating late at night cause weight gain?",
+      "What's the difference between fat loss and weight loss?"
+    ],
+    "Nutrition — Condition-specific": [
+      "I have both diabetes and high BP. What's the ideal diet?",
+      "My uric acid is high. What should I avoid eating?",
+      "I have IBS. Which foods trigger symptoms?",
+      "What foods help reduce cholesterol naturally?",
+      "I'm iron deficient. What should I eat more of?",
+      "I'm lactose intolerant. How do I get enough calcium?",
+      "I'm vegan. How do I get B12?",
+      "What should I eat before and after workout?"
+    ],
+    "Fitness": [
+      "How many steps should I walk per day?",
+      "Is walking enough or do I need gym workouts?",
+      "Can I exercise during my periods?",
+      "How long after a meal should I wait before exercising?",
+      "What's the best exercise for belly fat?",
+      "I have a slipped disc. What exercises are safe?",
+      "I'm 60 years old. What kind of exercise is appropriate?",
+      "How do I build muscle while losing fat?",
+      "Is yoga better than walking for weight loss?",
+      "I feel exhausted after even mild exercise. What's wrong?",
+      "Can I exercise if I have a fever?",
+      "What's the safest way to start exercising after a long break?"
+    ],
+    "Sleep": [
+      "How many hours of sleep do I actually need?",
+      "I wake up at 3 AM and can't go back to sleep. Why?",
+      "Is sleeping in the afternoon bad for health?",
+      "Can poor sleep cause weight gain?",
+      "What's the best sleeping position for back pain?",
+      "I snore loudly. Could I have sleep apnea?",
+      "Does screen time before bed really affect sleep?",
+      "I feel tired even after 8 hours of sleep. Why?",
+      "Can melatonin help with jet lag?",
+      "What's a good bedtime routine for better sleep?"
+    ],
+    "Mental Health": [
+      "I've been feeling low for weeks. Could I be depressed?",
+      "What's the difference between stress and anxiety?",
+      "I have panic attacks. What can I do in the moment?",
+      "Can anxiety cause physical symptoms like chest pain?",
+      "How do I know if I need to see a psychiatrist?",
+      "Is it okay to take antidepressants long term?",
+      "How can I stop overthinking at night?",
+      "My teenager seems withdrawn and sad. What should I do?",
+      "Can meditation replace medication for anxiety?",
+      "I'm a caregiver for my sick parent. I'm burning out. What can I do?",
+      "How do I talk to someone about my mental health without being judged?",
+      "What's the difference between a psychologist and a psychiatrist?"
+    ],
+    "Women's Health": [
+      "My periods are irregular. What could be causing it?",
+      "I was diagnosed with PCOS. What lifestyle changes help?",
+      "Can PCOS affect my ability to get pregnant?",
+      "I'm in perimenopause. What symptoms should I expect?",
+      "What's the difference between menopause and perimenopause?",
+      "I have severe period cramps. Is that normal?",
+      "Can I exercise during my period?",
+      "What does a normal vaginal discharge look like?",
+      "I have fibroids. Do I need surgery?",
+      "What are the signs of endometriosis?",
+      "How does stress affect my menstrual cycle?",
+      "I'm 35 and trying to conceive. Is my age a factor?"
+    ],
+    "Pregnancy & Postpartum": [
+      "Is it safe to exercise in the first trimester?",
+      "What foods should I completely avoid during pregnancy?",
+      "I have gestational diabetes. What should I eat?",
+      "How much weight should I gain during pregnancy?",
+      "My baby isn't moving as much today. Should I be worried?",
+      "Is it normal to feel anxious after delivery?",
+      "Can I breastfeed if I have a cold?",
+      "How long does postpartum hair loss last?",
+      "When can I start exercising after a C-section?",
+      "I'm breastfeeding. Which medicines are safe?"
+    ],
+    "Child & Adolescent": [
+      "My 3-year-old has fever of 101°F. What should I do?",
+      "When should my child get their vaccines?",
+      "My child is a picky eater. How do I ensure they're getting enough nutrition?",
+      "My teenager is not eating properly. Could it be an eating disorder?",
+      "My child has been diagnosed with ADHD. What does that mean?",
+      "Is it normal for a 10-year-old to start puberty?",
+      "My child keeps getting frequent colds. Is their immunity low?",
+      "My child is overweight. How do I talk to them about it without hurting them?",
+      "Is screen time really harmful for kids?",
+      "My baby isn't hitting milestones. Should I be worried?"
+    ],
+    "Elderly Health": [
+      "My 70-year-old mother keeps falling. What can be done?",
+      "What vaccines should elderly people get?",
+      "My father is on 8 different medications. Is that normal?",
+      "How do I prevent osteoporosis in old age?",
+      "My mother is getting forgetful. Is it dementia or just aging?",
+      "What exercises are safe for someone with osteoporosis?",
+      "My father refuses to eat. What can I do?",
+      "How do I know when my elderly parent needs more care?",
+      "Can loneliness affect physical health in the elderly?",
+      "What are warning signs of a silent heart attack in elderly people?"
+    ],
+    "Lab Tests & Reports": [
+      "My cholesterol is 240. Is that dangerous?",
+      "What does a high ESR mean?",
+      "My vitamin D is 12. How low is that?",
+      "What's a normal haemoglobin level for women?",
+      "My TSH is 6.5. Do I need medication?",
+      "My uric acid is 8.2. Is that gout?",
+      "What does low platelet count mean?",
+      "I've been told my liver enzymes are elevated. What does that mean?",
+      "What tests should I do every year even if I feel healthy?",
+      "Can stress affect blood test results?",
+      "My eGFR is 58. Is that kidney disease?",
+      "What's the difference between LDL and HDL cholesterol?"
+    ],
+    "Urgent / Triage": [
+      "I have chest pain and left arm discomfort. What should I do?",
+      "I've had a headache for 3 days that won't go away.",
+      "My sugar is 380 mg/dL. Is that an emergency?",
+      "I feel like my heart is racing for no reason.",
+      "I have sudden blurry vision in one eye.",
+      "I found a lump in my breast. What should I do?",
+      "My urine has been dark brown for 2 days.",
+      "I've been vomiting for 12 hours and can't keep water down.",
+      "I took too many painkillers by mistake. What do I do?",
+      "My child had a seizure for the first time. What now?",
+      "I've had blood in my stool twice this week.",
+      "My BP just read 190/110 at home. Should I go to the hospital?"
+    ],
+    "Indian Lifestyle": [
+      "I'm fasting for Navratri. How do I manage my diabetes?",
+      "Is it safe to eat street food occasionally?",
+      "I work night shifts at an IT company. How does that affect my health?",
+      "I travel by train for 2 hours daily. Any health tips?",
+      "We eat a lot of rice at home. How do I make it healthier?",
+      "My grandmother says oil pulling is good. Is there any truth to that?",
+      "I drink kadha daily. Is that beneficial?"
+    ],
+    "General Lifestyle": [
+      "I drink 4 cups of coffee a day. Is that too much?",
+      "Is social drinking once a week okay?",
+      "I've been sitting at my desk for 10 hours. What can I do?",
+      "I smoke occasionally at parties. Is that still harmful?",
+      "I travel frequently for work. How do I stay healthy?",
+      "I'm always eating outside. How do I make better choices?"
+    ],
+    "Cross-Condition": [
+      "I have diabetes, hypertension, and high cholesterol. What diet covers all three?",
+      "Can my thyroid problem be causing my depression?",
+      "I have PCOS and insulin resistance. Are they connected?",
+      "My father has Alzheimer's and diabetes. How do I manage his diet?",
+      "I have asthma and want to start running. Is that safe?",
+      "I have CKD and my doctor says limit protein, but I go to the gym. What do I do?",
+      "I'm on blood thinners and need a dental procedure. Is that safe?",
+      "I have fatty liver and high cholesterol. What should I prioritize?"
+    ],
+    "Edge Cases": [
+      "Am I going to die from this?",
+      "My doctor is wrong. The internet says something different.",
+      "Just tell me what medicine to take.",
+      "I don't trust doctors. Can you just tell me what to do?",
+      "Everything is fine in my reports but I feel terrible.",
+      "I can't afford the medicines my doctor prescribed. What are my options?",
+      "I've been ignoring this symptom for a year. Is it too late?",
+      "I read that this medication causes cancer. Should I stop taking it?",
+      "I want to stop all my medications and try Ayurveda.",
+      "My friend has the same symptoms. What does she have?"
+    ]
+  }
+}
