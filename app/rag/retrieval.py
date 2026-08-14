@@ -10,6 +10,7 @@ keyword (token-overlap) search. Chunks are returned ranked and capped at k.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
@@ -18,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge.registry import load_condition_index
 from app.models.chat import McpChunk
+
+logger = logging.getLogger("davi.retrieval")
 
 # Message keyword → condition code (DRAFT — pending clinician sign-off).
 CONDITION_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -167,6 +170,102 @@ async def _global_fallback_rows(db: AsyncSession, message: str) -> list[McpChunk
     return list(rows)
 
 
+_VEC_CANDIDATES = 24
+_BM25_CANDIDATES = 24
+# RRF-scale section boost (RRF scores live around 1/60 ≈ 0.0167).
+_RRF_SECTION_BOOST = 0.008
+
+
+async def _hybrid_rank(
+    db: AsyncSession,
+    condition_codes: set[str],
+    message: str,
+    k: int,
+) -> list[RetrievedChunk] | None:
+    """Hybrid search: BM25 + instructed-vector ANN, fused with RRF, then a
+    section-intent rerank. None → caller falls back to keyword ranking.
+
+    PostgreSQL-only (the sqlite test variant stores embeddings as JSON) and
+    requires a configured embedding service AND embedded chunks.
+    """
+    from app.rag.embeddings import embed_query, embeddings_configured
+    from app.rag.ranking import bm25_scores, rrf_fuse
+
+    bind = db.get_bind()
+    if getattr(bind, "dialect", None) is None or bind.dialect.name != "postgresql":
+        return None
+    if not embeddings_configured():
+        return None
+    query_vector = await embed_query(message, instruct=True)
+    if query_vector is None:
+        return None
+
+    # --- semantic candidates (pgvector cosine ANN) ---
+    stmt = (
+        select(
+            McpChunk,
+            McpChunk.embedding.cosine_distance(query_vector).label("distance"),
+        )
+        .where(McpChunk.embedding.is_not(None))
+    )
+    if condition_codes:
+        stmt = stmt.where(McpChunk.condition_code.in_(condition_codes))
+    stmt = stmt.order_by("distance").limit(_VEC_CANDIDATES)
+    vec_rows = (await db.execute(stmt)).all()
+    if not vec_rows:
+        return None
+    by_id: dict[str, McpChunk] = {str(c.id): c for c, _d in vec_rows}
+    vec_ranking = [str(c.id) for c, _d in vec_rows]
+
+    # --- lexical candidates (BM25 over the scoped pool) ---
+    if condition_codes:
+        pool = list(
+            (
+                await db.execute(
+                    select(McpChunk).where(
+                        McpChunk.condition_code.in_(condition_codes)
+                    )
+                )
+            ).scalars().all()
+        )
+    else:
+        pool = await _global_fallback_rows(db, message)
+    bm25_ranking: list[str] = []
+    if pool:
+        scores = bm25_scores(message, [c.content for c in pool])
+        ranked = sorted(
+            zip(pool, scores, strict=True),
+            key=lambda pair: (-pair[1], str(pair[0].id)),
+        )
+        bm25_ranking = [
+            str(c.id) for c, score in ranked[:_BM25_CANDIDATES] if score > 0
+        ]
+        for c in pool:
+            by_id.setdefault(str(c.id), c)
+
+    # --- reciprocal-rank fusion + section-intent rerank ---
+    fused = rrf_fuse([vec_ranking, bm25_ranking])
+    message_lower = message.lower()
+    scored = [
+        RetrievedChunk(
+            id=chunk_id,
+            condition_code=by_id[chunk_id].condition_code,
+            chunk_type=by_id[chunk_id].chunk_type,
+            content=by_id[chunk_id].content,
+            score=round(
+                score
+                + (_RRF_SECTION_BOOST
+                   if _section_boost(message_lower, by_id[chunk_id].chunk_type)
+                   else 0.0),
+                8,
+            ),
+        )
+        for chunk_id, score in fused.items()
+    ]
+    scored.sort(key=lambda c: (-c.score, c.condition_code, c.chunk_type, c.id))
+    return scored[:k]
+
+
 async def retrieve_chunks(
     db: AsyncSession,
     condition_codes: set[str],
@@ -175,9 +274,18 @@ async def retrieve_chunks(
 ) -> list[RetrievedChunk]:
     """Return up to k chunks scoped to the given conditions, ranked.
 
-    Empty scope falls back to a token-prefiltered global search so symptom
-    descriptions still retrieve educational content.
+    Vector ANN (hybrid with keyword/section signals) when an embedding service
+    is configured and chunks are embedded; deterministic keyword ranking
+    otherwise. Empty scope falls back to a token-prefiltered global search so
+    symptom descriptions still retrieve educational content.
     """
+    try:
+        hybrid = await _hybrid_rank(db, condition_codes, message, k)
+        if hybrid:
+            return hybrid
+    except Exception:  # noqa: BLE001 — hybrid path fails open to keyword
+        logger.warning("hybrid retrieval failed; keyword fallback", exc_info=True)
+
     if condition_codes:
         rows = list(
             (

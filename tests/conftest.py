@@ -73,6 +73,21 @@ async def client(sessionmaker) -> AsyncGenerator[AsyncClient, None]:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_settings(monkeypatch):
+    """Tests must never inherit a developer's .env (live providers, embedding
+    services). Force the offline defaults and clear the settings cache."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "fake")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "")
+    monkeypatch.setenv("EMBEDDING_MODEL", "")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_condition_index():
     """Isolate the process-level condition-registry cache between tests."""
     from app.knowledge.registry import reset_index_cache

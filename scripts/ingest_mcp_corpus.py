@@ -27,6 +27,7 @@ from app.knowledge.mcp_parser import build_chunks, parse_mcp_docx
 from app.knowledge.registry import reset_index_cache
 from app.models.chat import McpChunk
 from app.models.knowledge import ConditionRegistry
+from app.rag.embeddings import embed_texts, embeddings_configured
 
 # DRAFT — pending clinician sign-off: mapping of legacy engine condition codes
 # (used by risk_rules / pedigree seeds) to Master Condition Profile codes.
@@ -62,8 +63,9 @@ async def _deactivate_condition(db: AsyncSession, code: str) -> None:
 
 async def ingest_mcp_folder(db: AsyncSession, folder: Path) -> dict:
     files = sorted(folder.glob("*.docx"))
-    stats = {"files": len(files), "ingested": 0, "chunks": 0,
-             "duplicates": [], "duplicate_content": [], "errors": []}
+    stats = {"files": len(files), "ingested": 0, "chunks": 0, "embedded": 0,
+             "embed_failures": 0, "duplicates": [], "duplicate_content": [],
+             "errors": []}
     seen_codes: set[str] = set()
     # Same parsed CONTENT under two codes (the corpus ships 15 such pairs,
     # e.g. PCOS as both MC005 and MC535) → keep the first code, deactivate
@@ -122,22 +124,31 @@ async def ingest_mcp_folder(db: AsyncSession, folder: Path) -> dict:
         row.source_file = parsed.source_file
         row.active = True
 
-        # Replace chunks for this condition.
+        # Replace chunks for this condition, embedding when a service is
+        # configured (EMBEDDING_BASE_URL); otherwise embeddings stay NULL and
+        # retrieval uses the keyword path.
         await db.execute(
             delete(McpChunk).where(McpChunk.condition_code == parsed.code)
         )
-        for spec in chunks:
+        vectors: list | None = None
+        if embeddings_configured():
+            vectors = await embed_texts([spec["content"] for spec in chunks])
+            if vectors is None:
+                stats["embed_failures"] += 1
+        for i, spec in enumerate(chunks):
             db.add(
                 McpChunk(
                     condition_code=spec["condition_code"],
                     chunk_type=spec["chunk_type"],
                     content=spec["content"],
-                    embedding=None,
+                    embedding=vectors[i] if vectors else None,
                     chunk_metadata=spec["metadata"],
                 )
             )
         stats["ingested"] += 1
         stats["chunks"] += len(chunks)
+        if vectors:
+            stats["embedded"] += len(vectors)
         await db.flush()
 
     reset_index_cache()
@@ -155,7 +166,11 @@ async def _main(folder: str) -> None:
         f"MCP corpus: {stats['ingested']} conditions ingested, "
         f"{stats['chunks']} chunks, {len(stats['duplicates'])} duplicate files "
         f"skipped, {len(stats['duplicate_content'])} duplicate-content codes "
-        f"deactivated, {len(stats['errors'])} errors."
+        f"deactivated, {len(stats['errors'])} errors, "
+        f"{stats['embedded']} chunks embedded"
+        + (f" ({stats['embed_failures']} embed batch failures)"
+           if stats["embed_failures"] else "")
+        + "."
     )
     for dup in stats["duplicates"]:
         print(f"  duplicate: {dup}")
