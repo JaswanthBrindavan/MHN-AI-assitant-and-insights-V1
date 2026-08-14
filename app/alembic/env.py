@@ -10,7 +10,7 @@ from sqlalchemy import engine_from_config, pool
 from app.config import get_settings
 
 # Import the models package so every table registers on Base.metadata.
-from app.models import Base  # noqa: F401  (ensures metadata is populated)
+from app.models import EXTERNAL_TABLES, Base  # noqa: F401 (populates metadata)
 
 config = context.config
 
@@ -25,6 +25,13 @@ if not config.get_main_option("sqlalchemy.url"):
 target_metadata = Base.metadata
 
 
+def include_object(obj, name, type_, reflected, compare_to) -> bool:
+    """Never manage tables owned by the core app (Flyway) or another chain."""
+    if type_ == "table" and name in EXTERNAL_TABLES:
+        return False
+    return True
+
+
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
@@ -33,6 +40,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -49,6 +57,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()

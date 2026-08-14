@@ -39,18 +39,18 @@ def test_migration_upgrade_downgrade_upgrade():
 
     command.upgrade(cfg, "head")
     tables_after_upgrade = set(inspect(engine).get_table_names())
-    assert "users" in tables_after_upgrade
+    assert "pedigree_conditions" in tables_after_upgrade
     assert "mcp_chunks" in tables_after_upgrade
     assert "insight_artifacts" in tables_after_upgrade
 
     # Downgrade must remove every table the migration created.
     command.downgrade(cfg, "base")
     tables_after_downgrade = set(inspect(engine).get_table_names())
-    for t in ("users", "mcp_chunks", "insight_artifacts", "pedigree_conditions"):
+    for t in ("mcp_chunks", "insight_artifacts", "pedigree_conditions"):
         assert t not in tables_after_downgrade
 
     # And upgrade must be repeatable (proves downgrade left a clean slate).
     command.upgrade(cfg, "head")
     tables_second = set(inspect(engine).get_table_names())
-    assert "users" in tables_second
+    assert "pedigree_conditions" in tables_second
     engine.dispose()

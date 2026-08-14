@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 
@@ -17,6 +18,10 @@ def utcnow() -> datetime:
 # Portable embedding column: pgvector on PostgreSQL, JSON fallback on sqlite
 # (tests) where the embedding is always NULL anyway.
 EmbeddingType = Vector(1024).with_variant(sa.JSON(), "sqlite")
+
+# Portable JSON column: jsonb on PostgreSQL (matches the existing schema's
+# house style), plain JSON on sqlite for unit tests.
+JSONColumn = sa.JSON().with_variant(JSONB(), "postgresql")
 
 
 class UUIDPrimaryKey:

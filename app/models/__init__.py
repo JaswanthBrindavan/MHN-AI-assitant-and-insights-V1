@@ -17,6 +17,7 @@ from app.models.chat import (
     SymptomLog,
 )
 from app.models.core import (
+    EXTERNAL_TABLES,
     PEDIGREE_SLOTS,
     ConsentLedger,
     PedigreeCondition,
@@ -28,6 +29,7 @@ from app.models.rules import InsightArtifact, InsightTemplate, RiskRule
 
 __all__ = [
     "Base",
+    "EXTERNAL_TABLES",
     "PEDIGREE_SLOTS",
     "User",
     "ConsentLedger",

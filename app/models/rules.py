@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.models.common import CreatedAt, UUIDPrimaryKey
+from app.models.common import CreatedAt, JSONColumn, UUIDPrimaryKey
 
 
 class RiskRule(Base, UUIDPrimaryKey):
@@ -22,7 +22,7 @@ class RiskRule(Base, UUIDPrimaryKey):
 
     rule_key: Mapped[str] = mapped_column(sa.String(32), nullable=False, index=True)
     pattern_key: Mapped[str] = mapped_column(sa.String(48), nullable=False)
-    params: Mapped[dict | None] = mapped_column(sa.JSON, nullable=True)
+    params: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
     condition_code: Mapped[str] = mapped_column(sa.String(32), nullable=False)
     tier: Mapped[str] = mapped_column(sa.String(24), nullable=False)
     modifier: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
@@ -56,15 +56,13 @@ class InsightArtifact(Base, UUIDPrimaryKey, CreatedAt):
 
     __tablename__ = "insight_artifacts"
 
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        sa.ForeignKey("users.id"), nullable=False, index=True
-    )
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
     condition_code: Mapped[str] = mapped_column(sa.String(32), nullable=False)
     tier: Mapped[str] = mapped_column(sa.String(24), nullable=False)
     title: Mapped[str] = mapped_column(sa.String(200), nullable=False)
     body: Mapped[str] = mapped_column(sa.Text, nullable=False)
-    facts_used: Mapped[dict | None] = mapped_column(sa.JSON, nullable=True)
-    fired_rules: Mapped[list | None] = mapped_column(sa.JSON, nullable=True)
+    facts_used: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
+    fired_rules: Mapped[list | None] = mapped_column(JSONColumn, nullable=True)
     template_key: Mapped[str] = mapped_column(sa.String(48), nullable=False)
     template_version: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     pipeline_version: Mapped[int] = mapped_column(sa.Integer, nullable=False)
