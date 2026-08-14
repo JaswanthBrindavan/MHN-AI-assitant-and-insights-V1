@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from app.triage.red_flags import EMERGENCY, HIGH
 
 # Condition vocabulary used to detect diagnostic assertions (DRAFT).
+# Includes common Indian infectious/chronic disease names NOT covered by the
+# MCP corpus registry (e.g. dengue, malaria) plus bare lay forms of covered
+# ones ("typhoid" vs the registry's "Typhoid Enteric Fever").
 _CONDITION_LEXICON = (
     "diabetes",
     "diabetic",
@@ -28,6 +31,7 @@ _CONDITION_LEXICON = (
     "tumor",
     "heart attack",
     "heart disease",
+    "heart failure",
     "coronary artery disease",
     "coronary",
     "stroke",
@@ -35,14 +39,35 @@ _CONDITION_LEXICON = (
     "copd",
     "asthma",
     "kidney disease",
+    "dengue",
+    "malaria",
+    "typhoid",
+    "chikungunya",
+    "tuberculosis",
+    "pneumonia",
+    "jaundice",
+    "hepatitis",
+    "appendicitis",
+    "arthritis",
+    "anemia",
+    "anaemia",
+    "epilepsy",
+    "leukemia",
+    "leukaemia",
+    "lymphoma",
+    "hiv",
+    "meningitis",
+    "sepsis",
 )
 _COND_RE = "|".join(re.escape(c) for c in _CONDITION_LEXICON)
 
 # "you have/are/... <up to a few words> <condition>" — diagnostic assertion.
 # Requires a condition token nearby so benign "you have questions" is not flagged.
 _DIAG_PREFIX = (
-    r"\byou(?:'ve got| have| are| might have| may have| probably have| likely "
-    r"have| definitely have| are suffering from|'re suffering from)\b[^.?!]{0,40}?\b"
+    r"\byou(?:'ve got| are| are suffering from|'re suffering from"
+    r"|(?: most| almost)?"
+    r"(?: surely| certainly| clearly| obviously| probably| likely| definitely"
+    r"| may| might)? have)\b[^.?!]{0,40}?\b"
 )
 _DIAGNOSTIC_RE = re.compile(_DIAG_PREFIX + "(" + _COND_RE + r")\b", re.IGNORECASE)
 
@@ -51,9 +76,19 @@ _dynamic_cache: dict[int, re.Pattern[str]] = {}
 
 
 def _dynamic_diagnostic_re(extra_conditions: tuple[str, ...]) -> re.Pattern[str] | None:
-    """Compile (and cache) a diagnostic-assertion regex over registry names."""
+    """Compile (and cache) a diagnostic-assertion regex over registry names.
+
+    Trailing non-word characters are stripped from each name — a name ending
+    in ")" or "." would make the trailing ``\\b`` unmatchable.
+    """
     names = tuple(
-        sorted({c.strip().lower() for c in extra_conditions if len(c.strip()) >= 4})
+        sorted(
+            {
+                cleaned
+                for c in extra_conditions
+                if len(cleaned := re.sub(r"[^\w]+$", "", c.strip().lower())) >= 4
+            }
+        )
     )
     if not names:
         return None

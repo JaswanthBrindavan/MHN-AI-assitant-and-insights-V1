@@ -29,7 +29,7 @@ from app.triage.red_flags import (
     triage,
 )
 
-REGISTRY = ("Typhoid Enteric Fever", "Dengue")
+REGISTRY = ("Keratoconus", "Telogen Effluvium")
 
 
 # --------------------------------------------------------------------------- #
@@ -324,9 +324,9 @@ def test_probability_with_double_space_slips_through():
 # Validation: dynamic lexicon from registry condition names
 # --------------------------------------------------------------------------- #
 def test_dynamic_lexicon_blocks_registry_condition():
-    # "typhoid enteric fever" is NOT in the static condition lexicon: without
-    # the registry names this diagnostic assertion passes...
-    reply = "You might have typhoid enteric fever."
+    # "keratoconus" is NOT in the static condition lexicon: without the
+    # registry names this diagnostic assertion passes...
+    reply = "You might have keratoconus."
     assert validate_reply(reply, NONE).ok
     # ...and with them it is blocked.
     result = validate_reply(reply, NONE, REGISTRY)
@@ -337,24 +337,24 @@ def test_dynamic_lexicon_blocks_registry_condition():
 def test_probably_have_registry_condition_blocked():
     # "you probably have" is itself a banned substring, so this is blocked even
     # before the dynamic lexicon runs (substring check has precedence).
-    result = validate_reply("You probably have typhoid enteric fever.", NONE, REGISTRY)
+    result = validate_reply("You probably have keratoconus.", NONE, REGISTRY)
     assert not result.ok
     assert result.reason == "banned:you probably have"
 
 
 def test_dynamic_matching_is_case_insensitive():
-    result = validate_reply("you might have TYPHOID ENTERIC FEVER today.", NONE, REGISTRY)
+    result = validate_reply("you might have KERATOCONUS today.", NONE, REGISTRY)
     assert not result.ok
     assert result.reason == "banned:diagnostic-assertion"
 
 
 def test_dynamic_matches_whole_names_only():
-    # A partial registry name is not a match.
-    assert validate_reply("You might have typhoid.", NONE, REGISTRY).ok
+    # A partial registry name is not a match ("telogen" alone ≠ the alias).
+    assert validate_reply("You might have telogen issues.", NONE, REGISTRY).ok
 
 
 def test_dynamic_mention_without_assertion_passes():
-    reply = "Typhoid enteric fever is common in this region; a doctor can test for it."
+    reply = "Keratoconus is a corneal condition; an eye doctor can test for it."
     assert validate_reply(reply, NONE, REGISTRY).ok
 
 
@@ -367,7 +367,7 @@ def test_dynamic_short_names_ignored():
 
 
 def test_dynamic_empty_tuple_means_no_dynamic_check():
-    assert validate_reply("You might have typhoid enteric fever.", NONE, ()).ok
+    assert validate_reply("You might have keratoconus.", NONE, ()).ok
 
 
 def test_dynamic_regex_cached_and_normalized():

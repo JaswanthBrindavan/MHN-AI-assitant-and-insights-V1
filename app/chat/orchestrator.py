@@ -298,12 +298,12 @@ async def _dispatch(
             if risk == HIGH:
                 display = f"{HIGH_ESCALATION} {display}"
             # Extend the diagnostic-assertion lexicon with the clinically-
-            # validated registry names when the corpus is ingested (fail-open).
+            # validated registry names + aliases (paren-cleaned), fail-open.
             extra: tuple[str, ...] | None = None
             try:
                 index = await load_condition_index(db)
                 if index is not None:
-                    extra = tuple(e.display_name for e in index.entries)
+                    extra = index.diagnostic_terms()
             except Exception:  # noqa: BLE001
                 extra = None
             if not validate_reply(display, risk, extra).ok:

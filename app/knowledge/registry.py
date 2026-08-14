@@ -45,6 +45,7 @@ class ConditionIndex:
     def __init__(self, entries: list[RegistryEntry]):
         self.entries = entries
         self.by_code = {e.condition_code: e for e in entries}
+        self._diagnostic_terms: tuple[str, ...] | None = None
         self.engine_map: dict[str, str] = {}
         for e in entries:
             for legacy in e.engine_codes:
@@ -89,6 +90,28 @@ class ConditionIndex:
                         r"\b" + re.escape(kw_clean) + r"(?:e?s)?\b", re.IGNORECASE
                     )
                 self._patterns.append((pattern, e.condition_code))
+
+    def diagnostic_terms(self) -> tuple[str, ...]:
+        """Cleaned condition names for the output validator's dynamic lexicon.
+
+        Display names are emitted both verbatim-minus-parentheticals and as
+        their base form ("Heart Failure (HFrEF HFpEF)" → "heart failure"), and
+        aliases are included — so "you have pertussis" is caught even though
+        the display name is "Pertussis (whooping cough)".
+        """
+        if self._diagnostic_terms is None:
+            terms: set[str] = set()
+            for e in self.entries:
+                for raw in (e.display_name, *e.aliases):
+                    base = re.sub(r"\s*\([^)]*\)", "", raw).strip().lower()
+                    if len(base) >= 4:
+                        terms.add(base)
+                    for inner in re.findall(r"\(([^)]{2,40})\)", raw):
+                        inner_clean = inner.strip().lower()
+                        if len(inner_clean) >= 4 and "/" not in inner_clean:
+                            terms.add(inner_clean)
+            self._diagnostic_terms = tuple(sorted(terms))
+        return self._diagnostic_terms
 
     def match_message(self, message: str) -> set[str]:
         """Condition codes whose display name or an alias appears in the text."""

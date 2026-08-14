@@ -55,6 +55,25 @@ _TERM_TRAILING_NOISE = re.compile(
     r"\s+(?:tablets?|capsules?|syrup|medicine|medication|drug|please|now|today)$",
     re.IGNORECASE,
 )
+_TERM_LEADING_NOISE = re.compile(
+    r"^(?:my|the|this|that|a|an)\s+|^(?:medicines?|medications?|tablets?|drugs?)\s+",
+    re.IGNORECASE,
+)
+
+# Everyday words that follow drug-question phrasing but are NOT medicines.
+# Without this gate, "substitutes for sugar" would match the branded product
+# "Sugar Control ..." via the prefix lookup. DRAFT — pending clinician sign-off.
+NON_DRUG_TERMS: frozenset[str] = frozenset(
+    {
+        "sugar", "salt", "water", "milk", "honey", "ghee", "rice", "tea",
+        "coffee", "caffeine", "alcohol", "smoking", "tobacco", "gutka",
+        "exercise", "walking", "running", "yoga", "sleep", "stress",
+        "protein", "whey", "creatine", "food", "fasting", "dieting",
+        "chemotherapy", "radiation", "radiotherapy", "dialysis", "surgery",
+        "vaccination", "pregnancy", "breastfeeding", "menopause",
+        "sunlight", "screen time", "junk food", "fast food", "cold drinks",
+    }
+)
 
 
 def extract_drug_query_term(message: str) -> str | None:
@@ -63,12 +82,16 @@ def extract_drug_query_term(message: str) -> str | None:
         m = pattern.search(message)
         if m:
             term = m.group(1).strip().strip("?.!,").strip()
-            # Trim trailing filler words iteratively ("dolo 650 tablet please").
+            # Trim leading possessives/generics ("my medicine metformin") and
+            # trailing filler ("dolo 650 tablet please"), iteratively.
             while True:
-                trimmed = _TERM_TRAILING_NOISE.sub("", term).strip()
+                trimmed = _TERM_LEADING_NOISE.sub("", term).strip()
+                trimmed = _TERM_TRAILING_NOISE.sub("", trimmed).strip()
                 if trimmed == term:
                     break
                 term = trimmed
+            if term.lower() in NON_DRUG_TERMS:
+                return None
             return term or None
     return None
 
