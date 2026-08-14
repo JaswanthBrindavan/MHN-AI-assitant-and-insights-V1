@@ -86,3 +86,17 @@ class InsightOut(BaseModel):
     template_version: int
     pipeline_version: int
     content_hash: str
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    user_id: uuid.UUID | None = None
+    session_id: uuid.UUID | None = None
+
+
+class ChatResponse(BaseModel):
+    response_message: str
+    risk_level: str
+    recommended_action: str
+    provenance: dict
+    grounding: dict | None = None

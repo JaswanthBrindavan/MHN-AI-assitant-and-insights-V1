@@ -63,3 +63,8 @@ def route(message: str, triage_matched: bool) -> str:
     if _matches(text, _DATA_QUERY_TERMS):
         return DATA_QUERY
     return SYMPTOM_RAG
+
+
+def is_identity_question(message: str) -> bool:
+    """Distinguish an identity question from a plain greeting."""
+    return _matches(message.lower(), _IDENTITY_TERMS)

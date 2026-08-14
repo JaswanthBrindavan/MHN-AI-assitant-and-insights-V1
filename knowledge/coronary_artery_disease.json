@@ -1,0 +1,17 @@
+[
+  {
+    "condition_code": "CAD",
+    "chunk_type": "overview",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Coronary artery disease is a long-term condition affecting the blood vessels that supply the heart. Family history — especially early heart disease in a parent — is one of several factors clinicians consider."
+  },
+  {
+    "condition_code": "CAD",
+    "chunk_type": "warning_signs",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Chest pain or pressure, especially with arm pain, sweating, or breathlessness, can be a sign of a heart emergency. If that happens, seeking emergency care immediately is the safe course."
+  },
+  {
+    "condition_code": "CAD",
+    "chunk_type": "lifestyle",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Not smoking, staying active, and regular check-ups that may include cholesterol are commonly discussed for heart health. A clinician tailors advice to the individual."
+  }
+]

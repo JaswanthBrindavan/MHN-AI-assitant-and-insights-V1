@@ -1,0 +1,17 @@
+[
+  {
+    "condition_code": "T2DM",
+    "chunk_type": "overview",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Type 2 diabetes is a long-term condition in which blood sugar (glucose) tends to run higher than usual. Both family history and everyday habits can play a part in how common it is within a family."
+  },
+  {
+    "condition_code": "T2DM",
+    "chunk_type": "monitoring",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Clinicians often follow a blood test called HbA1c. In this synthetic example, an HbA1c above 48 mmol/mol is described as a level worth discussing with a doctor, who decides what any number means for a particular person."
+  },
+  {
+    "condition_code": "T2DM",
+    "chunk_type": "lifestyle",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Steady, everyday habits — a balanced plate, regular activity, and routine check-ups — are commonly suggested to support healthy blood sugar. Any changes are best planned with a clinician."
+  }
+]

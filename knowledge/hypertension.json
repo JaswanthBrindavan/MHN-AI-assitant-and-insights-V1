@@ -1,0 +1,17 @@
+[
+  {
+    "condition_code": "HTN",
+    "chunk_type": "overview",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] High blood pressure (hypertension) means the pressure in the blood vessels stays higher than usual over time. It often has no symptoms, which is why routine checks are commonly encouraged."
+  },
+  {
+    "condition_code": "HTN",
+    "chunk_type": "monitoring",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Blood pressure is written as two numbers in mmHg. In this synthetic example, readings above 140/90 mmHg on repeated checks are described as worth reviewing with a clinician, who interprets them in context."
+  },
+  {
+    "condition_code": "HTN",
+    "chunk_type": "lifestyle",
+    "content": "[SYNTHETIC EDUCATIONAL CONTENT — NOT REAL MEDICAL ADVICE] Reducing added salt, staying active, and regular monitoring are commonly suggested to support healthy blood pressure. A clinician can advise what fits a particular person."
+  }
+]

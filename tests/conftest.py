@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import (
@@ -60,3 +61,16 @@ async def client(sessionmaker) -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+
+
+@pytest.fixture
+def set_grounding_mode(monkeypatch):
+    """Set GROUNDING_MODE for a test and refresh the settings cache."""
+    from app.config import get_settings
+
+    def _set(mode: str) -> None:
+        monkeypatch.setenv("GROUNDING_MODE", mode)
+        get_settings.cache_clear()
+
+    yield _set
+    get_settings.cache_clear()
