@@ -40,13 +40,31 @@ _COND_RE = "|".join(re.escape(c) for c in _CONDITION_LEXICON)
 
 # "you have/are/... <up to a few words> <condition>" — diagnostic assertion.
 # Requires a condition token nearby so benign "you have questions" is not flagged.
-_DIAGNOSTIC_RE = re.compile(
+_DIAG_PREFIX = (
     r"\byou(?:'ve got| have| are| might have| may have| probably have| likely "
-    r"have| definitely have| are suffering from|'re suffering from)\b[^.?!]{0,40}?\b("
-    + _COND_RE
-    + r")\b",
-    re.IGNORECASE,
+    r"have| definitely have| are suffering from|'re suffering from)\b[^.?!]{0,40}?\b"
 )
+_DIAGNOSTIC_RE = re.compile(_DIAG_PREFIX + "(" + _COND_RE + r")\b", re.IGNORECASE)
+
+# Cache of dynamic diagnostic regexes built from registry condition names.
+_dynamic_cache: dict[int, re.Pattern[str]] = {}
+
+
+def _dynamic_diagnostic_re(extra_conditions: tuple[str, ...]) -> re.Pattern[str] | None:
+    """Compile (and cache) a diagnostic-assertion regex over registry names."""
+    names = tuple(
+        sorted({c.strip().lower() for c in extra_conditions if len(c.strip()) >= 4})
+    )
+    if not names:
+        return None
+    key = hash(names)
+    cached = _dynamic_cache.get(key)
+    if cached is not None:
+        return cached
+    alternation = "|".join(re.escape(n) for n in names)
+    pattern = re.compile(_DIAG_PREFIX + "(" + alternation + r")\b", re.IGNORECASE)
+    _dynamic_cache[key] = pattern
+    return pattern
 
 # Numeric disease probability, e.g. "80% chance you have ...".
 _PROBABILITY_RE = re.compile(
@@ -94,14 +112,24 @@ class ValidationResult:
     reason: str = ""
 
 
-def find_banned(text: str) -> str | None:
-    """Return the first banned pattern found, or None."""
+def find_banned(
+    text: str, extra_conditions: tuple[str, ...] | None = None
+) -> str | None:
+    """Return the first banned pattern found, or None.
+
+    ``extra_conditions`` extends the diagnostic-assertion lexicon with the
+    clinically-validated registry names (512 conditions) when available.
+    """
     low = text.lower()
     for phrase in _BANNED_SUBSTRINGS:
         if phrase in low:
             return phrase
     if _DIAGNOSTIC_RE.search(text):
         return "diagnostic-assertion"
+    if extra_conditions:
+        dynamic = _dynamic_diagnostic_re(extra_conditions)
+        if dynamic is not None and dynamic.search(text):
+            return "diagnostic-assertion"
     if _PROBABILITY_RE.search(text):
         return "numeric-disease-probability"
     return None
@@ -112,12 +140,16 @@ def has_escalation(text: str) -> bool:
     return any(m in low for m in _ESCALATION_MARKERS)
 
 
-def validate_reply(reply: str, risk_level: str) -> ValidationResult:
+def validate_reply(
+    reply: str,
+    risk_level: str,
+    extra_conditions: tuple[str, ...] | None = None,
+) -> ValidationResult:
     """Validate a generated reply against the safety rules."""
     if not reply or not reply.strip():
         return ValidationResult(False, "empty")
 
-    banned = find_banned(reply)
+    banned = find_banned(reply, extra_conditions)
     if banned is not None:
         return ValidationResult(False, f"banned:{banned}")
 

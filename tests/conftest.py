@@ -72,6 +72,16 @@ async def client(sessionmaker) -> AsyncGenerator[AsyncClient, None]:
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _reset_condition_index():
+    """Isolate the process-level condition-registry cache between tests."""
+    from app.knowledge.registry import reset_index_cache
+
+    reset_index_cache()
+    yield
+    reset_index_cache()
+
+
 @pytest.fixture
 def set_grounding_mode(monkeypatch):
     """Set GROUNDING_MODE for a test and refresh the settings cache."""

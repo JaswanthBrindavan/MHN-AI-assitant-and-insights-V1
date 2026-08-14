@@ -25,6 +25,7 @@ from app.models.core import (
     User,
 )
 from app.models.jobs import JobRun
+from app.models.knowledge import ConditionRegistry, DrugReference
 from app.models.rules import InsightArtifact, InsightTemplate, RiskRule
 
 __all__ = [
@@ -46,4 +47,6 @@ __all__ = [
     "McpChunk",
     "RagTurnReceipt",
     "JobRun",
+    "ConditionRegistry",
+    "DrugReference",
 ]

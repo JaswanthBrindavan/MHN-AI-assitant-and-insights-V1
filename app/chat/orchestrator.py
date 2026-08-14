@@ -40,11 +40,13 @@ from app.chat.router import (
 from app.chat.scope import is_off_topic
 from app.chat.validation import validate_reply
 from app.config import get_settings
+from app.drugs.service import build_drug_reply, extract_drug_query_term, find_drug
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
+from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
 from app.models.chat import RagTurnReceipt
 from app.rag.prompt import build_correction_directive, build_system_prompt
-from app.rag.retrieval import RetrievedChunk, retrieve_chunks, scope_codes
+from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
 from app.triage.red_flags import EMERGENCY, EMERGENCY_DIRECTIVE, HIGH, NONE, triage
 
 logger = logging.getLogger("davi.chat")
@@ -222,9 +224,38 @@ async def _dispatch(
             provenance={"path": "data_query"},
         )
 
-    # 5) Symptom / educational RAG path (risk is none or high here).
+    # 5) Drug-information question — deterministic reply from the validated
+    #    drug database (never the LLM). Only at NONE risk: any red-flag match
+    #    stays on the symptom path so escalation is preserved. Fail-open.
+    if risk == NONE:
+        try:
+            term = extract_drug_query_term(message)
+            if term:
+                drug = await find_drug(db, term)
+                if drug is not None:
+                    reply = build_drug_reply(drug)
+                    await _write_receipt(
+                        db, user_id=user_id, session_id=session_id,
+                        message=message, model_name=provider.model_name,
+                        retrieved=None, grounding=None,
+                        grounding_status="n/a", used_rag=False,
+                    )
+                    return ChatResult(
+                        response_message=reply,
+                        risk_level=risk,
+                        recommended_action="discuss_with_prescriber",
+                        provenance={
+                            "path": "drug_query",
+                            "drug": drug.name,
+                            "source": "drug_reference",
+                        },
+                    )
+        except Exception:  # noqa: BLE001 — drug lookup must never break a reply
+            logger.warning("drug lookup failed; continuing to RAG", exc_info=True)
+
+    # 6) Symptom / educational RAG path (risk is none or high here).
     patient_text, user_codes = await build_patient_context(db, user_id)
-    codes = scope_codes(message, user_codes)
+    codes = await resolve_scope(db, message, user_codes)
     chunks = await retrieve_chunks(db, codes, message)
     used_rag = bool(chunks)
 
@@ -233,7 +264,25 @@ async def _dispatch(
     compacted_json = json.dumps(compacted_summary) if compacted_summary else None
     system = build_system_prompt(chunks, patient_text, compacted_json)
 
-    answer = await provider.generate(system=system, user=message)
+    # A provider outage must degrade to the deterministic safe reply, never
+    # crash a patient-facing endpoint.
+    try:
+        answer = await provider.generate(system=system, user=message)
+    except Exception:  # noqa: BLE001 — fail open
+        logger.warning("LLM provider failed; safe reply", exc_info=True)
+        await _write_receipt(
+            db, user_id=user_id, session_id=session_id, message=message,
+            model_name=provider.model_name,
+            retrieved=[c.to_dict() for c in chunks] if chunks else None,
+            grounding=None, grounding_status="provider_error", used_rag=used_rag,
+        )
+        action = "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+        return ChatResult(
+            response_message=safe_reply(risk),
+            risk_level=risk,
+            recommended_action=action,
+            provenance={"path": "symptom_rag", "degraded": "provider_error"},
+        )
 
     report: GroundingReport | None = None
     grounding_status = "n/a"
@@ -248,7 +297,16 @@ async def _dispatch(
             display = strip_markers(grounded_answer)
             if risk == HIGH:
                 display = f"{HIGH_ESCALATION} {display}"
-            if not validate_reply(display, risk).ok:
+            # Extend the diagnostic-assertion lexicon with the clinically-
+            # validated registry names when the corpus is ingested (fail-open).
+            extra: tuple[str, ...] | None = None
+            try:
+                index = await load_condition_index(db)
+                if index is not None:
+                    extra = tuple(e.display_name for e in index.entries)
+            except Exception:  # noqa: BLE001
+                extra = None
+            if not validate_reply(display, risk, extra).ok:
                 display = safe_reply(risk)
     except Exception:  # noqa: BLE001 — safety layers fail open
         logger.warning("grounding/validation failed; safe reply", exc_info=True)

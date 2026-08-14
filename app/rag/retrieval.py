@@ -1,9 +1,11 @@
 """Condition-scoped retrieval over mcp_chunks.
 
 Scope = conditions named in the message ∪ the user's pedigree/insight
-conditions. Uses vector ANN when embeddings are present and an embedding
-service is configured; otherwise falls back to keyword (ILIKE / token overlap)
-search. Chunks are returned already ranked and capped at k.
+conditions. Scoping is data-driven from the clinically-validated condition
+registry (512 Master Condition Profiles) when ingested, falling back to the
+legacy static keyword map otherwise. Uses vector ANN when embeddings are
+present and an embedding service is configured; otherwise falls back to
+keyword (token-overlap) search. Chunks are returned ranked and capped at k.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.knowledge.registry import load_condition_index
 from app.models.chat import McpChunk
 
 # Message keyword → condition code (DRAFT — pending clinician sign-off).
@@ -57,7 +60,27 @@ def extract_condition_codes(message: str) -> set[str]:
 
 
 def scope_codes(message: str, user_condition_codes: set[str]) -> set[str]:
+    """Legacy static scoping (kept as the registry-less fallback)."""
     return extract_condition_codes(message) | set(user_condition_codes)
+
+
+async def resolve_scope(
+    db: AsyncSession, message: str, user_condition_codes: set[str]
+) -> set[str]:
+    """Data-driven scoping via the condition registry, static fallback.
+
+    Registry path: message keywords → MC codes; the user's legacy engine codes
+    (T2DM, HTN, CAD) are kept AND mapped to their MC equivalents so chunks
+    ingested under either coding are retrievable.
+    """
+    index = await load_condition_index(db)
+    if index is None:
+        return scope_codes(message, user_condition_codes)
+    codes = index.match_message(message)
+    codes |= index.map_engine_codes(set(user_condition_codes))
+    # Static extraction still contributes (covers legacy-coded chunks by name).
+    codes |= extract_condition_codes(message)
+    return codes
 
 
 def _tokens(text: str) -> list[str]:
