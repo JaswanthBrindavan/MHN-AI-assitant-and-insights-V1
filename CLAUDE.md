@@ -71,10 +71,20 @@ app/
                        code map T2DM→MC001 / HTN→MC051 / CAD→MC052, fail-open
   drugs/service.py     drug-info intent extraction + lookup over drug_reference
                        (250K medicines); deterministic validator-safe replies
-  llm/                 LLMProvider protocol, FakeProvider, OllamaProvider, factory
+  llm/                 LLMProvider protocol, FakeProvider, agnostic providers
+                       (OpenAI-compatible + Anthropic, pure httpx, env-selected)
+  coredata/service.py  reads over Flyway core tables (documents w/ family
+                       consent, vitals, lifestyle) + lifestyle_log tracker WRITE
+  models/coredata.py   partial external-table mappings (PG enums bound with
+                       create_type=False; sqlite variants for tests)
+  chat/abilities.py    PURE parsers: document/tracker/metric/summary/suggestion
+  chat/data_handlers.py deterministic ability handlers (run in SAVEPOINTs)
+  charts/svg.py        deterministic SVG line/bar charts (visual payload)
+  i18n/                language detection + localized safety replies (DRAFT)
   api/v1/              health, pedigree, insights, chat, schemas
+evals/scenarios.json   safety-invariant scenarios (scripts/run_evals.py + pytest)
 scripts/               seed_rules_templates, seed_synthetic, ingest_knowledge,
-                       ingest_mcp_corpus, ingest_drugs, nightly_sweep
+                       ingest_mcp_corpus, ingest_drugs, nightly_sweep, run_evals
 knowledge/             3 synthetic condition files (T2DM, HTN, CAD) — unit tests
                        only; the real corpus is ingested from the MCP docx folder
 tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
