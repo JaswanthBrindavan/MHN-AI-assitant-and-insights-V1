@@ -19,11 +19,18 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-prod"
     jwt_algorithm: str = "HS256"
 
-    # LLM
+    # LLM — model/cloud agnostic. llm_provider selects the adapter:
+    # fake | openai_compatible | anthropic | ollama (legacy alias).
     llm_provider: str = "fake"
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = ""
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.1"
     llm_prompt_version: str = "v1"
+    # Reply language: "auto" mirrors the user's language; or a fixed BCP-47ish
+    # code ("en", "hi").
+    reply_language: str = "auto"
 
     # Embeddings
     embedding_base_url: str = ""

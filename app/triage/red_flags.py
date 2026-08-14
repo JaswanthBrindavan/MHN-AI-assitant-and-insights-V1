@@ -50,6 +50,20 @@ EMERGENCY_PHRASES: tuple[str, ...] = (
     "one sided weakness",
     "weakness on one side",
     "weak on one side",
+    # --- Hindi / Hinglish (DRAFT — pending clinician + native-speaker review)
+    "behosh",            # unconscious
+    "बेहोश",
+    "saans nahi aa rahi",  # can't breathe
+    "saans nahin aa rahi",
+    "sans nahi aa rahi",
+    "साँस नहीं आ रही",
+    "सांस नहीं आ रही",
+    "daura pada",        # seizure
+    "mirgi ka daura",
+    "दौरा पड़ा",
+    "मिर्गी",
+    "nabz nahi",         # no pulse
+    "नब्ज़ नहीं",
 )
 
 HIGH_PHRASES: tuple[str, ...] = (
@@ -68,6 +82,15 @@ HIGH_PHRASES: tuple[str, ...] = (
     "blood in stool",
     "blood in my stool",
     "coughing up blood",
+    # --- Hindi / Hinglish (DRAFT — pending clinician + native-speaker review)
+    "seene mein tez dard",   # severe chest pain
+    "seene me tez dard",
+    "सीने में तेज़ दर्द",
+    "khoon ki ulti",         # vomiting blood
+    "khoon ki ultee",
+    "खून की उल्टी",
+    "saans lene mein bahut takleef",  # severe breathing difficulty
+    "सांस लेने में बहुत तकलीफ",
 )
 
 # ACS co-occurrence: chest pain PLUS an associated feature escalates to
@@ -79,6 +102,10 @@ CHEST_PAIN_PHRASES: tuple[str, ...] = (
     "pressure in my chest",
     "tightness in my chest",
     "pain in my chest",
+    # Hindi / Hinglish (DRAFT)
+    "seene mein dard",
+    "seene me dard",
+    "सीने में दर्द",
 )
 ACS_ASSOCIATED_PHRASES: tuple[str, ...] = (
     "arm pain",
@@ -90,6 +117,11 @@ ACS_ASSOCIATED_PHRASES: tuple[str, ...] = (
     "short of breath",
     "breathless",
     "nausea",
+    # Hindi / Hinglish (DRAFT)
+    "paseena",
+    "पसीना",
+    "saans phool",
+    "सांस फूल",
 )
 
 # The fixed directive that leads every EMERGENCY response.

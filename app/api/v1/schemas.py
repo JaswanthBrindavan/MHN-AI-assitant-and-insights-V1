@@ -101,3 +101,9 @@ class ChatResponse(BaseModel):
     provenance: dict
     grounding: dict | None = None
     session_id: uuid.UUID | None = None
+    # Structured citations for cited sources ([n]/[P]/[GK] markers).
+    citations: list[dict] | None = None
+    # Optional visual: declarative chart spec + self-contained SVG.
+    visual: dict | None = None
+    # Detected user language (BCP-47ish; "hi-Latn" = romanized Hindi).
+    language: str = "en"

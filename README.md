@@ -148,12 +148,44 @@ returns **403** on mismatch (object-level authorization). When
 | `ALEMBIC_DATABASE_URL` | `postgresql+psycopg2://…` | Sync engine for migrations |
 | `AUTH_ENABLED` | `false` | Enable HS256 JWT auth (`sub` = user UUID) |
 | `JWT_SECRET` / `JWT_ALGORITHM` | `change-me` / `HS256` | JWT signing |
-| `LLM_PROVIDER` | `fake` | `fake` \| `ollama` |
-| `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | `http://localhost:11434/v1` / `llama3.1` | Ollama (OpenAI-compatible `/v1`) |
+| `LLM_PROVIDER` | `fake` | `fake` \| `openai_compatible` \| `anthropic` \| `ollama` — model/cloud agnostic |
+| `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | *(empty)* | Any OpenAI-compatible endpoint (OpenAI, Groq, Together, vLLM, LM Studio…) or the Anthropic API |
+| `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | `http://localhost:11434/v1` / `llama3.1` | Legacy Ollama alias (OpenAI-compatible `/v1`) |
+| `REPLY_LANGUAGE` | `auto` | `auto` mirrors the user's detected language |
 | `LLM_PROMPT_VERSION` | `v1` | Recorded on receipts |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIM` | *(empty)* / *(empty)* / `1024` | Optional embeddings; unset → NULL embeddings + keyword retrieval |
 | `GROUNDING_MODE` | `log` | `off` \| `log` \| `enforce` |
 | `PIPELINE_VERSION` | `1` | Stamped onto artifacts |
+
+## Chat data-abilities (deterministic, no LLM)
+
+The chat understands and answers these directly from the shared MHN database:
+
+- **Documents** — "find my latest blood report", "when was my father's last
+  test done?" (family documents respect accepted connections, file-share
+  consent, and privacy flags)
+- **Tracker adds** — "I had 3 cups of coffee today", "I smoked 2 cigs
+  yesterday" → written to `lifestyle_log` with backdating
+- **Metric pulls** — "what's my latest HbA1c / blood pressure / weight" from
+  vitals, body measurements, and extracted lab-report content
+- **Health summaries** — "health summary for the week/month/year" with a
+  rendered SVG chart (`visual` payload: declarative spec + self-contained SVG)
+- **MCP suggestions** — "tips for my diabetes" served verbatim from the
+  clinically validated condition profiles, with structured `citations`
+
+Multilingual: language is detected per message (Indic scripts + romanized
+Hindi); deterministic safety replies are localized (DRAFT), red-flag triage
+includes Hindi/Hinglish phrases, and the LLM is instructed to reply in the
+user's language. RAG answers return structured `citations` mapped from the
+grounding markers.
+
+## Eval harness
+
+```bash
+python -m scripts.run_evals          # 15 safety scenarios through the full pipeline
+```
+
+Scenario specs live in `evals/scenarios.json` (also run as part of pytest).
 
 ## Safety rules (enforced in code)
 

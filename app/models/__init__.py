@@ -24,6 +24,22 @@ from app.models.core import (
     PedigreeMember,
     User,
 )
+
+# Core-app partial mappings (external tables; excluded from our migrations).
+from app.models.coredata import (
+    BodyMeasurement,
+    FamilyConnect,
+    FamilyFileAccess,
+    LifestyleLog,
+    ManualTracking,
+    Prescription,
+    Relation,
+    Report,
+    ScanImaging,
+    TraditionalHealthParameter,
+    Vaccination,
+    VitalReading,
+)
 from app.models.jobs import JobRun
 from app.models.knowledge import ConditionRegistry, DrugReference
 from app.models.rules import InsightArtifact, InsightTemplate, RiskRule
@@ -49,4 +65,16 @@ __all__ = [
     "JobRun",
     "ConditionRegistry",
     "DrugReference",
+    "Report",
+    "ScanImaging",
+    "Prescription",
+    "Vaccination",
+    "VitalReading",
+    "BodyMeasurement",
+    "LifestyleLog",
+    "ManualTracking",
+    "FamilyConnect",
+    "Relation",
+    "FamilyFileAccess",
+    "TraditionalHealthParameter",
 ]

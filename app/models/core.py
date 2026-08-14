@@ -31,8 +31,11 @@ PEDIGREE_SLOTS = (
 
 # Tables that already exist in the shared database and are managed by another
 # tool (Flyway core / the existing AI Alembic chain). Our migrations must never
-# create or drop these; the Alembic env excludes them.
-EXTERNAL_TABLES = {"user"}
+# create or drop these; the Alembic env excludes them. Extended by the
+# coredata partial mappings (documents, vitals, lifestyle, family, THP).
+from app.models.coredata import COREDATA_TABLES  # noqa: E402
+
+EXTERNAL_TABLES = {"user"} | COREDATA_TABLES
 
 
 class User(Base):

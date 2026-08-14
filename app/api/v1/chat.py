@@ -44,4 +44,7 @@ async def chat(
         provenance=result.provenance,
         grounding=result.grounding,
         session_id=result.session_id,
+        citations=result.citations,
+        visual=result.visual,
+        language=result.language,
     )

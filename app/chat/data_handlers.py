@@ -1,0 +1,426 @@
+"""Handlers for the deterministic chat data-abilities.
+
+Each returns a plain dict {reply, action, provenance, visual?} or None (not
+applicable / nothing found → caller falls through). All replies are
+validator-safe and never diagnostic; tracker writes always confirm what was
+recorded. Everything here is deterministic — no LLM.
+"""
+
+from __future__ import annotations
+
+import re
+import uuid
+from datetime import timedelta
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.charts.svg import chart_payload
+from app.chat.abilities import (
+    DocumentQuery,
+    MetricQuery,
+    SummaryQuery,
+    TrackerAdd,
+    parse_document_query,
+    parse_metric_query,
+    parse_suggestion_query,
+    parse_summary_query,
+    parse_tracker_add,
+)
+from app.coredata.service import (
+    add_lifestyle_log,
+    latest_body_measurement,
+    latest_documents,
+    latest_vital,
+    lifestyle_totals,
+    resolve_family_member,
+    vital_series,
+    window_start,
+)
+from app.knowledge.registry import load_condition_index
+from app.models.chat import McpChunk
+from app.models.common import utcnow
+from app.models.coredata import Report
+from app.rag.retrieval import resolve_scope
+
+_NOT_MEDICAL_ADVICE = (
+    "This is your own recorded data, not medical advice — please discuss any "
+    "concerns with your doctor."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Documents
+# --------------------------------------------------------------------------- #
+async def handle_document_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    query: DocumentQuery | None = parse_document_query(message)
+    if query is None:
+        return None
+
+    owner_id, owner_label, include_private = user_id, "you", True
+    if query.relation:
+        member = await resolve_family_member(db, user_id, query.relation)
+        if member is None:
+            return {
+                "reply": (
+                    f"I couldn't find a connected family member matching "
+                    f"'{query.relation}' with document sharing enabled. They "
+                    "may need to accept the family connection or turn on file "
+                    "sharing in the app."
+                ),
+                "action": "none",
+                "provenance": {"path": "document_query", "relation": query.relation,
+                               "resolved": False},
+            }
+        owner_id, owner_label, include_private = member, f"your {query.relation}", False
+
+    hits = await latest_documents(
+        db, owner_id, list(query.kinds),
+        owner_label=owner_label, include_private=include_private,
+    )
+    if not hits:
+        kinds = ", ".join(query.kinds)
+        return {
+            "reply": (
+                f"I couldn't find any {kinds} documents for {owner_label} in "
+                "the records I can access."
+            ),
+            "action": "none",
+            "provenance": {"path": "document_query", "kinds": list(query.kinds),
+                           "found": 0},
+        }
+
+    lines = []
+    for h in hits:
+        when = h.created_at.strftime("%d %b %Y") if h.created_at else "date unknown"
+        name = h.filepath.rsplit("/", 1)[-1]
+        lines.append(f"• {h.kind} — {name} ({when})")
+    lead = (
+        f"Here {'is' if len(hits) == 1 else 'are'} the most recent "
+        f"{'document' if len(hits) == 1 else 'documents'} for {owner_label}:"
+    )
+    if query.wants_date and hits[0].created_at:
+        lead = (
+            f"The most recent {hits[0].kind} for {owner_label} is from "
+            f"{hits[0].created_at.strftime('%d %b %Y')}."
+        )
+    return {
+        "reply": lead + "\n" + "\n".join(lines),
+        "action": "open_documents",
+        "provenance": {
+            "path": "document_query",
+            "kinds": list(query.kinds),
+            "found": len(hits),
+            "documents": [
+                {"kind": h.kind, "id": h.doc_id, "created_at":
+                 h.created_at.isoformat() if h.created_at else None}
+                for h in hits
+            ],
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Tracker adds
+# --------------------------------------------------------------------------- #
+async def handle_tracker_add(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    add: TrackerAdd | None = parse_tracker_add(message)
+    if add is None:
+        return None
+    logged_at = utcnow() - timedelta(days=add.day_offset)
+    row = await add_lifestyle_log(
+        db, user_id, add.log_type, add.quantity, add.unit, logged_at
+    )
+    day = {0: "today", 1: "yesterday", 2: "the day before yesterday"}.get(
+        add.day_offset, f"{add.day_offset} days ago"
+    )
+    qty = f"{add.quantity:g}"
+    unit = add.unit if add.quantity == 1 else add.unit + (
+        "" if add.unit.endswith("s") else "s"
+    )
+    note = ""
+    if add.log_type == "smoking":
+        note = (
+            " If you're thinking about cutting down, your doctor can share "
+            "options that make quitting easier."
+        )
+    elif add.log_type == "alcohol":
+        note = " Tracked as an alcohol entry."
+    return {
+        "reply": (
+            f"Logged: {qty} {unit} of {add.log_type} for {day}. "
+            f"You can see this in your lifestyle tracker.{note}"
+        ),
+        "action": "logged",
+        "provenance": {
+            "path": "tracker_add",
+            "log_type": add.log_type,
+            "quantity": add.quantity,
+            "unit": add.unit,
+            "day_offset": add.day_offset,
+            "log_id": row.id,
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Metric pulls
+# --------------------------------------------------------------------------- #
+def _search_content_for_param(content, terms: tuple[str, ...]):
+    """Recursively search a report's extracted JSON for a named parameter."""
+    if isinstance(content, dict):
+        name = str(
+            content.get("name") or content.get("parameter") or content.get("test")
+            or ""
+        ).lower()
+        if name and any(t in name for t in terms):
+            for value_key in ("value", "result", "reading"):
+                raw = content.get(value_key)
+                if raw is not None:
+                    m = re.search(r"-?\d+(?:\.\d+)?", str(raw))
+                    if m:
+                        return float(m.group()), content.get("unit")
+        for v in content.values():
+            found = _search_content_for_param(v, terms)
+            if found:
+                return found
+    elif isinstance(content, list):
+        for item in content:
+            found = _search_content_for_param(item, terms)
+            if found:
+                return found
+    return None
+
+
+async def _latest_report_param(
+    db: AsyncSession, user_id: uuid.UUID, terms: tuple[str, ...]
+):
+    rows = (
+        await db.execute(
+            select(Report)
+            .where(Report.user_id == user_id, Report.content.is_not(None))
+            .order_by(Report.created_at.desc().nulls_last(), Report.id.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    for r in rows:
+        found = _search_content_for_param(r.content, terms)
+        if found:
+            value, unit = found
+            return value, unit, r.created_at
+    return None
+
+
+async def handle_metric_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    from app.chat.abilities import METRIC_REGISTRY
+
+    query: MetricQuery | None = parse_metric_query(message)
+    if query is None:
+        return None
+    spec = METRIC_REGISTRY[query.metric]
+    display, unit = spec["display"], spec.get("unit")
+
+    visual = None
+    if spec["source"] == "vital":
+        point = await latest_vital(db, user_id, spec["vital_type"])
+        if point is None:
+            return _metric_not_found(display)
+        if point.secondary is not None:
+            value_text = f"{point.value:g}/{point.secondary:g} {point.unit or unit}"
+        else:
+            value_text = f"{point.value:g} {point.unit or unit}"
+        when = point.at.strftime("%d %b %Y")
+        if query.wants_trend:
+            series = await vital_series(
+                db, user_id, spec["vital_type"], window_start("month")
+            )
+            if len(series) >= 2:
+                visual = chart_payload(
+                    "line",
+                    f"{display} — last 30 days",
+                    [p.at.strftime("%d %b") for p in series],
+                    [p.value for p in series],
+                    unit=unit,
+                )
+    elif spec["source"] == "body":
+        point = await latest_body_measurement(db, user_id, spec["body_type"])
+        if point is None:
+            return _metric_not_found(display)
+        value_text = f"{point.value:g} {unit}"
+        when = point.at.strftime("%d %b %Y")
+    else:  # report_param (e.g. HbA1c from extracted lab reports)
+        found = await _latest_report_param(db, user_id, spec["param_terms"])
+        if found is None:
+            return _metric_not_found(display)
+        value, found_unit, created = found
+        value_text = f"{value:g} {found_unit or unit}"
+        when = created.strftime("%d %b %Y") if created else "date unknown"
+
+    return {
+        "reply": (
+            f"Your most recent {display} on record is {value_text} "
+            f"(recorded {when}). {_NOT_MEDICAL_ADVICE}"
+        ),
+        "action": "review_with_clinician",
+        "provenance": {"path": "metric_query", "metric": query.metric},
+        "visual": visual,
+    }
+
+
+def _metric_not_found(display: str) -> dict:
+    return {
+        "reply": (
+            f"I couldn't find any {display} readings in your records yet. Once "
+            "you log one (or a report with it is uploaded), I can pull it up "
+            "here."
+        ),
+        "action": "none",
+        "provenance": {"path": "metric_query", "found": False},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Health summary
+# --------------------------------------------------------------------------- #
+async def handle_summary_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    query: SummaryQuery | None = parse_summary_query(message)
+    if query is None:
+        return None
+    since = window_start(query.period)
+    totals = await lifestyle_totals(db, user_id, since)
+
+    lines: list[str] = []
+    label = {"week": "past week", "month": "past month", "year": "past year"}[
+        query.period
+    ]
+    if totals:
+        parts = [f"{qty:g} {ltype}" for ltype, qty in sorted(totals.items())]
+        lines.append("Lifestyle entries: " + ", ".join(parts) + ".")
+
+    metrics_shown: list[str] = []
+    for vital_type, display in (
+        ("blood_pressure", "blood pressure"),
+        ("blood_sugar", "blood sugar"),
+        ("heart_rate", "heart rate"),
+    ):
+        point = await latest_vital(db, user_id, vital_type)
+        if point and point.at >= since:
+            value = (
+                f"{point.value:g}/{point.secondary:g}"
+                if point.secondary is not None
+                else f"{point.value:g}"
+            )
+            metrics_shown.append(f"latest {display} {value} {point.unit or ''}".strip())
+    if metrics_shown:
+        lines.append("Vitals: " + "; ".join(metrics_shown) + ".")
+
+    if not lines:
+        return {
+            "reply": (
+                f"I don't have any logged data for the {label} yet. Log vitals "
+                "or lifestyle entries and I can build your summary."
+            ),
+            "action": "none",
+            "provenance": {"path": "health_summary", "period": query.period,
+                           "empty": True},
+        }
+
+    visual = None
+    if totals:
+        labels = sorted(totals)
+        visual = chart_payload(
+            "bar",
+            f"Lifestyle totals — {label}",
+            labels,
+            [totals[k] for k in labels],
+        )
+    return {
+        "reply": (
+            f"Here's your health summary for the {label}:\n"
+            + "\n".join(f"• {ln}" for ln in lines)
+            + f"\n{_NOT_MEDICAL_ADVICE}"
+        ),
+        "action": "review_with_clinician",
+        "provenance": {"path": "health_summary", "period": query.period},
+        "visual": visual,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# MCP suggestions (clinically validated corpus, served verbatim)
+# --------------------------------------------------------------------------- #
+_SUGGESTION_LEAD = (
+    "Here are relevant points from our clinically reviewed condition profiles"
+)
+
+
+async def handle_suggestion_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str, user_codes: set[str]
+) -> dict | None:
+    if parse_suggestion_query(message) is None:
+        return None
+    codes = await resolve_scope(db, message, user_codes)
+    index = await load_condition_index(db)
+    if not codes or index is None:
+        return None  # fall through to the RAG path
+
+    rows = (
+        await db.execute(
+            select(McpChunk)
+            .where(
+                McpChunk.condition_code.in_(codes),
+                McpChunk.chunk_type.like("suggestions%"),
+            )
+            .order_by(McpChunk.condition_code, McpChunk.chunk_type)
+            .limit(4)
+        )
+    ).scalars().all()
+    if not rows:
+        return None
+
+    display_names = sorted(
+        {
+            index.by_code[r.condition_code].display_name
+            for r in rows
+            if r.condition_code in index.by_code
+        }
+    )
+    body_parts: list[str] = []
+    for r in rows[:2]:  # keep the reply readable; citations carry the rest
+        text = r.content.split("\n", 1)[1] if "\n" in r.content else r.content
+        body_parts.append(text[:700])
+    reply = (
+        f"{_SUGGESTION_LEAD} ({', '.join(display_names)}):\n\n"
+        + "\n\n".join(body_parts)
+        + "\n\nThese are general, educational suggestions from the validated "
+        "profiles — not a personal prescription. Your doctor can tailor them "
+        "to you."
+    )
+    return {
+        "reply": reply,
+        "action": "discuss_with_clinician",
+        "provenance": {
+            "path": "mcp_suggestions",
+            "conditions": sorted({r.condition_code for r in rows}),
+            "chunks": [str(r.id) for r in rows],
+        },
+        "citations": [
+            {
+                "source": "mcp_master_profile",
+                "condition_code": r.condition_code,
+                "section": r.chunk_type,
+                "display_name": index.by_code[r.condition_code].display_name
+                if r.condition_code in index.by_code
+                else r.condition_code,
+            }
+            for r in rows
+        ],
+    }

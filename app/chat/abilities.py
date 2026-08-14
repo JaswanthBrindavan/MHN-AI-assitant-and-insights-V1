@@ -1,0 +1,330 @@
+"""Deterministic parsers for chat data-abilities (pure, stdlib-only).
+
+Each parser inspects the message and returns a typed request or None:
+  * document queries — "find my latest blood report", "when was my father's
+    last test done"
+  * tracker adds — "i had 3 cups of coffee today", "I smoked 2 cigs yesterday"
+  * metric pulls — "what's my latest hba1c", "my last blood pressure"
+  * health summaries — "health summary for the week / this month / yearly"
+  * suggestion requests — "lifestyle tips for my diabetes"
+
+No LLM, no DB — the handlers do the I/O.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+# --------------------------------------------------------------------------- #
+# Shared vocab
+# --------------------------------------------------------------------------- #
+RELATION_TERMS = (
+    "father", "mother", "dad", "mom", "mum", "papa", "amma", "appa",
+    "husband", "wife", "brother", "sister", "son", "daughter",
+    "grandfather", "grandmother", "grandpa", "grandma",
+)
+_RELATION_CANON = {
+    "dad": "father", "papa": "father", "appa": "father",
+    "mom": "mother", "mum": "mother", "amma": "mother",
+    "grandpa": "grandfather", "grandma": "grandmother",
+}
+
+_NUMBER_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "half": 0.5,
+    "couple of": 2, "a couple of": 2,
+}
+
+
+def _parse_quantity(raw: str) -> float | None:
+    raw = raw.strip().lower()
+    if raw in _NUMBER_WORDS:
+        return float(_NUMBER_WORDS[raw])
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def find_relation(message: str) -> str | None:
+    """Return the canonical relation named with a possessive ("my father's")."""
+    low = message.lower()
+    for term in RELATION_TERMS:
+        if re.search(rf"\bmy {term}\b", low):
+            return _RELATION_CANON.get(term, term)
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Document queries
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class DocumentQuery:
+    kinds: tuple[str, ...]
+    relation: str | None = None
+    wants_date: bool = False
+
+
+_DOC_KIND_TERMS: tuple[tuple[str, str], ...] = (
+    (r"blood report|lab report|blood test|lab test|test report|report", "report"),
+    (r"scan|x-?ray|mri|ct|ultrasound|imaging", "scan"),
+    (r"prescription", "prescription"),
+    (r"vaccination|vaccine|immuni[sz]ation", "vaccination"),
+    (r"\btest\b|check-?up|checkup", "report"),
+)
+
+_DOC_INTENT_RE = re.compile(
+    r"\b(?:find|show|get|pull( up)?|fetch|where is|when was|what was|see|open|"
+    r"do i have|latest|last|recent|most recent)\b",
+    re.IGNORECASE,
+)
+_DOC_DATE_RE = re.compile(r"\bwhen\b|\bdate\b|\bhow long ago\b", re.IGNORECASE)
+
+
+def parse_document_query(message: str) -> DocumentQuery | None:
+    low = message.lower()
+    if not _DOC_INTENT_RE.search(low):
+        return None
+    kinds: list[str] = []
+    for pattern, kind in _DOC_KIND_TERMS:
+        if re.search(rf"\b(?:{pattern})\b", low) and kind not in kinds:
+            kinds.append(kind)
+    if not kinds:
+        return None
+    # "my report" (self) or "my father's report" (relative).
+    relation = find_relation(message)
+    if relation is None and not re.search(r"\bmy\b|\bour\b", low):
+        return None
+    return DocumentQuery(
+        kinds=tuple(kinds),
+        relation=relation,
+        wants_date=bool(_DOC_DATE_RE.search(low)),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Tracker adds
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class TrackerAdd:
+    log_type: str
+    quantity: float
+    unit: str
+    day_offset: int = 0  # 0 = today, 1 = yesterday
+
+
+_QTY = r"(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|half)"
+_TRACKER_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (
+        re.compile(
+            rf"\b(?:had|drank|drink|took|finished)\s+{_QTY}\s*"
+            r"(cups?|glass(?:es)?|mugs?|shots?|pegs?|bottles?|cans?|litres?|liters?|ml)?\s*"
+            r"(?:of\s+)?(coffee|tea|chai|water|beer|wine|whisky|whiskey|rum|vodka|alcohol|drinks?)\b",
+            re.IGNORECASE,
+        ),
+        "qty_unit_kind",
+        "",
+    ),
+    (
+        re.compile(
+            rf"\bsmoked\s+{_QTY}\s*(cigs?|cigarettes?|beedis?|bidis?|smokes?)?\b",
+            re.IGNORECASE,
+        ),
+        "smoke",
+        "smoking",
+    ),
+)
+
+_KIND_TO_LOG_TYPE = {
+    "coffee": "coffee",
+    "tea": "tea",
+    "chai": "tea",
+    "water": "water",
+    "beer": "alcohol",
+    "wine": "alcohol",
+    "whisky": "alcohol",
+    "whiskey": "alcohol",
+    "rum": "alcohol",
+    "vodka": "alcohol",
+    "alcohol": "alcohol",
+    "drink": "alcohol",
+    "drinks": "alcohol",
+}
+_UNIT_CANON = {
+    "cup": "cup", "cups": "cup", "mug": "cup", "mugs": "cup",
+    "glass": "glass", "glasses": "glass",
+    "shot": "shot", "shots": "shot", "peg": "peg", "pegs": "peg",
+    "bottle": "bottle", "bottles": "bottle", "can": "can", "cans": "can",
+    "litre": "litre", "litres": "litre", "liter": "litre", "liters": "litre",
+    "ml": "ml",
+    "cig": "cigarette", "cigs": "cigarette",
+    "cigarette": "cigarette", "cigarettes": "cigarette",
+    "beedi": "beedi", "beedis": "beedi", "bidi": "beedi", "bidis": "beedi",
+    "smoke": "cigarette", "smokes": "cigarette",
+}
+
+
+def _day_offset(message: str) -> int:
+    low = message.lower()
+    if "day before yesterday" in low:
+        return 2
+    if "yesterday" in low or "last night" in low:
+        return 1
+    return 0
+
+
+def parse_tracker_add(message: str) -> TrackerAdd | None:
+    for pattern, mode, fixed_type in _TRACKER_PATTERNS:
+        m = pattern.search(message)
+        if not m:
+            continue
+        qty = _parse_quantity(m.group(1))
+        if qty is None or qty <= 0 or qty > 100:
+            return None
+        if mode == "smoke":
+            unit = _UNIT_CANON.get((m.group(2) or "cigarettes").lower(), "cigarette")
+            return TrackerAdd(
+                log_type=fixed_type, quantity=qty, unit=unit,
+                day_offset=_day_offset(message),
+            )
+        unit_raw = (m.group(2) or "").lower()
+        kind = m.group(3).lower()
+        log_type = _KIND_TO_LOG_TYPE.get(kind)
+        if log_type is None:
+            return None
+        default_unit = {"water": "glass", "alcohol": "drink"}.get(log_type, "cup")
+        return TrackerAdd(
+            log_type=log_type,
+            quantity=qty,
+            unit=_UNIT_CANON.get(unit_raw, default_unit),
+            day_offset=_day_offset(message),
+        )
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Metric pulls
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class MetricQuery:
+    metric: str  # key in METRIC_REGISTRY
+    wants_trend: bool = False
+
+
+# metric key → (source, source-args, display name, unit hint)
+METRIC_REGISTRY: dict[str, dict] = {
+    "blood_sugar": {
+        "source": "vital", "vital_type": "blood_sugar",
+        "display": "blood sugar", "unit": "mg/dL",
+    },
+    "blood_pressure": {
+        "source": "vital", "vital_type": "blood_pressure",
+        "display": "blood pressure", "unit": "mmHg",
+    },
+    "heart_rate": {
+        "source": "vital", "vital_type": "heart_rate",
+        "display": "heart rate", "unit": "bpm",
+    },
+    "spo2": {
+        "source": "vital", "vital_type": "spo2",
+        "display": "oxygen saturation (SpO2)", "unit": "%",
+    },
+    "weight": {"source": "body", "body_type": "weight", "display": "weight", "unit": "kg"},
+    "bmi": {"source": "body", "body_type": "bmi", "display": "BMI", "unit": "kg/m²"},
+    "hba1c": {
+        "source": "report_param", "param_terms": ("hba1c", "glycated hemoglobin",
+                                                  "glycated haemoglobin"),
+        "display": "HbA1c", "unit": "%",
+    },
+}
+
+_METRIC_TERMS: tuple[tuple[str, str], ...] = (
+    (r"hba1c|hb a1c|a1c|glycated h(?:a)?emoglobin", "hba1c"),
+    (r"blood pressure|\bbp\b", "blood_pressure"),
+    (r"blood sugar|sugar (?:level|reading)|glucose|fasting sugar", "blood_sugar"),
+    (r"heart rate|pulse", "heart_rate"),
+    (r"spo2|oxygen (?:level|saturation)", "spo2"),
+    (r"\bweight\b", "weight"),
+    (r"\bbmi\b", "bmi"),
+)
+_METRIC_INTENT_RE = re.compile(
+    r"\b(?:what(?:'s| is| was| are)|latest|last|recent|current|my|show|check|"
+    r"how (?:is|was))\b",
+    re.IGNORECASE,
+)
+_TREND_RE = re.compile(r"\btrend|over time|history|chart|graph|progress\b", re.IGNORECASE)
+
+
+def parse_metric_query(message: str) -> MetricQuery | None:
+    low = message.lower()
+    if not _METRIC_INTENT_RE.search(low):
+        return None
+    # Tracker adds ("I had 3 cups...") also contain "my"/"had" — the caller
+    # checks tracker parsing first.
+    for pattern, key in _METRIC_TERMS:
+        if re.search(rf"(?:{pattern})", low):
+            # Require a possessive/lookup framing to avoid hijacking general
+            # education questions ("what is a normal blood pressure?").
+            if re.search(r"\bnormal\b|\bideal\b|\bshould\b|\brange\b", low):
+                return None
+            if not re.search(r"\bmy\b|\bmine\b|\blatest\b|\blast\b|\bcurrent\b", low):
+                return None
+            return MetricQuery(metric=key, wants_trend=bool(_TREND_RE.search(low)))
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Health summary
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class SummaryQuery:
+    period: str  # week | month | year
+
+
+_SUMMARY_RE = re.compile(
+    r"\b(?:health\s+)?summary\b|\bhow (?:did|have) i (?:do|done|been)\b|"
+    r"\boverview of my health\b|\bhealth report card\b",
+    re.IGNORECASE,
+)
+_PERIOD_RE: tuple[tuple[str, str], ...] = (
+    (r"\byear(?:ly)?\b|\bannual\b|\b12 months\b", "year"),
+    (r"\bmonth(?:ly)?\b|\b30 days\b", "month"),
+    (r"\bweek(?:ly)?\b|\b7 days\b", "week"),
+)
+
+
+def parse_summary_query(message: str) -> SummaryQuery | None:
+    low = message.lower()
+    if not _SUMMARY_RE.search(low):
+        return None
+    if "summary" not in low and "health" not in low:
+        return None
+    for pattern, period in _PERIOD_RE:
+        if re.search(pattern, low):
+            return SummaryQuery(period=period)
+    return SummaryQuery(period="week")
+
+
+# --------------------------------------------------------------------------- #
+# MCP suggestion requests
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class SuggestionQuery:
+    # Conditions are resolved by the caller via the registry index.
+    explicit: bool = True
+    raw_message: str = field(default="")
+
+
+_SUGGESTION_RE = re.compile(
+    r"\bsuggestions?\b|\btips\b|\badvice\b|\bwhat (?:should|can) i do\b|"
+    r"\bhow (?:do|can) i (?:manage|prevent|improve|control)\b|"
+    r"\blifestyle changes?\b|\bdiet plan\b|\bprecautions?\b",
+    re.IGNORECASE,
+)
+
+
+def parse_suggestion_query(message: str) -> SuggestionQuery | None:
+    if _SUGGESTION_RE.search(message):
+        return SuggestionQuery(raw_message=message)
+    return None

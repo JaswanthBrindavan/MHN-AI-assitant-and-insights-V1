@@ -24,11 +24,16 @@ from app.chat.conversation import (
     ensure_session,
     maybe_compact,
 )
+from app.chat.data_handlers import (
+    handle_document_query,
+    handle_metric_query,
+    handle_suggestion_query,
+    handle_summary_query,
+    handle_tracker_add,
+)
 from app.chat.replies import (
     GREETING_REPLY,
-    HIGH_ESCALATION,
     IDENTITY_REPLY,
-    SCOPE_DECLINE,
     safe_reply,
 )
 from app.chat.router import (
@@ -42,12 +47,18 @@ from app.chat.validation import validate_reply
 from app.config import get_settings
 from app.drugs.service import build_drug_reply, extract_drug_query_term, find_drug
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
+from app.i18n.language import detect_language, language_directive
+from app.i18n.replies import (
+    localized_emergency,
+    localized_high_escalation,
+    localized_scope_decline,
+)
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
 from app.models.chat import RagTurnReceipt
 from app.rag.prompt import build_correction_directive, build_system_prompt
 from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
-from app.triage.red_flags import EMERGENCY, EMERGENCY_DIRECTIVE, HIGH, NONE, triage
+from app.triage.red_flags import EMERGENCY, HIGH, NONE, triage
 
 logger = logging.getLogger("davi.chat")
 
@@ -60,6 +71,9 @@ class ChatResult:
     provenance: dict = field(default_factory=dict)
     grounding: dict | None = None
     session_id: uuid.UUID | None = None
+    citations: list[dict] | None = None
+    visual: dict | None = None
+    language: str = "en"
 
 
 def _hash(text: str) -> str:
@@ -163,6 +177,7 @@ async def _dispatch(
 ) -> ChatResult:
     tr = triage(message)
     risk = tr.level
+    lang = detect_language(message)
 
     # 1) Off-topic decline — only when the triage floor did not match.
     if not tr.matched and is_off_topic(message):
@@ -172,10 +187,11 @@ async def _dispatch(
             grounding_status="n/a", used_rag=False,
         )
         return ChatResult(
-            response_message=SCOPE_DECLINE,
+            response_message=localized_scope_decline(lang),
             risk_level=NONE,
             recommended_action="out_of_scope",
             provenance={"path": "scope_declined"},
+            language=lang,
         )
 
     intent = route(message, tr.matched)
@@ -188,10 +204,11 @@ async def _dispatch(
             grounding_status="n/a", used_rag=False,
         )
         return ChatResult(
-            response_message=EMERGENCY_DIRECTIVE,
+            response_message=localized_emergency(lang),
             risk_level=EMERGENCY,
             recommended_action="call_emergency_services",
             provenance={"path": "triage_emergency", "matched": tr.matched_terms},
+            language=lang,
         )
 
     # 3) Conversational (greeting / identity).
@@ -207,6 +224,7 @@ async def _dispatch(
             risk_level=risk,
             recommended_action="none",
             provenance={"path": "conversational"},
+            language=lang,
         )
 
     # 4) Data query — serve stored insights/pedigree; never compute.
@@ -222,7 +240,48 @@ async def _dispatch(
             risk_level=risk,
             recommended_action="review_with_clinician",
             provenance={"path": "data_query"},
+            language=lang,
         )
+
+    # 4.5) Deterministic data abilities — documents, tracker adds, metric
+    #      pulls, health summaries, MCP suggestions. NONE risk only (the
+    #      triage floor always wins) and fail-open: any crash falls through
+    #      to the RAG path.
+    if risk == NONE:
+        try:
+            # SAVEPOINT: an ability failure (e.g. a core table missing in a
+            # standalone deployment) must roll back only its own writes and
+            # leave the session usable for the RAG fallback.
+            async with db.begin_nested():
+                ability = await handle_tracker_add(db, user_id, message)
+                if ability is None:
+                    ability = await handle_document_query(db, user_id, message)
+                if ability is None:
+                    ability = await handle_metric_query(db, user_id, message)
+                if ability is None:
+                    ability = await handle_summary_query(db, user_id, message)
+                if ability is None:
+                    _ptext, user_codes = await build_patient_context(db, user_id)
+                    ability = await handle_suggestion_query(
+                        db, user_id, message, user_codes
+                    )
+            if ability is not None:
+                await _write_receipt(
+                    db, user_id=user_id, session_id=session_id, message=message,
+                    model_name=provider.model_name, retrieved=None,
+                    grounding=None, grounding_status="n/a", used_rag=False,
+                )
+                return ChatResult(
+                    response_message=ability["reply"],
+                    risk_level=risk,
+                    recommended_action=ability["action"],
+                    provenance=ability["provenance"],
+                    citations=ability.get("citations"),
+                    visual=ability.get("visual"),
+                    language=lang,
+                )
+        except Exception:  # noqa: BLE001 — abilities must never break a reply
+            logger.warning("data ability failed; continuing", exc_info=True)
 
     # 5) Drug-information question — deterministic reply from the validated
     #    drug database (never the LLM). Only at NONE risk: any red-flag match
@@ -230,8 +289,12 @@ async def _dispatch(
     if risk == NONE:
         try:
             term = extract_drug_query_term(message)
+            drug = None
             if term:
-                drug = await find_drug(db, term)
+                # SAVEPOINT: a lookup failure must leave the session usable.
+                async with db.begin_nested():
+                    drug = await find_drug(db, term)
+            if term:
                 if drug is not None:
                     reply = build_drug_reply(drug)
                     await _write_receipt(
@@ -249,6 +312,7 @@ async def _dispatch(
                             "drug": drug.name,
                             "source": "drug_reference",
                         },
+                        language=lang,
                     )
         except Exception:  # noqa: BLE001 — drug lookup must never break a reply
             logger.warning("drug lookup failed; continuing to RAG", exc_info=True)
@@ -263,6 +327,9 @@ async def _dispatch(
     compacted_summary, _recent = await assemble_context(db, session_id)
     compacted_json = json.dumps(compacted_summary) if compacted_summary else None
     system = build_system_prompt(chunks, patient_text, compacted_json)
+    directive = language_directive(lang)
+    if directive:
+        system = system + "\n\n" + directive
 
     # A provider outage must degrade to the deterministic safe reply, never
     # crash a patient-facing endpoint.
@@ -282,6 +349,7 @@ async def _dispatch(
             risk_level=risk,
             recommended_action=action,
             provenance={"path": "symptom_rag", "degraded": "provider_error"},
+            language=lang,
         )
 
     report: GroundingReport | None = None
@@ -296,7 +364,7 @@ async def _dispatch(
         else:
             display = strip_markers(grounded_answer)
             if risk == HIGH:
-                display = f"{HIGH_ESCALATION} {display}"
+                display = f"{localized_high_escalation(lang)} {display}"
             # Extend the diagnostic-assertion lexicon with the clinically-
             # validated registry names + aliases (paren-cleaned), fail-open.
             extra: tuple[str, ...] | None = None
@@ -322,6 +390,7 @@ async def _dispatch(
     )
 
     action = "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+    citations = await _build_citations(db, report, chunks, bool(patient_text))
     return ChatResult(
         response_message=display,
         risk_level=risk,
@@ -333,7 +402,55 @@ async def _dispatch(
             "chunks": [c.id for c in chunks],
         },
         grounding=report.to_dict() if report else None,
+        citations=citations,
+        language=lang,
     )
+
+
+async def _build_citations(
+    db: AsyncSession,
+    report: GroundingReport | None,
+    chunks: list[RetrievedChunk],
+    has_patient_context: bool,
+) -> list[dict] | None:
+    """Structured citations for the markers the answer actually cited."""
+    if report is None or not report.cited:
+        return None
+    try:
+        index = await load_condition_index(db)
+    except Exception:  # noqa: BLE001
+        index = None
+    citations: list[dict] = []
+    for marker in report.cited:
+        if marker == "P":
+            if has_patient_context:
+                citations.append(
+                    {"marker": "P", "source": "patient_context",
+                     "display_name": "Your health record"}
+                )
+            continue
+        if marker == "GK":
+            citations.append(
+                {"marker": "GK", "source": "general_knowledge",
+                 "display_name": "General knowledge (nothing retrieved)"}
+            )
+            continue
+        i = int(marker) - 1
+        if 0 <= i < len(chunks):
+            chunk = chunks[i]
+            display = chunk.condition_code
+            if index is not None and chunk.condition_code in index.by_code:
+                display = index.by_code[chunk.condition_code].display_name
+            citations.append(
+                {
+                    "marker": marker,
+                    "source": "mcp_master_profile",
+                    "condition_code": chunk.condition_code,
+                    "section": chunk.chunk_type,
+                    "display_name": display,
+                }
+            )
+    return citations or None
 
 
 async def handle_chat(
