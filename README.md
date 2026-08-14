@@ -179,6 +179,29 @@ includes Hindi/Hinglish phrases, and the LLM is instructed to reply in the
 user's language. RAG answers return structured `citations` mapped from the
 grounding markers.
 
+## Test console (UI) + demo accounts
+
+A self-contained test console (vanilla HTML/JS, no build step) is served at
+`http://localhost:8000/` by the API itself. It offers a persona switcher,
+one-click quick tests for every chat path, risk/provenance/language chips,
+citation display, inline SVG charts, and Pedigree/Insights tabs.
+
+```bash
+python -m scripts.seed_demo_users   # seeds the 6 demo accounts below
+uvicorn app.main:app                # then open http://localhost:8000/
+```
+
+| Persona | UUID prefix | What they exercise |
+| --- | --- | --- |
+| **Asha** | `1111…` | One-parent diabetes + hypertension pedigree |
+| **Bharat** | `2222…` | Both-parents diabetes (worth_discussing tier) |
+| **Chandra** | `3333…` | Early-onset + vertical-chain diabetes, premature CAD |
+| **Deepa** | `4444…` | Rich data: BP/sugar vitals series, lab report with HbA1c 6.1%, week of lifestyle logs, connected father |
+| **Eshan** | `5555…` | Deepa's father — shares his lipid report (plus one private doc that must stay hidden) |
+| **Farah** | `6666…` | Empty account (fresh-user experience) |
+
+All accounts and every data point are synthetic.
+
 ## Eval harness
 
 ```bash

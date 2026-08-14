@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Davi Test Console</title>
+<style>
+  :root {
+    --bg: #f4f6fb; --panel: #ffffff; --ink: #1c2333; --muted: #6b7487;
+    --line: #e3e7f0; --accent: #2563eb; --accent-soft: #eaf0fe;
+    --emergency: #dc2626; --high: #d97706; --ok: #059669;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--ink); height: 100vh; display: flex;
+  }
+  /* ---------- sidebar ---------- */
+  aside {
+    width: 300px; min-width: 300px; background: var(--panel);
+    border-right: 1px solid var(--line); display: flex; flex-direction: column;
+    overflow-y: auto;
+  }
+  .brand { padding: 18px 18px 10px; }
+  .brand h1 { font-size: 17px; margin: 0; }
+  .brand p { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); }
+  .section-label {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); padding: 14px 18px 6px;
+  }
+  .persona {
+    display: flex; gap: 10px; align-items: center; padding: 9px 18px;
+    cursor: pointer; border-left: 3px solid transparent;
+  }
+  .persona:hover { background: var(--accent-soft); }
+  .persona.active { background: var(--accent-soft); border-left-color: var(--accent); }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; font-weight: 700;
+    color: #fff; font-size: 14px; flex: none;
+  }
+  .persona b { font-size: 13.5px; display: block; }
+  .persona span { font-size: 11px; color: var(--muted); display: block; }
+  .quick { padding: 4px 14px 20px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .quick button {
+    border: 1px solid var(--line); background: #fff; border-radius: 999px;
+    font-size: 11.5px; padding: 5px 10px; cursor: pointer; color: var(--ink);
+  }
+  .quick button:hover { border-color: var(--accent); color: var(--accent); }
+  /* ---------- main ---------- */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 10px 22px; display: flex; align-items: center; gap: 18px;
+  }
+  header .who { font-size: 13px; color: var(--muted); }
+  header .who b { color: var(--ink); }
+  .tabs { display: flex; gap: 4px; margin-left: auto; }
+  .tabs button {
+    border: none; background: none; padding: 8px 14px; font-size: 13px;
+    cursor: pointer; border-radius: 8px; color: var(--muted);
+  }
+  .tabs button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .view { flex: 1; overflow-y: auto; padding: 22px; display: none; }
+  .view.active { display: block; }
+  /* ---------- chat ---------- */
+  #chatView { display: none; flex-direction: column; padding: 0; }
+  #chatView.active { display: flex; }
+  #messages { flex: 1; overflow-y: auto; padding: 22px; }
+  .msg { max-width: 720px; margin: 0 auto 14px; display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .bubble {
+    padding: 11px 15px; border-radius: var(--radius); font-size: 13.5px;
+    line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; max-width: 75%; }
+  .msg.bot { flex-direction: column; align-items: flex-start; }
+  .msg.bot .bubble {
+    background: var(--panel); border: 1px solid var(--line);
+    border-bottom-left-radius: 4px; width: 100%;
+  }
+  .msg.bot.emergency .bubble { border-color: var(--emergency); background: #fef2f2; }
+  .msg.bot.high .bubble { border-color: var(--high); background: #fffbeb; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .chip {
+    font-size: 10.5px; padding: 3px 9px; border-radius: 999px;
+    background: #eef1f7; color: var(--muted); border: 1px solid var(--line);
+  }
+  .chip.risk-emergency { background: #fee2e2; color: var(--emergency); border-color: #fecaca; font-weight: 700; }
+  .chip.risk-high { background: #fef3c7; color: var(--high); border-color: #fde68a; font-weight: 700; }
+  .chip.path { background: var(--accent-soft); color: var(--accent); border-color: #dbe6fd; }
+  .citations { margin-top: 8px; font-size: 11.5px; color: var(--muted); }
+  .citations b { color: var(--ink); }
+  .visual { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #fff; }
+  .visual svg { display: block; max-width: 100%; height: auto; }
+  #composer {
+    border-top: 1px solid var(--line); background: var(--panel);
+    padding: 14px 22px; display: flex; gap: 10px;
+  }
+  #composer input {
+    flex: 1; border: 1px solid var(--line); border-radius: 10px;
+    padding: 11px 14px; font-size: 14px; outline: none;
+  }
+  #composer input:focus { border-color: var(--accent); }
+  #composer button {
+    background: var(--accent); color: #fff; border: none; border-radius: 10px;
+    padding: 0 22px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  #composer button:disabled { opacity: .5; }
+  /* ---------- data views ---------- */
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
+    max-width: 780px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 14px; }
+  .card .tier { font-size: 11px; font-weight: 700; color: var(--accent); text-transform: uppercase; letter-spacing: .05em; }
+  .card p { font-size: 13px; line-height: 1.6; color: #333c50; white-space: pre-wrap; margin: 8px 0 0; }
+  .card table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+  .card td, .card th { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  .card th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .empty { color: var(--muted); font-size: 13px; }
+  .note { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .spinner { color: var(--muted); font-size: 12px; padding: 4px 0; }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="brand">
+    <h1>🩺 Davi Test Console</h1>
+    <p>Decision support, never diagnosis · all data synthetic</p>
+  </div>
+  <div class="section-label">Dummy accounts</div>
+  <div id="personas"></div>
+  <div class="section-label">Quick tests</div>
+  <div class="quick" id="quick"></div>
+</aside>
+
+<main>
+  <header>
+    <div class="who">Testing as <b id="whoName">–</b> <span id="whoDesc"></span></div>
+    <div class="tabs">
+      <button data-tab="chatView" class="active">Chat</button>
+      <button data-tab="pedigreeView">Pedigree</button>
+      <button data-tab="insightsView">Insights</button>
+    </div>
+  </header>
+
+  <div id="chatView" class="view active">
+    <div id="messages"></div>
+    <div id="composer">
+      <input id="input" placeholder="Ask Davi… (try a quick test on the left)"
+             autocomplete="off">
+      <button id="send">Send</button>
+    </div>
+  </div>
+
+  <div id="pedigreeView" class="view"></div>
+  <div id="insightsView" class="view"></div>
+</main>
+
+<script>
+const API = "/api/v1";
+
+const PERSONAS = [
+  { id: "11111111-1111-1111-1111-111111111111", name: "Asha", color: "#2563eb",
+    desc: "Mother has type 2 diabetes; father has high BP" },
+  { id: "22222222-2222-2222-2222-222222222222", name: "Bharat", color: "#7c3aed",
+    desc: "Both parents have type 2 diabetes" },
+  { id: "33333333-3333-3333-3333-333333333333", name: "Chandra", color: "#0d9488",
+    desc: "Early-onset diabetes in family + father's heart disease at 50" },
+  { id: "44444444-4444-4444-4444-444444444444", name: "Deepa", color: "#db2777",
+    desc: "Rich data: vitals, lab reports (HbA1c), lifestyle logs, father connected" },
+  { id: "55555555-5555-5555-5555-555555555555", name: "Eshan", color: "#ca8a04",
+    desc: "Deepa's father — shares his reports with her" },
+  { id: "66666666-6666-6666-6666-666666666666", name: "Farah", color: "#64748b",
+    desc: "Brand-new empty account (fresh user experience)" },
+];
+
+const QUICK = [
+  "I have chest pain and my left arm hurts",
+  "saans nahi aa rahi hai",
+  "what's my latest hba1c?",
+  "what was my last blood pressure?",
+  "I had 3 cups of coffee today",
+  "I smoked 2 cigs yesterday",
+  "find my latest blood report",
+  "when was my father's last test done?",
+  "health summary for the week",
+  "tips for my diabetes",
+  "side effects of dolo 650",
+  "is alprax habit forming?",
+  "what are the symptoms of typhoid?",
+  "what is my family risk?",
+  "write me a python function",
+  "hello!",
+];
+
+let current = PERSONAS[0];
+let sessions = {};   // persona id -> session_id
+
+/* ---------- persona sidebar ---------- */
+const personasEl = document.getElementById("personas");
+PERSONAS.forEach(p => {
+  const div = document.createElement("div");
+  div.className = "persona"; div.dataset.id = p.id;
+  div.innerHTML = `<div class="avatar" style="background:${p.color}">${p.name[0]}</div>
+    <div><b>${p.name}</b><span>${p.desc}</span></div>`;
+  div.onclick = () => switchUser(p);
+  personasEl.appendChild(div);
+});
+
+const quickEl = document.getElementById("quick");
+QUICK.forEach(q => {
+  const b = document.createElement("button");
+  b.textContent = q;
+  b.onclick = () => { showTab("chatView"); document.getElementById("input").value = q; sendMessage(); };
+  quickEl.appendChild(b);
+});
+
+function switchUser(p) {
+  current = p;
+  document.querySelectorAll(".persona").forEach(el =>
+    el.classList.toggle("active", el.dataset.id === p.id));
+  document.getElementById("whoName").textContent = p.name;
+  document.getElementById("whoDesc").textContent = "— " + p.desc;
+  document.getElementById("messages").innerHTML = "";
+  banner(`You are now testing as <b>${p.name}</b>. ${p.desc}.`);
+  loadPedigree(); loadInsights();
+}
+
+function headers() {
+  return { "Content-Type": "application/json", "X-User-Id": current.id };
+}
+
+/* ---------- tabs ---------- */
+document.querySelectorAll(".tabs button").forEach(b =>
+  b.onclick = () => showTab(b.dataset.tab));
+function showTab(id) {
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === id));
+  document.querySelectorAll(".tabs button").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === id));
+}
+
+/* ---------- chat ---------- */
+const messagesEl = document.getElementById("messages");
+function banner(html) {
+  const d = document.createElement("div");
+  d.className = "msg bot";
+  d.innerHTML = `<div class="bubble" style="background:var(--accent-soft);border-color:#dbe6fd">${html}</div>`;
+  messagesEl.appendChild(d); messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function addUserMsg(text) {
+  const d = document.createElement("div");
+  d.className = "msg user";
+  d.innerHTML = `<div class="bubble"></div>`;
+  d.querySelector(".bubble").textContent = text;
+  messagesEl.appendChild(d); messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function addBotMsg(data) {
+  const d = document.createElement("div");
+  d.className = "msg bot " + (data.risk_level === "emergency" ? "emergency" :
+                              data.risk_level === "high" ? "high" : "");
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = data.response_message;
+  d.appendChild(bubble);
+
+  if (data.visual && data.visual.svg) {
+    const v = document.createElement("div");
+    v.className = "visual"; v.innerHTML = data.visual.svg;
+    d.appendChild(v);
+  }
+
+  const meta = document.createElement("div"); meta.className = "meta";
+  const chips = [];
+  if (data.risk_level && data.risk_level !== "none")
+    chips.push(`<span class="chip risk-${data.risk_level}">⚠ ${data.risk_level.toUpperCase()}</span>`);
+  if (data.provenance?.path)
+    chips.push(`<span class="chip path">${data.provenance.path}</span>`);
+  if (data.recommended_action && data.recommended_action !== "none")
+    chips.push(`<span class="chip">${data.recommended_action.replaceAll("_"," ")}</span>`);
+  if (data.language && data.language !== "en")
+    chips.push(`<span class="chip">lang: ${data.language}</span>`);
+  if (data.provenance?.drug)
+    chips.push(`<span class="chip">💊 ${data.provenance.drug}</span>`);
+  if (data.provenance?.used_rag)
+    chips.push(`<span class="chip">RAG: ${(data.provenance.conditions||[]).join(", ")}</span>`);
+  if (data.grounding?.status)
+    chips.push(`<span class="chip">grounding: ${data.grounding.status}</span>`);
+  meta.innerHTML = chips.join("");
+  if (chips.length) d.appendChild(meta);
+
+  if (data.citations && data.citations.length) {
+    const c = document.createElement("div");
+    c.className = "citations";
+    c.innerHTML = "<b>Sources:</b> " + data.citations.map(x =>
+      x.source === "mcp_master_profile"
+        ? `${x.display_name} · ${(x.section||"").replaceAll("_"," ")}`
+        : x.display_name || x.source).join(" · ");
+    d.appendChild(c);
+  }
+  messagesEl.appendChild(d); messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = document.getElementById("input");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  addUserMsg(text);
+  const spin = document.createElement("div");
+  spin.className = "spinner msg"; spin.textContent = "Davi is thinking…";
+  messagesEl.appendChild(spin);
+  document.getElementById("send").disabled = true;
+  try {
+    const body = { message: text };
+    if (sessions[current.id]) body.session_id = sessions[current.id];
+    const res = await fetch(`${API}/chat`, {
+      method: "POST", headers: headers(), body: JSON.stringify(body) });
+    const data = await res.json();
+    spin.remove();
+    if (!res.ok) { banner(`⚠ API error ${res.status}: ${JSON.stringify(data)}`); return; }
+    if (data.session_id) sessions[current.id] = data.session_id;
+    addBotMsg(data);
+    if (data.provenance?.path === "tracker_add") loadInsights();
+  } catch (e) {
+    spin.remove(); banner("⚠ Network error: " + e.message);
+  } finally {
+    document.getElementById("send").disabled = false;
+    input.focus();
+  }
+}
+document.getElementById("send").onclick = sendMessage;
+document.getElementById("input").addEventListener("keydown",
+  e => { if (e.key === "Enter") sendMessage(); });
+
+/* ---------- pedigree ---------- */
+async function loadPedigree() {
+  const el = document.getElementById("pedigreeView");
+  el.innerHTML = `<div class="spinner">Loading…</div>`;
+  try {
+    const res = await fetch(`${API}/pedigree`, { headers: headers() });
+    const data = await res.json();
+    let html = `<div class="card"><h3>Family history — ${current.name}</h3>`;
+    if (!data.conditions?.length) {
+      html += `<p class="empty">No family history recorded yet.</p>`;
+    } else {
+      html += `<table><tr><th>Relative</th><th>Condition</th><th>Onset</th><th>Certainty</th></tr>`;
+      data.conditions.forEach(c => {
+        html += `<tr><td>${c.slot.replaceAll("_"," ")}</td><td>${c.condition_display}</td>
+                 <td>${c.onset_band.replaceAll("_","–")}</td><td>${c.certainty.replaceAll("_"," ")}</td></tr>`;
+      });
+      html += `</table>`;
+    }
+    html += `<div class="note">PUT /pedigree upserts slots + conditions and triggers a synchronous recompute.</div></div>`;
+    el.innerHTML = html;
+  } catch (e) { el.innerHTML = `<div class="card"><p class="empty">Error: ${e.message}</p></div>`; }
+}
+
+/* ---------- insights ---------- */
+async function loadInsights() {
+  const el = document.getElementById("insightsView");
+  el.innerHTML = `<div class="spinner">Loading…</div>`;
+  try {
+    const res = await fetch(`${API}/insights`, { headers: headers() });
+    const data = await res.json();
+    if (!data.length) {
+      el.innerHTML = `<div class="card"><p class="empty">No active insights for ${current.name}. Add family history first (or pick a persona with a seeded pedigree).</p></div>`;
+      return;
+    }
+    el.innerHTML = data.map(a => `
+      <div class="card">
+        <div class="tier">${a.tier.replaceAll("_"," ")}</div>
+        <h3>${a.title}</h3>
+        <p>${a.body}</p>
+        <div class="note">template ${a.template_key} v${a.template_version} · pipeline v${a.pipeline_version} · hash ${a.content_hash.slice(0,12)}…</div>
+      </div>`).join("");
+  } catch (e) { el.innerHTML = `<div class="card"><p class="empty">Error: ${e.message}</p></div>`; }
+}
+
+/* ---------- boot ---------- */
+switchUser(PERSONAS[0]);
+</script>
+</body>
+</html>
