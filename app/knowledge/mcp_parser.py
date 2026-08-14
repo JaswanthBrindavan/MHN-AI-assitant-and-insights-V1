@@ -70,15 +70,43 @@ def extract_code_from_filename(filename: str) -> str | None:
     return m.group(1) if m else None
 
 
+# Parenthetical inners that are commentary rather than usable abbreviations.
+_PAREN_JUNK_RE = re.compile(r"[+/]|(\b(?:lay|term|clinical|ayurvedic|form)\b)", re.IGNORECASE)
+
+
 def parse_aka_line(line: str) -> list[str]:
-    """Parse 'AKA i.e., A, B, C' → ['A', 'B', 'C'] (order kept, deduped)."""
+    """Parse an AKA alias line into individual aliases.
+
+    Real corpus lines separate aliases with commas AND semicolons, wrap lay
+    terms in curly quotes, and carry abbreviations in parentheses
+    ("Polycystic ovary syndrome (PCOS)"). Each parenthesised abbreviation is
+    ALSO emitted as its own alias, along with the paren-free base.
+    """
     text = line.strip()
     text = re.sub(r"^aka[\s:]*((i\.?e\.?)[.,\s]*)?", "", text, flags=re.IGNORECASE)
+
     aliases: list[str] = []
-    for part in text.split(","):
-        alias = part.strip().strip(".").strip()
-        if alias and alias.lower() not in {a.lower() for a in aliases}:
-            aliases.append(alias)
+    seen: set[str] = set()
+
+    def _add(candidate: str) -> None:
+        candidate = candidate.strip().strip(".").strip("\"'“”‘’").strip()
+        if candidate and candidate.lower() not in seen:
+            seen.add(candidate.lower())
+            aliases.append(candidate)
+
+    for part in re.split(r"[,;]", text):
+        part = part.strip()
+        if not part:
+            continue
+        _add(part)
+        # "Name (ABBR)" → also "Name" and "ABBR" (skipping commentary parens).
+        inners = re.findall(r"\(([^)]{2,40})\)", part)
+        base = re.sub(r"\s*\([^)]*\)", "", part).strip()
+        if base and base != part:
+            _add(base)
+        for inner in inners:
+            if not _PAREN_JUNK_RE.search(inner):
+                _add(inner)
     return aliases
 
 

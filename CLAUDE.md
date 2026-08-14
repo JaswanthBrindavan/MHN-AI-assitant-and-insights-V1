@@ -61,14 +61,22 @@ app/
     orchestrator.py    handle_chat: floor → scope → route → handlers → RAG →
                        grounding → validation → receipts (fail-open)
   rag/
-    retrieval.py       condition scoping + keyword-fallback retrieval
+    retrieval.py       condition scoping (registry-driven resolve_scope with
+                       static fallback) + keyword-fallback retrieval
     prompt.py          system prompt (grounding contract) + COMPACTED_CONTEXT_JSON
   grounding/claims.py  PURE marker parse/verify, strip_markers (off|log|enforce)
+  knowledge/
+    mcp_parser.py      docx → sections → chunks (512 Master Condition Profiles)
+    registry.py        cached keyword index (word-boundary, stoplist), engine-
+                       code map T2DM→MC001 / HTN→MC051 / CAD→MC052, fail-open
+  drugs/service.py     drug-info intent extraction + lookup over drug_reference
+                       (250K medicines); deterministic validator-safe replies
   llm/                 LLMProvider protocol, FakeProvider, OllamaProvider, factory
   api/v1/              health, pedigree, insights, chat, schemas
 scripts/               seed_rules_templates, seed_synthetic, ingest_knowledge,
-                       nightly_sweep
-knowledge/             3 synthetic condition files (T2DM, HTN, CAD)
+                       ingest_mcp_corpus, ingest_drugs, nightly_sweep
+knowledge/             3 synthetic condition files (T2DM, HTN, CAD) — unit tests
+                       only; the real corpus is ingested from the MCP docx folder
 tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
 ```
 

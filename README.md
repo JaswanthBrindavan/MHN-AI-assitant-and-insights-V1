@@ -66,8 +66,26 @@ uvicorn app.main:app --reload
 ```bash
 python -m scripts.seed_rules_templates     # 6 DRAFT rules + 3 templates
 python -m scripts.seed_synthetic           # 3 synthetic users (every rule branch)
-python -m scripts.ingest_knowledge knowledge   # 9 synthetic knowledge chunks
+python -m scripts.ingest_knowledge knowledge   # 9 synthetic knowledge chunks (tests)
 ```
+
+### Clinically-validated knowledge base
+
+The production knowledge base is built from two validated sources:
+
+```bash
+# 512 Master Condition Profiles (docx) → condition_registry + mcp_chunks
+python -m scripts.ingest_mcp_corpus "/path/to/MHN_Master_Condition_Profiles/Documents"
+
+# Merged Indian medicines database (~250K rows) → drug_reference
+python -m scripts.ingest_drugs "/path/to/merged_medicines.csv"
+```
+
+This yields ~511 conditions (with AKA aliases driving retrieval scoping),
+~17,000 knowledge chunks, and ~250,561 medicines powering the deterministic
+drug-information path (`"what is metformin used for?"`, `"side effects of
+augmentin 625"`). Legacy engine codes map to profiles (T2DM→MC001, HTN→MC051,
+CAD→MC052) so pedigree-scoped retrieval reaches the validated corpus.
 
 `scripts/nightly_sweep.py` recomputes all users and hard-purges pedigree
 conditions soft-deleted more than 30 days ago, writing a `job_runs` row.

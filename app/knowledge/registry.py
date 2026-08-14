@@ -52,12 +52,25 @@ class ConditionIndex:
         self._patterns: list[tuple[re.Pattern[str], str]] = []
         seen: set[tuple[str, str]] = set()
         for e in entries:
+            # Display name, its parenthetical ABBREVIATIONS ("(GERD)"), aliases.
+            # Only uppercase-dominated tokens count — qualifiers like
+            # "(child)" or "(pediatric)" must not become keywords.
             keywords = [e.display_name, *e.aliases]
+            for inner in re.findall(r"\(([^)]{2,40})\)", e.display_name):
+                inner = inner.strip()
+                if re.fullmatch(r"[A-Z][A-Za-z0-9\-]{1,11}", inner) and sum(
+                    ch.isupper() for ch in inner
+                ) >= 2:
+                    keywords.append(inner)
             for kw in keywords:
-                kw_clean = kw.strip().lower()
+                kw_stripped = kw.strip()
+                kw_clean = kw_stripped.lower()
                 # Drop parenthetical qualifiers for matching purposes.
                 kw_clean = re.sub(r"\s*\([^)]*\)", "", kw_clean).strip()
-                if len(kw_clean) < MIN_KEYWORD_LEN:
+                # All-caps medical abbreviations (PMS, CIN, UTI) may be 3 chars;
+                # everything else needs MIN_KEYWORD_LEN.
+                is_abbrev = kw_stripped.isupper() and len(kw_clean) >= 3
+                if len(kw_clean) < MIN_KEYWORD_LEN and not is_abbrev:
                     continue
                 if kw_clean in _ALIAS_STOPLIST:
                     continue
@@ -65,9 +78,16 @@ class ConditionIndex:
                 if key in seen:
                     continue
                 seen.add(key)
-                pattern = re.compile(
-                    r"\b" + re.escape(kw_clean) + r"\b", re.IGNORECASE
-                )
+                # Tolerate a simple English plural on the final word
+                # ("migraines" → "migraine", "ulcers" → "ulcer").
+                # 3-char abbreviations match CASE-SENSITIVELY: "ARM" (age-
+                # related maculopathy) must not fire on the word "arm".
+                if is_abbrev and len(kw_clean) == 3:
+                    pattern = re.compile(r"\b" + re.escape(kw_stripped) + r"\b")
+                else:
+                    pattern = re.compile(
+                        r"\b" + re.escape(kw_clean) + r"(?:e?s)?\b", re.IGNORECASE
+                    )
                 self._patterns.append((pattern, e.condition_code))
 
     def match_message(self, message: str) -> set[str]:

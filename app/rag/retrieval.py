@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge.registry import load_condition_index
@@ -108,21 +108,58 @@ def _keyword_rank(rows: list[McpChunk], message: str) -> list[RetrievedChunk]:
     return scored
 
 
+# Cap on candidate rows pulled for the unscoped (symptom-only) fallback.
+GLOBAL_FALLBACK_CANDIDATES = 200
+
+
+async def _global_fallback_rows(db: AsyncSession, message: str) -> list[McpChunk]:
+    """Token-prefiltered search over ALL chunks for messages naming no condition.
+
+    Lets symptom-only questions ("frequent urination and excessive thirst")
+    reach the corpus. SQL prefilter keeps the candidate set small; final
+    ranking happens in ``_keyword_rank``.
+    """
+    tokens = [t for t in _tokens(message) if len(t) >= 5][:8]
+    if not tokens:
+        return []
+    conditions = [McpChunk.content.ilike(f"%{t}%") for t in tokens]
+    rows = (
+        await db.execute(
+            select(McpChunk).where(or_(*conditions)).limit(GLOBAL_FALLBACK_CANDIDATES)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
 async def retrieve_chunks(
     db: AsyncSession,
     condition_codes: set[str],
     message: str,
     k: int = 4,
 ) -> list[RetrievedChunk]:
-    """Return up to k chunks scoped to the given conditions, ranked."""
-    if not condition_codes:
-        return []
-    rows = (
-        await db.execute(
-            select(McpChunk).where(McpChunk.condition_code.in_(condition_codes))
+    """Return up to k chunks scoped to the given conditions, ranked.
+
+    Empty scope falls back to a token-prefiltered global search so symptom
+    descriptions still retrieve educational content.
+    """
+    if condition_codes:
+        rows = list(
+            (
+                await db.execute(
+                    select(McpChunk).where(
+                        McpChunk.condition_code.in_(condition_codes)
+                    )
+                )
+            ).scalars().all()
         )
-    ).scalars().all()
+        if not rows:
+            return []
+        # Condition scope already establishes relevance; keep zero-score chunks.
+        return _keyword_rank(rows, message)[:k]
+
+    rows = await _global_fallback_rows(db, message)
     if not rows:
         return []
-    ranked = _keyword_rank(list(rows), message)
-    return ranked[:k]
+    # Unscoped relevance is purely lexical — drop zero-overlap chunks.
+    ranked = _keyword_rank(rows, message)
+    return [c for c in ranked[:k] if c.score > 0]
