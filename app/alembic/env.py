@@ -17,8 +17,10 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Inject the sync DB URL from settings rather than alembic.ini.
-config.set_main_option("sqlalchemy.url", get_settings().alembic_database_url)
+# Inject the sync DB URL. A URL set programmatically on the Config (e.g. by the
+# reversibility test) wins; otherwise fall back to settings.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", get_settings().alembic_database_url)
 
 target_metadata = Base.metadata
 
