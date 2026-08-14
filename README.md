@@ -153,7 +153,7 @@ returns **403** on mismatch (object-level authorization). When
 | `OLLAMA_BASE_URL` / `OLLAMA_MODEL` | `http://localhost:11434/v1` / `llama3.1` | Legacy Ollama alias (OpenAI-compatible `/v1`) |
 | `REPLY_LANGUAGE` | `auto` | `auto` mirrors the user's detected language |
 | `LLM_PROMPT_VERSION` | `v1` | Recorded on receipts |
-| `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIM` | *(empty)* / *(empty)* / `1024` | Optional embeddings; unset → NULL embeddings + keyword retrieval |
+| `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIM` | *(empty)* / *(empty)* / `1024` | Any OpenAI-compatible embeddings endpoint (e.g. local Ollama `qwen3-embedding:4b`; larger native dims are Matryoshka-truncated to 1024 + renormalized). Set → hybrid search: BM25 ⊕ pgvector cosine ANN fused with RRF + section-intent rerank. Unset → deterministic keyword retrieval |
 | `GROUNDING_MODE` | `log` | `off` \| `log` \| `enforce` |
 | `PIPELINE_VERSION` | `1` | Stamped onto artifacts |
 
