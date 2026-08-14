@@ -1,0 +1,33 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: davi
+      POSTGRES_PASSWORD: davi
+      POSTGRES_DB: davi
+    ports:
+      - "5432:5432"
+    volumes:
+      - davi_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U davi -d davi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://davi:davi@db:5432/davi
+      ALEMBIC_DATABASE_URL: postgresql+psycopg2://davi:davi@db:5432/davi
+      AUTH_ENABLED: "false"
+      LLM_PROVIDER: fake
+      GROUNDING_MODE: log
+    ports:
+      - "8000:8000"
+
+volumes:
+  davi_pgdata:
