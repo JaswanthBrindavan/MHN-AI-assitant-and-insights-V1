@@ -10,6 +10,7 @@ logs a WARNING — a guardrail must never be a new way to break a reply.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -17,6 +18,12 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.context import build_patient_context
+from app.chat.conversation import (
+    add_message,
+    assemble_context,
+    ensure_session,
+    maybe_compact,
+)
 from app.chat.replies import (
     GREETING_REPLY,
     HIGH_ESCALATION,
@@ -50,6 +57,7 @@ class ChatResult:
     recommended_action: str
     provenance: dict = field(default_factory=dict)
     grounding: dict | None = None
+    session_id: uuid.UUID | None = None
 
 
 def _hash(text: str) -> str:
@@ -144,12 +152,12 @@ async def _data_query_reply(db: AsyncSession, user_id: uuid.UUID) -> str:
     )
 
 
-async def handle_chat(
+async def _dispatch(
     db: AsyncSession,
     user_id: uuid.UUID,
     message: str,
     provider: LLMProvider,
-    session_id: uuid.UUID | None = None,
+    session_id: uuid.UUID,
 ) -> ChatResult:
     tr = triage(message)
     risk = tr.level
@@ -219,7 +227,11 @@ async def handle_chat(
     codes = scope_codes(message, user_codes)
     chunks = await retrieve_chunks(db, codes, message)
     used_rag = bool(chunks)
-    system = build_system_prompt(chunks, patient_text)
+
+    # Prepend COMPACTED_CONTEXT_JSON when a summary exists for this session.
+    compacted_summary, _recent = await assemble_context(db, session_id)
+    compacted_json = json.dumps(compacted_summary) if compacted_summary else None
+    system = build_system_prompt(chunks, patient_text, compacted_json)
 
     answer = await provider.generate(system=system, user=message)
 
@@ -264,3 +276,26 @@ async def handle_chat(
         },
         grounding=report.to_dict() if report else None,
     )
+
+
+async def handle_chat(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider: LLMProvider,
+    session_id: uuid.UUID | None = None,
+) -> ChatResult:
+    """Persist the turn, dispatch, then run deterministic compaction.
+
+    Compaction fires after the assistant message and never raises.
+    """
+    session_id = await ensure_session(db, user_id, session_id)
+    await add_message(
+        db, session_id, "user", message,
+        extracted_intent={"risk": triage(message).level},
+    )
+    result = await _dispatch(db, user_id, message, provider, session_id)
+    await add_message(db, session_id, "assistant", result.response_message)
+    await maybe_compact(db, session_id)
+    result.session_id = session_id
+    return result

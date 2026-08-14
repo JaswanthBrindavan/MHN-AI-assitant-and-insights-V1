@@ -43,4 +43,5 @@ async def chat(
         recommended_action=result.recommended_action,
         provenance=result.provenance,
         grounding=result.grounding,
+        session_id=result.session_id,
     )

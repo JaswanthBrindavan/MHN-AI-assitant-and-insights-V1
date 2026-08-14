@@ -35,8 +35,11 @@ def format_chunks(chunks: list[RetrievedChunk]) -> str:
 def build_system_prompt(
     chunks: list[RetrievedChunk],
     patient_context: str,
+    compacted_context_json: str | None = None,
 ) -> str:
     parts = [_SAFETY_RULES, _GROUNDING_RULES]
+    if compacted_context_json:
+        parts.append("COMPACTED_CONTEXT_JSON:\n" + compacted_context_json)
     if chunks:
         parts.append("Retrieved knowledge blocks:\n" + format_chunks(chunks))
     else:

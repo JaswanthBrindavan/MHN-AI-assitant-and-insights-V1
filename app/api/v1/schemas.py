@@ -100,3 +100,4 @@ class ChatResponse(BaseModel):
     recommended_action: str
     provenance: dict
     grounding: dict | None = None
+    session_id: uuid.UUID | None = None
