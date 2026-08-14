@@ -1,0 +1,180 @@
+[
+  {
+    "body": "Some of your close family have high blood pressure. Here is what you shared: father \u2014 high blood pressure, onset 50-54.\n\nA family history like this can make high blood pressure somewhat more common within a family, but it is only one piece of the picture \u2014 everyday habits and many other factors matter too.\n\nThis is not a diagnosis. It is a decision-support note based only on the family history you shared, meant to help you and a clinician decide what to look at together.\n\nA good next step is to mention this family history to your doctor at your next visit, so they can advise what (if any) checks make sense for you.",
+    "condition_code": "HTN",
+    "content_hash": "b799d80659c8eca93b53586efc85f2fbab5bd1b219ccd1da79d7ef99fcdea810",
+    "facts_used": {
+      "condition_code": "HTN",
+      "condition_display": "high blood pressure",
+      "grandparents": [],
+      "min_parent_onset": 52,
+      "parents": [
+        {
+          "certainty": "confirmed",
+          "onset_band": "50_54",
+          "onset_midpoint": 52,
+          "provenance": "self_report",
+          "slot": "father"
+        }
+      ],
+      "vertical_chain": false,
+      "weighted_load": 1.0
+    },
+    "fired_rules": [
+      "R-HTN-01"
+    ],
+    "pipeline_version": 1,
+    "status": "active",
+    "template_key": "tmpl_htn",
+    "template_version": 1,
+    "tier": "worth_knowing",
+    "title": "A note on your family history of high blood pressure",
+    "user_id": "11111111-1111-1111-1111-111111111111"
+  },
+  {
+    "body": "Some of your close family have type 2 diabetes. Here is what you shared: mother \u2014 type 2 diabetes, onset 55-59.\n\nA family history like this can make type 2 diabetes somewhat more common within a family, but it is only one piece of the picture \u2014 everyday habits and many other factors matter too.\n\nThis is not a diagnosis. It is a decision-support note based only on the family history you shared, meant to help you and a clinician decide what to look at together.\n\nA good next step is to mention this family history to your doctor at your next visit, so they can advise what (if any) checks make sense for you.",
+    "condition_code": "T2DM",
+    "content_hash": "fc088d0c2fbe4c66f0747bc84746fc8d88b2ff1798aa1a7e06bb8817de95808a",
+    "facts_used": {
+      "condition_code": "T2DM",
+      "condition_display": "type 2 diabetes",
+      "grandparents": [],
+      "min_parent_onset": 57,
+      "parents": [
+        {
+          "certainty": "confirmed",
+          "onset_band": "55_59",
+          "onset_midpoint": 57,
+          "provenance": "self_report",
+          "slot": "mother"
+        }
+      ],
+      "vertical_chain": false,
+      "weighted_load": 1.0
+    },
+    "fired_rules": [
+      "R-DM-01"
+    ],
+    "pipeline_version": 1,
+    "status": "active",
+    "template_key": "tmpl_dm",
+    "template_version": 1,
+    "tier": "worth_knowing",
+    "title": "A note on your family history of type 2 diabetes",
+    "user_id": "11111111-1111-1111-1111-111111111111"
+  },
+  {
+    "body": "Some of your close family have type 2 diabetes. Here is what you shared: father \u2014 type 2 diabetes, onset 55-59; mother \u2014 type 2 diabetes, onset 60-64.\n\nA family history like this can make type 2 diabetes somewhat more common within a family, but it is only one piece of the picture \u2014 everyday habits and many other factors matter too.\n\nThis is not a diagnosis. It is a decision-support note based only on the family history you shared, meant to help you and a clinician decide what to look at together.\n\nA good next step is to mention this family history to your doctor at your next visit, so they can advise what (if any) checks make sense for you.",
+    "condition_code": "T2DM",
+    "content_hash": "5ba092d1cfa877fb29e25573c506e9a8b532c8f0c47b7c555a1c8e94fa9f9beb",
+    "facts_used": {
+      "condition_code": "T2DM",
+      "condition_display": "type 2 diabetes",
+      "grandparents": [],
+      "min_parent_onset": 57,
+      "parents": [
+        {
+          "certainty": "confirmed",
+          "onset_band": "60_64",
+          "onset_midpoint": 62,
+          "provenance": "self_report",
+          "slot": "mother"
+        },
+        {
+          "certainty": "confirmed",
+          "onset_band": "55_59",
+          "onset_midpoint": 57,
+          "provenance": "self_report",
+          "slot": "father"
+        }
+      ],
+      "vertical_chain": false,
+      "weighted_load": 2.0
+    },
+    "fired_rules": [
+      "R-DM-01",
+      "R-DM-02"
+    ],
+    "pipeline_version": 1,
+    "status": "active",
+    "template_key": "tmpl_dm",
+    "template_version": 1,
+    "tier": "worth_discussing",
+    "title": "A note on your family history of type 2 diabetes",
+    "user_id": "22222222-2222-2222-2222-222222222222"
+  },
+  {
+    "body": "Some of your close family have coronary artery disease. Here is what you shared: father \u2014 coronary artery disease, onset 50-54.\n\nA family history like this can make coronary artery disease somewhat more common within a family, but it is only one piece of the picture \u2014 everyday habits and many other factors matter too.\n\nThis is not a diagnosis. It is a decision-support note based only on the family history you shared, meant to help you and a clinician decide what to look at together.\n\nA good next step is to mention this family history to your doctor at your next visit, so they can advise what (if any) checks make sense for you.",
+    "condition_code": "CAD",
+    "content_hash": "2941820e62436a9c91314a91e0efd980f68f8ebf60ba9f75779c60853048b4d3",
+    "facts_used": {
+      "condition_code": "CAD",
+      "condition_display": "coronary artery disease",
+      "grandparents": [],
+      "min_parent_onset": 52,
+      "parents": [
+        {
+          "certainty": "confirmed",
+          "onset_band": "50_54",
+          "onset_midpoint": 52,
+          "provenance": "self_report",
+          "slot": "father"
+        }
+      ],
+      "vertical_chain": false,
+      "weighted_load": 1.0
+    },
+    "fired_rules": [
+      "R-CAD-01"
+    ],
+    "pipeline_version": 1,
+    "status": "active",
+    "template_key": "tmpl_cad",
+    "template_version": 1,
+    "tier": "worth_discussing",
+    "title": "A note on your family history of coronary artery disease",
+    "user_id": "33333333-3333-3333-3333-333333333333"
+  },
+  {
+    "body": "Some of your close family have type 2 diabetes. Here is what you shared: mother \u2014 type 2 diabetes, onset 40-44; maternal grandmother \u2014 type 2 diabetes, onset 65-69.\n\nA family history like this can make type 2 diabetes somewhat more common within a family, but it is only one piece of the picture \u2014 everyday habits and many other factors matter too.\n\nThis is not a diagnosis. It is a decision-support note based only on the family history you shared, meant to help you and a clinician decide what to look at together.\n\nA good next step is to mention this family history to your doctor at your next visit, so they can advise what (if any) checks make sense for you.",
+    "condition_code": "T2DM",
+    "content_hash": "04e1d3042fa93638092e952993568ba4c9e10d5d803a95197abdf18bc8e27a7a",
+    "facts_used": {
+      "condition_code": "T2DM",
+      "condition_display": "type 2 diabetes",
+      "grandparents": [
+        {
+          "certainty": "as_far_as_i_know",
+          "onset_band": "65_69",
+          "onset_midpoint": 67,
+          "provenance": "self_report",
+          "slot": "grandmother_maternal"
+        }
+      ],
+      "min_parent_onset": 42,
+      "parents": [
+        {
+          "certainty": "confirmed",
+          "onset_band": "40_44",
+          "onset_midpoint": 42,
+          "provenance": "self_report",
+          "slot": "mother"
+        }
+      ],
+      "vertical_chain": true,
+      "weighted_load": 1.3
+    },
+    "fired_rules": [
+      "R-DM-01",
+      "R-DM-03",
+      "R-DM-04"
+    ],
+    "pipeline_version": 1,
+    "status": "active",
+    "template_key": "tmpl_dm",
+    "template_version": 1,
+    "tier": "worth_discussing",
+    "title": "A note on your family history of type 2 diabetes",
+    "user_id": "33333333-3333-3333-3333-333333333333"
+  }
+]
