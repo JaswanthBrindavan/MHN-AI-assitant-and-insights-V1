@@ -124,11 +124,14 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     if exact:
         return _first_active(exact)
 
+    # LIMIT without ORDER BY is nondeterministic on PostgreSQL — the candidate
+    # window must be stable so the same query always resolves the same drug.
     prefix = list(
         (
             await db.execute(
                 select(DrugReference)
                 .where(DrugReference.name_normalized.like(f"{norm} %"))
+                .order_by(DrugReference.name_normalized, DrugReference.id)
                 .limit(25)
             )
         ).scalars().all()
@@ -141,6 +144,7 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
             await db.execute(
                 select(DrugReference)
                 .where(DrugReference.composition_normalized.like(f"%{norm}%"))
+                .order_by(DrugReference.name_normalized, DrugReference.id)
                 .limit(50)
             )
         ).scalars().all()
