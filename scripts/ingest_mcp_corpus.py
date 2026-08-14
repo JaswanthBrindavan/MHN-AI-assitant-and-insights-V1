@@ -15,6 +15,8 @@ Run:  python -m scripts.ingest_mcp_corpus "/path/to/Documents"
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -35,11 +37,38 @@ ENGINE_CODE_MAP: dict[str, str] = {
 }
 
 
+def _content_fingerprint(parsed) -> str:
+    payload = json.dumps(
+        {"display": parsed.display_name, "sections": parsed.sections},
+        sort_keys=True,
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def _deactivate_condition(db: AsyncSession, code: str) -> None:
+    """Deactivate a registry row + remove chunks for a duplicate-content code."""
+    row = (
+        await db.execute(
+            select(ConditionRegistry).where(
+                ConditionRegistry.condition_code == code
+            )
+        )
+    ).scalars().first()
+    if row is not None:
+        row.active = False
+    await db.execute(delete(McpChunk).where(McpChunk.condition_code == code))
+
+
 async def ingest_mcp_folder(db: AsyncSession, folder: Path) -> dict:
     files = sorted(folder.glob("*.docx"))
     stats = {"files": len(files), "ingested": 0, "chunks": 0,
-             "duplicates": [], "errors": []}
+             "duplicates": [], "duplicate_content": [], "errors": []}
     seen_codes: set[str] = set()
+    # Same parsed CONTENT under two codes (the corpus ships 15 such pairs,
+    # e.g. PCOS as both MC005 and MC535) → keep the first code, deactivate
+    # the second so retrieval never returns byte-identical chunk pairs.
+    seen_content: dict[str, str] = {}
 
     for path in files:
         if path.name.startswith("~$"):  # Word lock files
@@ -57,6 +86,16 @@ async def ingest_mcp_folder(db: AsyncSession, folder: Path) -> dict:
             stats["duplicates"].append(path.name)
             continue
         seen_codes.add(parsed.code)
+
+        fingerprint = _content_fingerprint(parsed)
+        kept_code = seen_content.get(fingerprint)
+        if kept_code is not None:
+            stats["duplicate_content"].append(
+                f"{parsed.code} ({path.name}) == {kept_code}"
+            )
+            await _deactivate_condition(db, parsed.code)
+            continue
+        seen_content[fingerprint] = parsed.code
 
         chunks = build_chunks(parsed)
         if not chunks:
@@ -115,10 +154,13 @@ async def _main(folder: str) -> None:
     print(
         f"MCP corpus: {stats['ingested']} conditions ingested, "
         f"{stats['chunks']} chunks, {len(stats['duplicates'])} duplicate files "
-        f"skipped, {len(stats['errors'])} errors."
+        f"skipped, {len(stats['duplicate_content'])} duplicate-content codes "
+        f"deactivated, {len(stats['errors'])} errors."
     )
     for dup in stats["duplicates"]:
         print(f"  duplicate: {dup}")
+    for dup in stats["duplicate_content"]:
+        print(f"  duplicate-content: {dup}")
     for err in stats["errors"]:
         print(f"  error: {err}")
 

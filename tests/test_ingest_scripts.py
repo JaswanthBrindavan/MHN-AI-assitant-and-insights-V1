@@ -617,7 +617,8 @@ async def test_mcp_title_only_file_produces_no_chunks_error(db_session, tmp_path
 async def test_mcp_empty_folder(db_session, tmp_path):
     stats = await ingest_mcp_folder(db_session, tmp_path)
     assert stats == {
-        "files": 0, "ingested": 0, "chunks": 0, "duplicates": [], "errors": [],
+        "files": 0, "ingested": 0, "chunks": 0, "duplicates": [],
+        "duplicate_content": [], "errors": [],
     }
 
 

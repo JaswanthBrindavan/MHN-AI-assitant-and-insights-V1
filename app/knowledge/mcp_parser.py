@@ -71,7 +71,33 @@ def extract_code_from_filename(filename: str) -> str | None:
 
 
 # Parenthetical inners that are commentary rather than usable abbreviations.
-_PAREN_JUNK_RE = re.compile(r"[+/]|(\b(?:lay|term|clinical|ayurvedic|form)\b)", re.IGNORECASE)
+_PAREN_JUNK_RE = re.compile(
+    r"[+/]|(\b(?:lay|terms?|clinical|ayurvedic|form|hindi|tamil|marathi|telugu|"
+    r"kannada|bengali|urdu|colloquial|historical|regional|formerly|archaic|"
+    r"informal|slang)\b)",
+    re.IGNORECASE,
+)
+
+# Alias fragments that are enumeration/commentary debris, not condition names:
+# articles, connectives, language/register labels, "formerly ..." notes.
+_ALIAS_JUNK_PREFIX_RE = re.compile(
+    r"^(?:a|an|the|or|and|also|when|with|without|formerly|previously|"
+    r"historically?|colloquial(?:ly)?|informal(?:ly)?|lay(?:\s+terms?)?|"
+    r"hindi|tamil|marathi|telugu|kannada|bengali|urdu|e\.?g|i\.?e|etc)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_junk_alias(fragment: str) -> bool:
+    """Reject enumeration debris so it never becomes a scoping keyword."""
+    if _ALIAS_JUNK_PREFIX_RE.match(fragment):
+        return True
+    # Unbalanced parentheses/quotes → a fragment split mid-parenthetical.
+    if fragment.count("(") != fragment.count(")"):
+        return True
+    if fragment.count('"') % 2 or (fragment.count("“") != fragment.count("”")):
+        return True
+    return False
 
 
 def parse_aka_line(line: str) -> list[str]:
@@ -96,7 +122,7 @@ def parse_aka_line(line: str) -> list[str]:
 
     for part in re.split(r"[,;]", text):
         part = part.strip()
-        if not part:
+        if not part or _is_junk_alias(part):
             continue
         _add(part)
         # "Name (ABBR)" → also "Name" and "ABBR" (skipping commentary parens).
@@ -105,13 +131,27 @@ def parse_aka_line(line: str) -> list[str]:
         if base and base != part:
             _add(base)
         for inner in inners:
-            if not _PAREN_JUNK_RE.search(inner):
+            inner = inner.strip()
+            # Inners face BOTH junk filters: "(the eggs)" and "(Hindi)" are
+            # commentary, not names.
+            if not _PAREN_JUNK_RE.search(inner) and not _is_junk_alias(inner):
                 _add(inner)
     return aliases
 
 
+# Real section-marker paragraphs are short headings ("Lifestyle Health
+# Parameters ( LHP )" = 35 chars). Prose that merely BEGINS with a marker word
+# ("Diagnosis of acute pancreatitis follows the 2012 Revised Atlanta…",
+# "Clinical features alone are unreliable…") must not be treated as a marker —
+# that silently deleted diagnosis content in 8 corpus files.
+MAX_MARKER_LEN = 45
+
+
 def _match_marker(text: str) -> str | None:
-    low = text.strip().lower()
+    stripped = text.strip()
+    if len(stripped) > MAX_MARKER_LEN:
+        return None
+    low = stripped.lower()
     for marker, section in SECTION_MARKERS.items():
         if low.startswith(marker):
             return section
@@ -189,19 +229,37 @@ def parse_mcp_docx(path: str | Path) -> ParsedMcp:
     )
 
 
+def _split_long_line(line: str, budget: int) -> list[str]:
+    """Split an over-budget line at sentence boundaries (best effort)."""
+    if len(line) <= budget:
+        return [line]
+    pieces: list[str] = []
+    buf = ""
+    for sentence in re.split(r"(?<=[.!?])\s+", line):
+        if buf and len(buf) + len(sentence) + 1 > budget:
+            pieces.append(buf)
+            buf = sentence
+        else:
+            buf = f"{buf} {sentence}".strip()
+    if buf:
+        pieces.append(buf)
+    return pieces
+
+
 def _split_to_chunks(header: str, lines: list[str]) -> list[str]:
     """Pack lines into chunks of at most MAX_CHUNK_CHARS (header included)."""
+    budget = MAX_CHUNK_CHARS - len(header) - 1
     chunks: list[str] = []
     buf: list[str] = []
     size = len(header)
-    for line in lines:
-        line_len = len(line) + 1
-        if buf and size + line_len > MAX_CHUNK_CHARS:
-            chunks.append(header + "\n" + "\n".join(buf))
-            buf, size = [], len(header)
-        # A single line longer than the cap still becomes its own chunk.
-        buf.append(line)
-        size += line_len
+    for raw_line in lines:
+        for line in _split_long_line(raw_line, budget):
+            line_len = len(line) + 1
+            if buf and size + line_len > MAX_CHUNK_CHARS:
+                chunks.append(header + "\n" + "\n".join(buf))
+                buf, size = [], len(header)
+            buf.append(line)
+            size += line_len
     if buf:
         chunks.append(header + "\n" + "\n".join(buf))
     return chunks

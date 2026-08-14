@@ -77,9 +77,11 @@ async def resolve_scope(
     if index is None:
         return scope_codes(message, user_condition_codes)
     codes = index.match_message(message)
-    codes |= index.map_engine_codes(set(user_condition_codes))
-    # Static extraction still contributes (covers legacy-coded chunks by name).
-    codes |= extract_condition_codes(message)
+    # Static extraction contributes AND is mapped to MC codes: "diabetes" has
+    # no bare registry alias, but static T2DM → MC001 reaches the real profile.
+    codes |= index.map_engine_codes(
+        set(user_condition_codes) | extract_condition_codes(message)
+    )
     return codes
 
 
@@ -87,13 +89,47 @@ def _tokens(text: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS and len(t) > 2]
 
 
+# Query-intent → chunk-section boost: "how is X diagnosed" should favour the
+# diagnosis/tests chunks even when token overlap is thin ("diagnosed" and
+# "diagnosis" don't token-match).
+_SECTION_INTENT: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("diagnos", ("diagnosis", "tests_quantitative", "tests_qualitative")),
+    ("test", ("tests_quantitative", "tests_qualitative", "diagnosis")),
+    ("symptom", ("symptoms", "signs")),
+    ("sign", ("signs", "symptoms")),
+    ("cause", ("etiology", "risk_profiles")),
+    ("why", ("etiology",)),
+    ("complicat", ("complications",)),
+    ("treat", ("suggestions",)),
+    ("manage", ("suggestions", "lifestyle_influence")),
+    ("prevent", ("suggestions", "lifestyle_influence")),
+    ("diet", ("suggestions", "lifestyle_influence")),
+    ("food", ("suggestions", "lifestyle_influence")),
+    ("exercis", ("suggestions", "lifestyle_influence")),
+    ("lifestyle", ("lifestyle_influence", "suggestions")),
+)
+_SECTION_BOOST = 0.05
+
+
+def _section_boost(message_lower: str, chunk_type: str) -> float:
+    base_section = chunk_type.rsplit("_", 1)[0] if chunk_type[-1:].isdigit() else chunk_type
+    for stem, sections in _SECTION_INTENT:
+        if stem in message_lower and (
+            base_section in sections or chunk_type in sections
+        ):
+            return _SECTION_BOOST
+    return 0.0
+
+
 def _keyword_rank(rows: list[McpChunk], message: str) -> list[RetrievedChunk]:
     query_tokens = set(_tokens(message))
+    message_lower = message.lower()
     scored: list[RetrievedChunk] = []
     for r in rows:
         content_tokens = _tokens(r.content)
         overlap = sum(1 for t in content_tokens if t in query_tokens)
         score = overlap / (1 + len(content_tokens)) if content_tokens else 0.0
+        score += _section_boost(message_lower, r.chunk_type)
         scored.append(
             RetrievedChunk(
                 id=str(r.id),

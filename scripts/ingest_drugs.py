@@ -28,6 +28,13 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+def _first_segment(raw: str) -> str:
+    """Resolve merge artifacts: the source CSV merge joined conflicting cells
+    with ' | ' ('218.81 | 150', 'Acecare SP Tablet | Acecare-SP Tablet').
+    The first segment is the primary source's value."""
+    return raw.split(" | ", 1)[0].strip() if " | " in raw else raw.strip()
+
+
 def _parse_price(raw: str) -> float | None:
     raw = raw.strip()
     if not raw or raw.upper() == "NA":
@@ -45,9 +52,11 @@ def _parse_bool(raw: str) -> bool:
 def _collect(row: dict, prefix: str, count: int) -> list[str]:
     out: list[str] = []
     for i in range(count):
-        value = (row.get(f"{prefix}{i}") or "").strip()
-        if value and value.upper() != "NA" and value not in out:
-            out.append(value)
+        raw = (row.get(f"{prefix}{i}") or "").strip()
+        # Merge artifacts in list cells carry BOTH values — keep each.
+        for value in (v.strip() for v in raw.split(" | ")):
+            if value and value.upper() != "NA" and value not in out:
+                out.append(value)
     return out
 
 
@@ -59,25 +68,33 @@ def _clip(text: str | None, limit: int) -> str | None:
 
 def row_to_record(row: dict) -> dict | None:
     """Map one CSV row to a drug_reference insert dict (None → skip)."""
-    name = (row.get("name") or "").strip()
+    name = _first_segment(row.get("name") or "")
     if not name:
         return None
-    comp1 = (row.get("short_composition1") or "").strip() or None
-    comp2 = (row.get("short_composition2") or "").strip() or None
+    comp1 = _first_segment(row.get("short_composition1") or "") or None
+    comp2 = _first_segment(row.get("short_composition2") or "") or None
     comp_norm = _norm(" ".join(c for c in (comp1, comp2) if c)) or None
 
-    habit = (row.get("Habit Forming") or "").strip() or None
+    habit = _first_segment(row.get("Habit Forming") or "") or None
     return {
         "source_id": _clip(
             (row.get("id_indian") or row.get("id_dataset") or "").strip() or None, 32
         ),
         "name": _clip(name, 255),
         "name_normalized": _clip(_norm(name), 255),
-        "manufacturer": _clip((row.get("manufacturer_name") or "").strip() or None, 255),
-        "dosage_type": _clip((row.get("type") or "").strip() or None, 64),
-        "pack_size": _clip((row.get("pack_size_label") or "").strip() or None, 128),
-        "price_inr": _parse_price(row.get("price(₹)") or row.get("price") or ""),
-        "is_discontinued": _parse_bool(row.get("Is_discontinued") or ""),
+        "manufacturer": _clip(
+            _first_segment(row.get("manufacturer_name") or "") or None, 255
+        ),
+        "dosage_type": _clip(_first_segment(row.get("type") or "") or None, 64),
+        "pack_size": _clip(
+            _first_segment(row.get("pack_size_label") or "") or None, 128
+        ),
+        "price_inr": _parse_price(
+            _first_segment(row.get("price(₹)") or row.get("price") or "")
+        ),
+        "is_discontinued": _parse_bool(
+            _first_segment(row.get("Is_discontinued") or "")
+        ),
         "composition1": _clip(comp1, 255),
         "composition2": _clip(comp2, 255),
         "composition_normalized": _clip(comp_norm, 512),

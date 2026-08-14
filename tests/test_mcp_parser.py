@@ -150,7 +150,7 @@ def test_aka_ie_without_trailing_comma():
 
 
 def test_aka_empty_alias_segments_dropped():
-    assert parse_aka_line("AKA i.e., A,, B,") == ["A", "B"]
+    assert parse_aka_line("AKA i.e., Alpha,, Beta,") == ["Alpha", "Beta"]
 
 
 def test_aka_case_insensitive_dedupe_keeps_first_spelling():
@@ -199,7 +199,9 @@ def test_aka_paren_inner_length_bounds():
 
 
 def test_aka_semicolon_separators():
-    assert parse_aka_line("AKA i.e., A; B, C") == ["A", "B", "C"]
+    # (single letters like "A" are rejected by the junk-alias filter, so use
+    # realistic alias words)
+    assert parse_aka_line("AKA i.e., Alpha; Beta, Gamma") == ["Alpha", "Beta", "Gamma"]
 
 
 def test_aka_curly_quotes_stripped():
