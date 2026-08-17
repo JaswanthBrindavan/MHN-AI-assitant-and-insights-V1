@@ -19,10 +19,12 @@ from app.charts.svg import chart_payload
 from app.chat.abilities import (
     DocumentQuery,
     MetricQuery,
+    StatedValue,
     SummaryQuery,
     TrackerAdd,
     parse_document_query,
     parse_metric_query,
+    parse_stated_value,
     parse_suggestion_query,
     parse_summary_query,
     parse_tracker_add,
@@ -37,6 +39,7 @@ from app.coredata.service import (
     vital_series,
     window_start,
 )
+from app.health import ranges as health_ranges
 from app.knowledge.registry import load_condition_index
 from app.models.chat import McpChunk
 from app.models.common import utcnow
@@ -47,6 +50,94 @@ _NOT_MEDICAL_ADVICE = (
     "This is your own recorded data, not medical advice — please discuss any "
     "concerns with your doctor."
 )
+
+# Never diagnoses; always routes an out-of-range reading to a clinician.
+_NOT_A_DIAGNOSIS_LINE = (
+    "This is not a diagnosis — a single reading can't confirm any condition, "
+    "and only a doctor can interpret it in the context of your history and "
+    "other tests."
+)
+
+
+# --------------------------------------------------------------------------- #
+# Stated-value reference-range check ("my sugar is 117 …")
+# --------------------------------------------------------------------------- #
+def _value_check_reply(stated: StatedValue) -> dict | None:
+    """Compare a stated reading to its DRAFT reference range — safe, no diagnosis.
+
+    In range → reassure + keep monitoring. Out of range → flag against the
+    typical range and route to a doctor. NEVER names a disease.
+    """
+    if stated.metric == "blood_pressure":
+        verdict = health_ranges.classify_bp(stated.value, stated.secondary)
+        reading = (
+            f"{_g(stated.value)}/{_g(stated.secondary)} mmHg"
+            if stated.secondary is not None else f"{_g(stated.value)} mmHg"
+        )
+    else:
+        verdict = health_ranges.classify(stated.metric, stated.value)
+        if verdict is None:
+            return None
+        unit = health_ranges.RANGES[stated.metric].unit
+        reading = f"{_g(stated.value)} {unit}"
+
+    art = _article(verdict.label)
+    if verdict.status == "in_range":
+        body = (
+            f"{art} {verdict.label} of {reading} is within the typical range "
+            f"({verdict.range_text}). That's reassuring. Keep monitoring as "
+            f"your doctor advises, and mention any symptoms or concerns at your "
+            f"next visit."
+        )
+        action = "review_with_clinician"
+    else:
+        direction = "above" if verdict.status == "above" else "below"
+        body = (
+            f"{art} {verdict.label} of {reading} is {direction} the typical "
+            f"range ({verdict.range_text}). {_NOT_A_DIAGNOSIS_LINE} Please "
+            f"consult your doctor, who can confirm the reading and advise on "
+            f"next steps."
+        )
+        action = "discuss_with_clinician"
+    if verdict.note:
+        body += f" {verdict.note}"
+
+    return {
+        "reply": body,
+        "action": action,
+        "provenance": {
+            "path": "value_check",
+            "metric": stated.metric,
+            "status": verdict.status,
+        },
+    }
+
+
+def _g(v: float) -> str:
+    return str(int(v)) if float(v).is_integer() else f"{v:g}"
+
+
+def _article(label: str) -> str:
+    """'A' / 'An' by the label's first spoken sound (handles vowel-sound
+    acronyms like HbA1c, HDL, LDL, SpO2)."""
+    w = label.strip().lower()
+    if w[:1] in "aeiou" or w[:5] == "hba1c" or w[:3] in ("hdl", "ldl", "spo"):
+        return "An"
+    return "A"
+
+
+async def handle_value_check(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """Deterministic reference-range check for a value the user states.
+
+    (``db``/``user_id`` are accepted for a uniform handler signature and future
+    recorded-value comparison; the stated-value path needs neither.)
+    """
+    stated = parse_stated_value(message)
+    if stated is None:
+        return None
+    return _value_check_reply(stated)
 
 
 # --------------------------------------------------------------------------- #

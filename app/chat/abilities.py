@@ -275,6 +275,77 @@ def parse_metric_query(message: str) -> MetricQuery | None:
 
 
 # --------------------------------------------------------------------------- #
+# Stated-value check ("my sugar is 117", "bp is 150/95", "hba1c 6.8")
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class StatedValue:
+    metric: str                    # range key, or "blood_pressure"
+    value: float
+    secondary: float | None = None  # diastolic, for blood pressure
+
+
+# metric term → range key (order matters: specific before generic).
+_VALUE_METRIC_TERMS: tuple[tuple[str, str], ...] = (
+    (r"hba1c|hb a1c|\ba1c\b|glycated h(?:a)?emoglobin", "hba1c"),
+    (r"blood pressure|\bbp\b", "blood_pressure"),
+    (r"\bldl\b", "ldl"),
+    (r"\bhdl\b", "hdl"),
+    (r"total cholesterol|cholesterol", "total_cholesterol"),
+    (r"h(?:a)?emoglobin|\bhb\b|\bhg\b", "hemoglobin"),
+    (r"blood sugar|sugar|glucose|fasting sugar", "blood_sugar"),
+    (r"heart rate|pulse|heartbeat", "heart_rate"),
+    (r"spo2|oxygen (?:level|saturation)|sat", "spo2"),
+    (r"\bbmi\b", "bmi"),
+)
+# Plausible reading bounds per metric — also reject spurious number matches.
+_VALUE_BOUNDS: dict[str, tuple[float, float]] = {
+    "hba1c": (3.0, 20.0),
+    "blood_pressure": (60.0, 300.0),
+    "ldl": (20.0, 500.0),
+    "hdl": (10.0, 200.0),
+    "total_cholesterol": (50.0, 700.0),
+    "hemoglobin": (3.0, 25.0),
+    "blood_sugar": (30.0, 900.0),
+    "heart_rate": (25.0, 260.0),
+    "spo2": (40.0, 100.0),
+    "bmi": (8.0, 80.0),
+}
+_BP_VALUE_RE = re.compile(r"(\d{2,3})\s*/\s*(\d{2,3})")
+_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def parse_stated_value(message: str) -> StatedValue | None:
+    """Parse a reading the user states about themselves ("my sugar is 117").
+
+    Returns None when no metric+plausible-value pair is present. The value must
+    sit within a short window after the metric term so unrelated numbers
+    ("sugar, and I walked 5 km") are not picked up.
+    """
+    low = message.lower()
+    for pattern, key in _VALUE_METRIC_TERMS:
+        m = re.search(pattern, low)
+        if not m:
+            continue
+        window = low[m.end(): m.end() + 24]
+        lo, hi = _VALUE_BOUNDS[key]
+        if key == "blood_pressure":
+            bp = _BP_VALUE_RE.search(window) or _BP_VALUE_RE.search(low)
+            if not bp:
+                continue
+            sysv, diav = float(bp.group(1)), float(bp.group(2))
+            if lo <= sysv <= hi:
+                return StatedValue("blood_pressure", sysv, diav)
+            continue
+        num = _NUM_RE.search(window)
+        if not num:
+            continue
+        value = float(num.group())
+        if lo <= value <= hi:
+            return StatedValue(key, value)
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Health summary
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)

@@ -39,6 +39,30 @@ class ActiveSymptomState(Base, UUIDPrimaryKey, CreatedAt):
     )
 
 
+class UserMemory(Base, UUIDPrimaryKey, CreatedAt):
+    """Long-term, cross-session memory of what a user has discussed.
+
+    Deduplicated per (user, kind, mem_key); ``mention_count`` + ``last_seen_at``
+    track recency and frequency. Stores discussion TOPICS (condition codes +
+    display names) and coarse red-flag terms only — never raw message text, so
+    no PHI is persisted here (receipts already hash messages).
+    """
+
+    __tablename__ = "user_memories"
+    __table_args__ = (
+        sa.UniqueConstraint("user_id", "kind", "mem_key", name="uq_user_memory"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(sa.String(24), nullable=False)   # condition_topic | flag
+    mem_key: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    value: Mapped[str] = mapped_column(sa.String(200), nullable=False)
+    mention_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False
+    )
+
+
 class ConversationSession(Base, UUIDPrimaryKey, CreatedAt):
     __tablename__ = "conversation_sessions"
 

@@ -51,16 +51,37 @@ def format_chunks(chunks: list[RetrievedChunk]) -> str:
     return "\n".join(f"[{i}] {c.content}" for i, c in enumerate(chunks, start=1))
 
 
+def format_recent_turns(turns: list[dict]) -> str:
+    """Render the last few verbatim turns for follow-up resolution."""
+    lines = []
+    for t in turns:
+        who = "User" if t.get("role") == "user" else "Davi"
+        text = (t.get("message") or "").strip().replace("\n", " ")
+        if text:
+            lines.append(f"{who}: {text[:400]}")
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     chunks: list[RetrievedChunk],
     patient_context: str,
     compacted_context_json: str | None = None,
+    recent_turns: list[dict] | None = None,
 ) -> str:
     parts = [_SAFETY_RULES, _GROUNDING_RULES]
     # Only spend the personalization budget when personal data is actually
     # present in [P] (the snapshot line is unmistakable).
     if patient_context and "own recorded data" in patient_context:
         parts.append(_PERSONALIZATION_RULES)
+    # Recent verbatim turns let the model resolve follow-ups ("is it serious?",
+    # "what about for children?") and refer back to its own earlier answers.
+    if recent_turns:
+        rendered = format_recent_turns(recent_turns)
+        if rendered:
+            parts.append(
+                "Recent conversation so far (context for follow-up questions; "
+                "the user's latest message is answered below):\n" + rendered
+            )
     if compacted_context_json:
         parts.append("COMPACTED_CONTEXT_JSON:\n" + compacted_context_json)
     if chunks:

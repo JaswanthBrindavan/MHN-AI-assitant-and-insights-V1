@@ -35,7 +35,9 @@ from app.chat.data_handlers import (
     handle_suggestion_query,
     handle_summary_query,
     handle_tracker_add,
+    handle_value_check,
 )
+from app.chat.long_term import recall, record_topics
 from app.chat.replies import (
     GREETING_REPLY,
     IDENTITY_REPLY,
@@ -293,7 +295,11 @@ async def _dispatch(
             # standalone deployment) must roll back only its own writes and
             # leave the session usable for the RAG fallback.
             async with db.begin_nested():
-                ability = await handle_tracker_add(db, user_id, message)
+                # A stated reading ("my sugar is 117") is specific — check it
+                # against reference ranges before the other parsers.
+                ability = await handle_value_check(db, user_id, message)
+                if ability is None:
+                    ability = await handle_tracker_add(db, user_id, message)
                 if ability is None:
                     ability = await handle_document_query(db, user_id, message)
                 if ability is None:
@@ -394,7 +400,29 @@ async def _dispatch(
                 )
         except Exception:  # noqa: BLE001 — enrichment must never break a reply
             logger.warning("health snapshot failed; continuing", exc_info=True)
+
+    # Short-term memory: recent verbatim turns drive follow-up resolution. The
+    # last entry is the current message (already persisted) — the PRIOR turns
+    # are the conversational context.
+    compacted_summary, recent = await assemble_context(db, session_id)
+    prior_turns = recent[:-1] if recent else []
+
     codes = await resolve_scope(db, message, user_codes)
+    # Scope carry-forward: a follow-up like "is it serious?" names no condition
+    # of its own, so inherit the topic from the reader's OWN recent questions.
+    # Keying on "did THIS message name a condition" (message-only scope) rather
+    # than on `codes` — which is never empty for users with a pedigree — so the
+    # topic carries for everyone. Union with `codes` keeps pedigree context.
+    message_named_condition = bool(await resolve_scope(db, message, set()))
+    if not message_named_condition and prior_turns:
+        recent_user_text = " ".join(
+            m["message"] for m in prior_turns[-6:] if m.get("role") == "user"
+        )
+        carried = await resolve_scope(db, recent_user_text, set())
+        if carried:
+            codes = codes | carried
+            t("Follow-up", f"carried topic scope from recent turns: "
+              f"{sorted(carried)[:4]}")
     chunks = await retrieve_chunks(db, codes, message)
     used_rag = bool(chunks)
     try:
@@ -404,6 +432,20 @@ async def _dispatch(
         ) if _idx else []
     except Exception:  # noqa: BLE001
         _names = []
+        _idx = None
+
+    # Long-term memory: record the topics discussed (code → display) and any
+    # red-flag terms, and recall past topics into the [P] context for this and
+    # future sessions. Fail-open — never breaks a reply.
+    if codes:
+        topics = {
+            c: (_idx.by_code[c].display_name if _idx and c in _idx.by_code else c)
+            for c in codes
+        }
+        await record_topics(db, user_id, topics, flags=tr.matched_terms)
+    recalled = await recall(db, user_id)
+    if recalled:
+        patient_text = f"{patient_text}\n\n{recalled}" if patient_text else recalled
     if _names:
         t("Knowledge scope", "matched conditions: " + ", ".join(_names[:4]))
     elif codes:
@@ -481,10 +523,12 @@ async def _dispatch(
                 trace=trace,
             )
 
-    # Prepend COMPACTED_CONTEXT_JSON when a summary exists for this session.
-    compacted_summary, _recent = await assemble_context(db, session_id)
+    # COMPACTED_CONTEXT_JSON (summary) + recent verbatim turns (both fetched
+    # above) give the model long-window and short-window conversational memory.
     compacted_json = json.dumps(compacted_summary) if compacted_summary else None
-    system = build_system_prompt(chunks, patient_text, compacted_json)
+    system = build_system_prompt(
+        chunks, patient_text, compacted_json, recent_turns=prior_turns[-6:]
+    )
     directive = language_directive(lang)
     if directive:
         system = system + "\n\n" + directive
