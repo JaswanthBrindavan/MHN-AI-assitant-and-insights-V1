@@ -1,12 +1,27 @@
-"""JWT auth (HS256) and object-level authorization helpers.
+"""JWT auth and object-level authorization helpers.
 
-Auth is gated by ``AUTH_ENABLED``. When disabled (dev/tests) the caller's
-identity is taken from an ``X-User-Id`` header, falling back to a fixed dev
-user. When enabled, a Bearer JWT is required and ``sub`` carries the user UUID.
+Aligned with the mhn-spring production backend: session tokens are HS512 JWTs
+whose ``sub`` claim carries the user UUID, signed with the shared JWT_SECRET —
+which Spring Base64-DECODES before use as the HMAC key (JwtService.java:
+``Decoders.BASE64.decode(jwtSecret)`` → ``hmacShaKeyFor``). We mirror that via
+``jwt_secret_base64`` (default on; falls back to the raw string when the value
+isn't valid Base64).
+
+Two accepted credentials when ``AUTH_ENABLED``:
+  1. A user session JWT (Bearer) — validated here, identity from ``sub``.
+  2. A static service token (Bearer) + ``X-User-Id`` — the Spring↔mhn-ai
+     pattern (AI_TOKEN / MHN_SERVICE_TOKEN): the caller is a trusted backend
+     that already authenticated the user. Constant-time compared; disabled
+     unless SERVICE_TOKEN is configured (≥32 chars).
+
+When ``AUTH_ENABLED=false`` (dev/tests) identity comes from ``X-User-Id``.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 from uuid import UUID
 
 from fastapi import Header, HTTPException, status
@@ -16,6 +31,20 @@ from app.config import get_settings
 
 # Stable dev identity used when AUTH_ENABLED=false and no header is supplied.
 DEV_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+
+def _hmac_key(settings) -> str | bytes:
+    """The HMAC key bytes, Base64-decoding the secret the way Spring does.
+
+    Falls back to the raw string when decoding fails or is disabled, so dev
+    setups with a plain-text secret keep working.
+    """
+    if settings.jwt_secret_base64:
+        try:
+            return base64.b64decode(settings.jwt_secret, validate=True)
+        except (binascii.Error, ValueError):
+            return settings.jwt_secret
+    return settings.jwt_secret
 
 
 def _parse_bearer(authorization: str | None) -> str:
@@ -49,9 +78,32 @@ async def get_current_user_id(
         return DEV_USER_ID
 
     token = _parse_bearer(authorization)
+
+    # Service-token path (server-to-server, e.g. the React BFF or Spring):
+    # constant-time compare; the caller must say WHO the user is.
+    if (
+        settings.service_token
+        and len(settings.service_token) >= 32
+        and hmac.compare_digest(token, settings.service_token)
+    ):
+        if not x_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="X-User-Id required with a service token",
+            )
+        try:
+            return UUID(x_user_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid X-User-Id",
+            ) from exc
+
     try:
         payload = jwt.decode(
-            token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
+            token,
+            _hmac_key(settings),
+            algorithms=[settings.jwt_algorithm],
         )
     except JWTError as exc:
         raise HTTPException(

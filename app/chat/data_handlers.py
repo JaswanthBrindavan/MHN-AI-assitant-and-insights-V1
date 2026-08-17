@@ -320,6 +320,7 @@ async def handle_document_query(
     hits = await latest_documents(
         db, owner_id, list(query.kinds),
         owner_label=owner_label, include_private=include_private,
+        viewer_id=user_id,
     )
     if not hits:
         kinds = ", ".join(query.kinds)
@@ -336,7 +337,9 @@ async def handle_document_query(
     lines = []
     for h in hits:
         when = h.created_at.strftime("%d %b %Y") if h.created_at else "date unknown"
-        name = h.filepath.rsplit("/", 1)[-1]
+        # Prefer the AI classification title (production scans have no name
+        # column); fall back to the file's basename.
+        name = h.title or h.filepath.rsplit("/", 1)[-1]
         lines.append(f"• {h.kind} — {name} ({when})")
     lead = (
         f"Here {'is' if len(hits) == 1 else 'are'} the most recent "
@@ -412,13 +415,23 @@ async def handle_tracker_add(
 # Metric pulls
 # --------------------------------------------------------------------------- #
 def _search_content_for_param(content, terms: tuple[str, ...]):
-    """Recursively search a report's extracted JSON for a named parameter."""
+    """Recursively search a report's extracted JSON for a named parameter.
+
+    Handles both the legacy demo shape ({"tests": [{"name","value","unit"}]})
+    and the production mhn-ai envelope (content.ai.extraction.results[] with
+    "test_name", verbatim string "value" — possibly with comparators — and a
+    Python-computed "value_numeric").
+    """
     if isinstance(content, dict):
         name = str(
             content.get("name") or content.get("parameter") or content.get("test")
-            or ""
+            or content.get("test_name") or ""
         ).lower()
         if name and any(t in name for t in terms):
+            # Production pre-computes the numeric value — trust it first.
+            vn = content.get("value_numeric")
+            if isinstance(vn, (int, float)):
+                return float(vn), content.get("unit")
             for value_key in ("value", "result", "reading"):
                 raw = content.get(value_key)
                 if raw is not None:

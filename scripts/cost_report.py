@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 from app.chat.orchestrator import handle_chat
 from app.config import get_settings
@@ -28,7 +29,7 @@ OUT_RATE = 5.0 / 1_000_000   # Haiku 4.5 output $5.00 / MTok
 
 # (category, question, user) — 50 genuinely different types.
 D, F = DEEPA, FARAH
-QUESTIONS: list[tuple[str, str, object]] = [
+QUESTIONS: list[tuple[str, str, uuid.UUID]] = [
     # Educational / corpus (RAG → LLM)
     ("corpus", "what is hypothyroidism?", F),
     ("corpus", "what are the symptoms of type 2 diabetes?", F),

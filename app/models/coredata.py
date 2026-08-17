@@ -46,6 +46,7 @@ COREDATA_TABLES = {
     "family_connect",
     "relations",
     "family_file_access",
+    "file_access_exclusions",
     "traditional_health_parameters",
     "thp_age_range",
 }
@@ -212,15 +213,46 @@ class MedicineTracking(Base):
 
 
 class FamilyConnect(Base):
+    """Family link + consent. Production semantics (FileServiceImpl
+    hasConnectionRead): the read grant sits on the OWNER's side — ``req_read``
+    when the owner sent the request, ``acc_read`` when they accepted. The
+    older ``req_file_share``/``acc_file_share`` columns remain in the baseline
+    schema; production's ddl-auto added the new ones, so both are mapped
+    nullable and readers prefer new-with-fallback."""
+
     __tablename__ = "family_connect"
 
     id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
     requester_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
     acceptor_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
     accepted: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
-    req_file_share: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
+    req_file_share: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     acc_file_share: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    req_read: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    acc_read: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     relation_id: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+
+
+class FileAccessExclusion(Base):
+    """Per-file opt-out from family sharing (production consent layer).
+
+    A row means: ``user_id`` (the VIEWER) is excluded from this specific
+    resource even though connection-level read is granted. Mirrors
+    file_access_exclusions, which supersedes the legacy family_file_access.
+    """
+
+    __tablename__ = "file_access_exclusions"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "user_id", "resource_type", "resource_id",
+            name="uq_file_access_exclusion",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    resource_type: Mapped[str] = mapped_column(sa.String(32), nullable=False)
+    resource_id: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
 
 class Relation(Base):

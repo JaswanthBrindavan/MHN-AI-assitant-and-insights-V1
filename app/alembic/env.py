@@ -24,6 +24,12 @@ if not config.get_main_option("sqlalchemy.url"):
 
 target_metadata = Base.metadata
 
+# Namespaced version table, mirroring the production convention (mhn-ai uses
+# ai_alembic_version; Flyway keeps flyway_schema_history). On the SHARED
+# production database, schema is owned by mhn-spring's Flyway — this Alembic
+# chain builds local/test databases only (see db/flyway/ for the exported DDL).
+VERSION_TABLE = "davi_alembic_version"
+
 
 def include_object(obj, name, type_, reflected, compare_to) -> bool:
     """Never manage tables owned by the core app (Flyway) or another chain."""
@@ -41,6 +47,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         include_object=include_object,
+        version_table=VERSION_TABLE,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -58,6 +65,7 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             compare_type=True,
             include_object=include_object,
+            version_table=VERSION_TABLE,
         )
         with context.begin_transaction():
             context.run_migrations()

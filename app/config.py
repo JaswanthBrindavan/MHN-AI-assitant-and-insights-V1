@@ -14,10 +14,20 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://davi:davi@localhost:5432/davi"
     alembic_database_url: str = "postgresql+psycopg2://davi:davi@localhost:5432/davi"
 
-    # Auth
+    # Auth — aligned with the mhn-spring production backend:
+    #   * session JWTs are signed HS512 with the SAME JWT_SECRET Spring uses,
+    #     and Spring Base64-DECODES the secret string before HMAC
+    #     (JwtService.getSigningKey: Decoders.BASE64.decode → hmacShaKeyFor).
+    #   * jwt_secret_base64=True mirrors that; set False for raw-string secrets
+    #     (legacy/dev tokens).
     auth_enabled: bool = False
     jwt_secret: str = "change-me-in-prod"
-    jwt_algorithm: str = "HS256"
+    jwt_algorithm: str = "HS512"
+    jwt_secret_base64: bool = True
+    # Optional server-to-server path (mirrors Spring↔mhn-ai's AI_TOKEN /
+    # MHN_SERVICE_TOKEN pattern): a caller presenting this static bearer token
+    # plus X-User-Id is trusted. Empty = disabled. Must be ≥32 chars when set.
+    service_token: str = ""
 
     # LLM — model/cloud agnostic. llm_provider selects the adapter:
     # fake | openai_compatible | anthropic | ollama (legacy alias).

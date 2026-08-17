@@ -16,10 +16,12 @@ Everything is decision support, never diagnosis — enforced in code.
 
 ## Database coexistence (important)
 
-This backend shares the existing **MHN/Davi production database**
-(`db/existing_schema.sql`): a Flyway-managed core (`"user"`, `family_connect`,
-`medicine_*`, `vital_reading`, …) plus a separate `ai_*` Alembic subsystem
-(`ai_alembic_version`, `ai_processing_runs`, …).
+This backend shares the **MHN production database**. The production stack is
+three repos (see `docs/production_integration.md` for verified contracts):
+`mhn-spring` (Java API, **Flyway owns ALL schema** — including the `ai_*`
+tables since V4), `mhn-ai` (per-document AI: classify → file → extract →
+insights; writes `content.ai` envelopes into `reports.content` etc.; its
+Alembic chain is frozen, `ai_alembic_version`), and `mhn-react` (BFF frontend).
 
 Rules we follow (do not break these):
 
@@ -27,12 +29,25 @@ Rules we follow (do not break these):
   (matching `ai_processing_runs`). FKs among our OWN tables are fine
   (`pedigree_conditions.consent_grant_id`, `insight_artifacts.superseded_by`,
   the `conversation_*` cascade).
-- Our Alembic chain uses the **default `alembic_version`** table. The `"user"`
-  table is in ORM metadata (a partial read-only `User` model, for seeding/reads)
-  but **excluded from migrations** via `EXTERNAL_TABLES` + `include_object` in
-  `app/alembic/env.py`.
+- **Production schema ships as Flyway**: `db/flyway/V5__davi_ai_tables.sql` is
+  the DDL for adoption into mhn-spring's migration chain. Our Alembic chain
+  (version table **`davi_alembic_version`**) builds local/test databases only.
+  The `"user"` table is in ORM metadata (partial read-only `User` model) but
+  **excluded from migrations** via `EXTERNAL_TABLES` + `include_object`.
 - Migrations are verified two ways: reversibility on a fresh DB, and coexistence
-  (apply on top of a full load of `db/existing_schema.sql`).
+  (apply on top of a full load of `db/existing_schema.sql` — note that dump is
+  the V1 baseline; production has ddl-auto additions like
+  `family_connect.req_read/acc_read` and `file_access_exclusions`, which our
+  models map nullable-with-fallback).
+- **Auth**: production session JWTs are **HS512** with the shared `JWT_SECRET`
+  **Base64-decoded** before HMAC (mirrored via `JWT_SECRET_BASE64`); `sub` =
+  user UUID. Optional `SERVICE_TOKEN` + `X-User-Id` server-to-server path
+  mirrors the Spring↔mhn-ai `AI_TOKEN` pattern.
+- **mhn-ai's output is read, never written**: lab values come from
+  `content.ai.extraction.results[]` (`test_name`, `value_numeric`,
+  authoritative `abnormal_flag`); listing titles from
+  `content.ai.classification.title`. Family reads honour
+  `req_read`/`acc_read` (owner-side) + `file_access_exclusions`.
 
 ## Layout
 

@@ -46,19 +46,37 @@ class DocumentHit:
     filepath: str
     created_at: datetime | None
     owner_label: str  # "you" or the relation name
+    # AI classification title (content.ai.classification.title) — production
+    # scans have no name column, so this is their canonical display name.
+    title: str | None = None
 
 
 # --------------------------------------------------------------------------- #
 # Family resolution
 # --------------------------------------------------------------------------- #
+def _owner_read_grant(fc: FamilyConnect, owner_is_requester: bool) -> bool:
+    """Production read-consent semantics (FileServiceImpl.hasConnectionRead):
+    the grant sits on the OWNER's side of the connection — ``req_read`` when
+    the owner sent the request, ``acc_read`` when they accepted. Falls back to
+    the legacy ``*_file_share`` columns when the new ones are NULL (rows that
+    predate the ddl-auto column addition, and older databases)."""
+    if owner_is_requester:
+        return bool(
+            fc.req_read if fc.req_read is not None else fc.req_file_share
+        )
+    return bool(
+        fc.acc_read if fc.acc_read is not None else fc.acc_file_share
+    )
+
+
 async def resolve_family_member(
     db: AsyncSession, user_id: uuid.UUID, relation_term: str
 ) -> uuid.UUID | None:
     """Resolve "father"/"mother"/… to a connected user id, honouring consent.
 
-    Only accepted links where the OTHER party's file-share flag is on qualify.
-    The relation name is matched from the requester's perspective (relations
-    row) or its inverse for the acceptor side.
+    Only accepted links where the OWNER's read grant is on qualify. The
+    relation name is matched from the requester's perspective (relations row)
+    or its inverse for the acceptor side.
     """
     term = relation_term.strip().lower()
     rows = (
@@ -76,11 +94,14 @@ async def resolve_family_member(
         if rel is None:
             continue
         if fc.requester_id == user_id:
-            # relations.name describes the acceptor from the requester's view.
-            other, other_shares = fc.acceptor_id, bool(fc.acc_file_share)
+            # Viewer sent the request → owner is the acceptor → acc_read.
+            other = fc.acceptor_id
+            other_shares = _owner_read_grant(fc, owner_is_requester=False)
             name = rel.name
         else:
-            other, other_shares = fc.requester_id, bool(fc.req_file_share)
+            # Viewer accepted → owner is the requester → req_read.
+            other = fc.requester_id
+            other_shares = _owner_read_grant(fc, owner_is_requester=True)
             name = rel.inverse
         if other_shares and term in name.strip().lower():
             return other
@@ -90,6 +111,51 @@ async def resolve_family_member(
 # --------------------------------------------------------------------------- #
 # Documents
 # --------------------------------------------------------------------------- #
+# chat document kind → production resource_type_enum value (for exclusions).
+_RESOURCE_TYPE = {
+    "report": "reports",
+    "scan": "scans_imaging",
+    "prescription": "prescriptions",
+    "vaccination": "vaccinations",
+}
+
+
+def _ai_title(content) -> str | None:
+    """Display title from the mhn-ai envelope (content.ai.classification.title).
+
+    Production scans have no name column — their listing title comes from the
+    AI classification, mirroring the Spring/React behaviour.
+    """
+    try:
+        title = (content or {}).get("ai", {}).get("classification", {}).get("title")
+        return str(title) if title else None
+    except AttributeError:
+        return None
+
+
+async def _viewer_exclusions(
+    db: AsyncSession, viewer_id: uuid.UUID
+) -> dict[str, set[int]]:
+    """resource_type → excluded resource ids for this viewer. Fail-open to {}
+    (older/standalone databases without the table)."""
+    from app.models.coredata import FileAccessExclusion
+
+    try:
+        rows = (
+            await db.execute(
+                select(FileAccessExclusion).where(
+                    FileAccessExclusion.user_id == viewer_id
+                )
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001 — table may not exist on standalone DBs
+        return {}
+    out: dict[str, set[int]] = {}
+    for r in rows:
+        out.setdefault(r.resource_type, set()).add(r.resource_id)
+    return out
+
+
 async def latest_documents(
     db: AsyncSession,
     owner_id: uuid.UUID,
@@ -98,11 +164,19 @@ async def latest_documents(
     owner_label: str = "you",
     include_private: bool = True,
     limit: int = 3,
+    viewer_id: uuid.UUID | None = None,
 ) -> list[DocumentHit]:
     """Newest documents of the requested kinds for one owner.
 
-    ``include_private=False`` is used for family members' documents.
+    ``include_private=False`` is used for family members' documents; pass the
+    ``viewer_id`` there too so per-file exclusions (file_access_exclusions —
+    production's per-file consent opt-out) are honoured.
     """
+    denied = (
+        await _viewer_exclusions(db, viewer_id)
+        if (viewer_id is not None and viewer_id != owner_id)
+        else {}
+    )
     hits: list[DocumentHit] = []
     for kind in kinds:
         model, _label = DOCUMENT_KINDS[kind]
@@ -112,10 +186,13 @@ async def latest_documents(
         rows = (
             await db.execute(
                 query.order_by(model.created_at.desc().nulls_last(), model.id.desc())  # type: ignore[attr-defined]
-                .limit(limit)
+                .limit(limit + 8)  # headroom: exclusions filter below
             )
         ).scalars().all()
+        denied_ids = denied.get(_RESOURCE_TYPE.get(kind, kind), set())
         for r in rows:
+            if r.id in denied_ids:
+                continue
             hits.append(
                 DocumentHit(
                     kind=kind,
@@ -123,6 +200,7 @@ async def latest_documents(
                     filepath=r.filepath,
                     created_at=r.created_at,
                     owner_label=owner_label,
+                    title=_ai_title(getattr(r, "content", None)),
                 )
             )
     hits.sort(
@@ -386,10 +464,17 @@ class LabValue:
 
 
 def _collect_params(content, out: list[tuple[str, str, str | None]]) -> None:
-    """Walk a report's extracted JSON, collecting every (name, value, unit)."""
+    """Walk a report's extracted JSON, collecting every (name, value, unit).
+
+    Handles the legacy demo shape ({"tests": [{"name","value","unit"}]}) AND
+    the production mhn-ai envelope (content.ai.extraction.results[] with
+    "test_name" and an authoritative Python-computed "abnormal_flag", which is
+    appended to the value so the model sees production's own flagging).
+    """
     if isinstance(content, dict):
         name = (
             content.get("name") or content.get("parameter") or content.get("test")
+            or content.get("test_name")
         )
         value = None
         for vk in ("value", "result", "reading"):
@@ -397,7 +482,11 @@ def _collect_params(content, out: list[tuple[str, str, str | None]]) -> None:
                 value = content.get(vk)
                 break
         if name and value is not None:
-            out.append((str(name).strip(), str(value).strip(), content.get("unit")))
+            rendered = str(value).strip()
+            flag = content.get("abnormal_flag")
+            if flag in ("low", "high"):
+                rendered += f" ({flag})"
+            out.append((str(name).strip(), rendered, content.get("unit")))
         for v in content.values():
             _collect_params(v, out)
     elif isinstance(content, list):
