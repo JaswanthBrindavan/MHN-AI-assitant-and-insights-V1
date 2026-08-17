@@ -163,6 +163,32 @@ async def _seed_deepa_coredata(db: AsyncSession) -> bool:
             date=now - timedelta(days=12),
         ))
 
+    # Reference ranges (thp_age_range) so the demo exercises the backend-range
+    # path — production already has clinically-curated ranges; these are DRAFT
+    # illustrative values for the demo DB only. Guarded + idempotent.
+    if await _table_exists(db, "thp_age_range"):
+        await db.execute(text(
+            "DELETE FROM thp_age_range WHERE thp_id IN "
+            "(SELECT id FROM traditional_health_parameters WHERE name = ANY(:n))"
+        ), {"n": ["Fasting Blood Sugar", "HbA1c"]})
+        await db.execute(text(
+            "DELETE FROM traditional_health_parameters WHERE name = ANY(:n)"
+        ), {"n": ["Fasting Blood Sugar", "HbA1c"]})
+        await db.execute(text("""
+            WITH t1 AS (INSERT INTO traditional_health_parameters
+                (name, units, aliases, approved, visible)
+                VALUES ('Fasting Blood Sugar','mg/dL',
+                        '{glucose,"fasting sugar",sugar}',true,true) RETURNING id),
+                 t2 AS (INSERT INTO traditional_health_parameters
+                (name, units, aliases, approved, visible)
+                VALUES ('HbA1c','%','{hba1c,glycated}',true,true) RETURNING id)
+            INSERT INTO thp_age_range
+                (thp_id, age_min, age_max, min, low_danger, low_warn, ideal,
+                 high_warn, high_danger, max)
+            SELECT id,18,120,40,54,70,90,100,126,400 FROM t1
+            UNION ALL SELECT id,18,120,3,3.5,4,5.2,5.7,6.5,15 FROM t2
+        """))
+
     # Deepa's current medications (raw SQL: medicine_tracking has NOT NULL
     # scheduling columns our read-only model does not map). Guarded — the table
     # may be absent on a bare standalone DB.

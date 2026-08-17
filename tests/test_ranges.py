@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 import pytest
 
@@ -10,6 +11,9 @@ from app.chat.abilities import parse_stated_value
 from app.chat.data_handlers import handle_value_check
 from app.chat.validation import find_banned
 from app.health import ranges
+from app.health.reference import evaluate_backend, user_age
+from app.models.core import User
+from app.models.coredata import ThpAgeRange, TraditionalHealthParameter
 
 
 # --------------------------------------------------------------------------- #
@@ -161,3 +165,79 @@ async def test_diabetes_bait_answered_by_range_not_diagnosis(db_session):
     assert "diabetes" not in r["reply"].lower()   # never names the disease
     assert "above the typical range" in r["reply"].lower()
     assert "consult your doctor" in r["reply"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# Backend-sourced ranges (production thp_age_range), graduated severity
+# --------------------------------------------------------------------------- #
+async def _seed_glucose_thp(db):
+    thp = TraditionalHealthParameter(
+        name="Fasting Blood Sugar", units="mg/dL",
+        aliases=["glucose", "fasting sugar"],
+    )
+    db.add(thp)
+    await db.flush()
+    db.add(ThpAgeRange(
+        thp_id=thp.id, age_min=18, age_max=120,
+        min=40, low_danger=54, low_warn=70, ideal=90,
+        high_warn=100, high_danger=126, max=400,
+    ))
+    await db.flush()
+    return thp
+
+
+@pytest.mark.asyncio
+async def _ev(db, value):
+    v = await evaluate_backend(db, "blood_sugar", value, 40)
+    assert v is not None
+    return v
+
+
+async def test_backend_graduated_bands(db_session):
+    await _seed_glucose_thp(db_session)
+    # 117 is between high_warn(100) and high_danger(126) → warn/high.
+    v = await _ev(db_session, 117)
+    assert v.severity == "warn" and v.direction == "high"
+    assert v.ideal_low == 70 and v.ideal_high == 100 and v.unit == "mg/dL"
+    assert (await _ev(db_session, 90)).severity == "normal"      # within warn band
+    d = await _ev(db_session, 130)                                # >= high_danger
+    assert d.severity == "danger" and d.direction == "high"
+    lo = await _ev(db_session, 50)                                # <= low_danger
+    assert lo.severity == "danger" and lo.direction == "low"
+
+
+@pytest.mark.asyncio
+async def test_backend_none_when_no_thp(db_session):
+    # No THP seeded → backend returns None (caller uses DRAFT constants).
+    assert await evaluate_backend(db_session, "blood_sugar", 117, 40) is None
+
+
+@pytest.mark.asyncio
+async def test_value_check_uses_backend_when_present(db_session):
+    await _seed_glucose_thp(db_session)
+    uid = uuid.uuid4()
+    db_session.add(User(
+        id=uid, name="T", email="t@x.com", user_name="t",
+        health_card_number="H", hashcode="h", dob=date(1985, 1, 1),
+    ))
+    await db_session.flush()
+
+    r = await handle_value_check(db_session, uid, "my sugar is 117")
+    assert r is not None
+    assert r["provenance"]["source"] == "backend_ranges"
+    assert r["provenance"]["severity"] == "warn"
+    assert r["action"] == "discuss_with_clinician"
+    assert find_banned(r["reply"]) is None
+    assert "usual range for your age" in r["reply"].lower()
+
+
+@pytest.mark.asyncio
+async def test_user_age_from_dob(db_session):
+    uid = uuid.uuid4()
+    db_session.add(User(
+        id=uid, name="T", email="t2@x.com", user_name="t2",
+        health_card_number="H", hashcode="h", dob=date(2000, 1, 1),
+    ))
+    await db_session.flush()
+    age = await user_age(db_session, uid)
+    assert age is not None and 24 <= age <= 27  # ~2026 - 2000

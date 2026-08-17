@@ -47,6 +47,7 @@ COREDATA_TABLES = {
     "relations",
     "family_file_access",
     "traditional_health_parameters",
+    "thp_age_range",
 }
 
 
@@ -249,6 +250,29 @@ class TraditionalHealthParameter(Base):
     aliases: Mapped[list | None] = mapped_column(
         sa.ARRAY(sa.String).with_variant(sa.JSON(), "sqlite"), nullable=True
     )
+
+
+class ThpAgeRange(Base):
+    """Age-banded reference range for a health parameter (production data).
+
+    The graduated thresholds (min ≤ low_danger ≤ low_warn ≤ ideal ≤ high_warn ≤
+    high_danger ≤ max) are the clinically-curated ideal ranges the value-check
+    reads from the backend. Read-only here.
+    """
+
+    __tablename__ = "thp_age_range"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    thp_id: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
+    age_min: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    age_max: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    min: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    low_danger: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    low_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    ideal: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    high_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    high_danger: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    max: Mapped[float] = mapped_column(sa.Float, nullable=False)
 
 
 _ = date  # (kept for future date-typed columns)

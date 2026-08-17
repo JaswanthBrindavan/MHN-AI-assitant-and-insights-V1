@@ -40,6 +40,7 @@ from app.coredata.service import (
     window_start,
 )
 from app.health import ranges as health_ranges
+from app.health import reference as health_reference
 from app.knowledge.registry import load_condition_index
 from app.models.chat import McpChunk
 from app.models.common import utcnow
@@ -126,6 +127,47 @@ def _article(label: str) -> str:
     return "A"
 
 
+def _backend_reply(v, reading: str) -> dict:
+    """Compose a safe reply from a graduated backend verdict (thp_age_range).
+
+    Severity routes to care: normal → reassure; warn → consult a doctor;
+    danger → seek care promptly. Never diagnoses.
+    """
+    ideal = f"{_g(v.ideal_low)}–{_g(v.ideal_high)} {v.unit}".strip()
+    art = _article(v.label)
+    if v.severity == "normal":
+        return {
+            "reply": (
+                f"{art} {v.label} of {reading} is within the usual range for "
+                f"your age ({ideal}). That's reassuring — keep monitoring as "
+                f"your doctor advises."
+            ),
+            "action": "review_with_clinician",
+            "provenance": {"path": "value_check", "source": "backend_ranges",
+                           "severity": "normal"},
+        }
+    word = {"high": "above", "low": "below"}.get(v.direction, "outside")
+    if v.severity == "danger":
+        lead = (
+            f"{art} {v.label} of {reading} is well {word} the usual range "
+            f"for your age ({ideal}). Please seek medical advice promptly — "
+            f"contact your doctor or urgent care."
+        )
+        action = "seek_care_promptly"
+    else:
+        lead = (
+            f"{art} {v.label} of {reading} is {word} the usual range for "
+            f"your age ({ideal}). Please consult your doctor to review it."
+        )
+        action = "discuss_with_clinician"
+    return {
+        "reply": f"{lead} {_NOT_A_DIAGNOSIS_LINE}",
+        "action": action,
+        "provenance": {"path": "value_check", "source": "backend_ranges",
+                       "severity": v.severity},
+    }
+
+
 # Bare timing clarifications the user gives after stating a glucose value.
 _FASTING_RE = re.compile(r"\bfasting\b", re.IGNORECASE)
 _POSTMEAL_RE = re.compile(
@@ -208,6 +250,9 @@ async def handle_value_check(
     """
     stated = parse_stated_value(message)
     if stated is not None:
+        backend = await _try_backend(db, user_id, stated.metric, stated.value)
+        if backend is not None:
+            return backend
         return _value_check_reply(stated)
 
     # Clarification path: only for a SHORT reply carrying a timing qualifier.
@@ -218,8 +263,31 @@ async def handle_value_check(
     for prior in await _recent_user_messages(db, session_id):
         sv = parse_stated_value(prior)
         if sv is not None and sv.metric == "blood_sugar":
+            key = "fasting_glucose" if fasting else "random_glucose"
+            backend = await _try_backend(db, user_id, key, sv.value)
+            if backend is not None:
+                return backend
             return _reclassify_glucose(sv.value, fasting=fasting)
     return None
+
+
+async def _try_backend(
+    db: AsyncSession, user_id: uuid.UUID, metric: str, value: float
+) -> dict | None:
+    """Prefer the backend age-banded ranges; None → caller uses DRAFT constants.
+
+    Blood pressure (two values) stays on the constants path for now.
+    """
+    if metric == "blood_pressure":
+        return None
+    age = await health_reference.user_age(db, user_id)
+    verdict = await health_reference.evaluate_backend(db, metric, value, age)
+    if verdict is None:
+        return None
+    unit = verdict.unit or (
+        health_ranges.RANGES[metric].unit if metric in health_ranges.RANGES else ""
+    )
+    return _backend_reply(verdict, f"{_g(value)} {unit}".strip())
 
 
 # --------------------------------------------------------------------------- #

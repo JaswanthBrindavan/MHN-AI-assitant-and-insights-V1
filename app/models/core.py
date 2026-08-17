@@ -11,7 +11,7 @@ core schema.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
@@ -55,6 +55,9 @@ class User(Base):
     user_name: Mapped[str] = mapped_column(sa.String(20), nullable=False)
     health_card_number: Mapped[str] = mapped_column(sa.String(100), nullable=False)
     hashcode: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    # Read-only profile fields used to pick age-appropriate reference ranges.
+    dob: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+    gender: Mapped[str | None] = mapped_column(sa.String(16), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
         sa.DateTime(timezone=True), nullable=True
     )
