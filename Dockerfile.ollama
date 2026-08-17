@@ -41,4 +41,12 @@ ENV OLLAMA_HOST=0.0.0.0:11434
 # Keep the model resident between requests (no per-request load latency).
 ENV OLLAMA_KEEP_ALIVE=24h
 
+# Self-healing entrypoint: serve first (healthcheck passes immediately), then
+# verify the model is present and pull it once if the baked layer is missing
+# at runtime. Logs say which path was taken.
+COPY docker/ollama-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
+CMD []
+
 EXPOSE 11434
