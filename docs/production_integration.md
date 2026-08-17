@@ -121,6 +121,27 @@ rollup tables. Everything else is read-only from Davi.
   fits; the client-side typewriter supplies the streaming feel.
 - Pass AI text through `useTransliterate` like the existing insight components.
 
+## Why Davi has no AWS code (deliberate)
+
+The other services use AWS for exactly two things, and Davi needs neither:
+
+| AWS usage | Who | Why Davi doesn't |
+| --- | --- | --- |
+| **S3** — file bytes, presigned upload/download (`S3StorageService`, `S3PostPolicySigner`) | mhn-spring owns the bucket; mhn-ai fetches source objects + relocates keys on filing | Davi never touches file BYTES. It reads the **extracted JSON** (`content.ai`) that mhn-ai already produced from those bytes — the S3 `filepath` is an opaque key used at most as a fallback display name |
+| **SQS** — async document-processing queue | mhn-ai (worker long-polls) | Chat is synchronous request/response; the nightly sweep is a cron job. Nothing to queue |
+
+**Opening a document from a chat reply** uses the EXISTING production flow, no
+Davi involvement: Davi's document answers return
+`provenance.documents[{kind, id, created_at}]` — the frontend/BFF takes those
+ids to Spring's `GET /files/{type}/{id}/url` (presigned GET, same
+authorization as the file bytes). Davi never mints URLs.
+
+This is a security posture, not a shortcut: the AI chat service holds **no AWS
+credentials at all** — its blast radius is the database permissions it runs
+with. If full-document Q&A is ever wanted ("read my actual PDF"), prefer
+reusing `content.ai.extraction` + `insights` (already derived from the
+document); only if that's insufficient add read-only `GetObject` creds then.
+
 ## Deployment (matching mhn-ai's Railway pattern)
 
 One container, uvicorn on `$PORT`, healthcheck `/health`, HTTP/1.1 (Spring's
