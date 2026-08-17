@@ -25,6 +25,23 @@ _GROUNDING_RULES = (
     "numbers. Keep the answer brief and plain-English."
 )
 
+# When the [P] block carries the reader's OWN recorded data (lifestyle, vitals,
+# medications), personalize — but stay strictly within decision support.
+_PERSONALIZATION_RULES = (
+    "Personalization: if the Patient context [P] block includes the reader's own "
+    "recorded data (lifestyle, vitals, or medications) and they are asking about "
+    "a symptom or how they feel, connect the educational information to their "
+    "recorded data. Point out which of THEIR recorded factors are commonly "
+    "relevant to what they describe (for example logged caffeine or alcohol, a "
+    "recorded blood-pressure or blood-sugar value, or a listed medication), and "
+    "suggest what to raise with their doctor. Cite each personal fact you use "
+    "with [P]. Strict limits: these are possibilities to discuss, never a "
+    "diagnosis; do NOT say any recorded value or medication IS the cause of the "
+    "symptom; do NOT tell the reader to change or stop a medication — only to "
+    "discuss it with the prescriber. If the reader is on medication, add the "
+    "standard reminder not to change or stop a dose on their own."
+)
+
 
 def format_chunks(chunks: list[RetrievedChunk]) -> str:
     if not chunks:
@@ -38,6 +55,10 @@ def build_system_prompt(
     compacted_context_json: str | None = None,
 ) -> str:
     parts = [_SAFETY_RULES, _GROUNDING_RULES]
+    # Only spend the personalization budget when personal data is actually
+    # present in [P] (the snapshot line is unmistakable).
+    if patient_context and "own recorded data" in patient_context:
+        parts.append(_PERSONALIZATION_RULES)
     if compacted_context_json:
         parts.append("COMPACTED_CONTEXT_JSON:\n" + compacted_context_json)
     if chunks:

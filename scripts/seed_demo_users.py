@@ -20,7 +20,7 @@ import asyncio
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import delete, inspect, select
+from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_sessionmaker
@@ -141,6 +141,29 @@ async def _seed_deepa_coredata(db: AsyncSession) -> bool:
             metadata_json={"source": "seed_demo"},
             logged_at=now - timedelta(days=days_ago),
         ))
+
+    # Deepa's current medications (raw SQL: medicine_tracking has NOT NULL
+    # scheduling columns our read-only model does not map). Guarded — the table
+    # may be absent on a bare standalone DB.
+    if await _table_exists(db, "medicine_tracking"):
+        await db.execute(
+            text("DELETE FROM medicine_tracking WHERE user_id = :uid"),
+            {"uid": str(DEEPA)},
+        )
+        for name, strength in (("Metformin", "500mg"), ("Telmisartan", "40mg")):
+            await db.execute(
+                text(
+                    "INSERT INTO medicine_tracking "
+                    "(user_id, name, strength, private, is_prn, "
+                    " schedule_pattern, day_pattern, active_days, starts_at) "
+                    "VALUES (:uid, :name, :strength, false, false, "
+                    " 'OD', 'daily', '1111111', :start)"
+                ),
+                {
+                    "uid": str(DEEPA), "name": name, "strength": strength,
+                    "start": (now - timedelta(days=90)).date(),
+                },
+            )
 
     # Father link: Deepa → Eshan, accepted, both sides share files.
     relation = (

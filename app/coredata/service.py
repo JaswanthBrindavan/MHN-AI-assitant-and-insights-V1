@@ -20,6 +20,7 @@ from app.models.coredata import (
     BodyMeasurement,
     FamilyConnect,
     LifestyleLog,
+    MedicineTracking,
     Prescription,
     Relation,
     Report,
@@ -260,3 +261,35 @@ def window_start(period: str, now: datetime | None = None) -> datetime:
     now = now or utcnow()
     days = {"week": 7, "month": 30, "year": 365}.get(period, 7)
     return now - timedelta(days=days)
+
+
+# --------------------------------------------------------------------------- #
+# Medications (current, from medicine_tracking) — read only
+# --------------------------------------------------------------------------- #
+async def active_medications(
+    db: AsyncSession, user_id: uuid.UUID, *, limit: int = 8
+) -> list[str]:
+    """Current (non-stopped, non-private) medications as "Name Strength" strings.
+
+    Ordered by name for determinism. PRN ("as needed") meds are included and
+    marked. Never returns private rows.
+    """
+    rows = (
+        await db.execute(
+            select(MedicineTracking)
+            .where(
+                MedicineTracking.user_id == user_id,
+                MedicineTracking.stopped_at.is_(None),
+                MedicineTracking.private.is_(False),
+            )
+            .order_by(MedicineTracking.name.asc(), MedicineTracking.id.asc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    out: list[str] = []
+    for r in rows:
+        label = r.name if not r.strength else f"{r.name} {r.strength}"
+        if r.is_prn:
+            label += " (as needed)"
+        out.append(label)
+    return out

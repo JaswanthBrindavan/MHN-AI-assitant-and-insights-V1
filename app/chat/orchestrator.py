@@ -18,7 +18,11 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chat.context import build_patient_context
+from app.chat.context import (
+    build_health_snapshot,
+    build_patient_context,
+    is_personal_health_query,
+)
 from app.chat.conversation import (
     add_message,
     assemble_context,
@@ -376,6 +380,20 @@ async def _dispatch(
 
     # 6) Symptom / educational RAG path (risk is none or high here).
     patient_text, user_codes = await build_patient_context(db, user_id)
+    # For PERSONAL-symptom questions ("why am I so tired?"), enrich the [P]
+    # block with the reader's own recorded data so the answer can be correlated
+    # with their lifestyle/vitals/medications — as things to discuss with a
+    # clinician, never as a diagnosis or a stated cause (prompt + validator
+    # enforce that). General education questions stay lean (no private data).
+    if is_personal_health_query(message):
+        try:
+            snapshot = await build_health_snapshot(db, user_id)
+            if snapshot:
+                patient_text = (
+                    f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
+                )
+        except Exception:  # noqa: BLE001 — enrichment must never break a reply
+            logger.warning("health snapshot failed; continuing", exc_info=True)
     codes = await resolve_scope(db, message, user_codes)
     chunks = await retrieve_chunks(db, codes, message)
     used_rag = bool(chunks)

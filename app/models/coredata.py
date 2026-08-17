@@ -42,6 +42,7 @@ COREDATA_TABLES = {
     "body_measurement",
     "lifestyle_log",
     "manual_tracking",
+    "medicine_tracking",
     "family_connect",
     "relations",
     "family_file_access",
@@ -185,6 +186,28 @@ class ManualTracking(Base):
     created_at: Mapped[datetime | None] = mapped_column(
         sa.DateTime(timezone=True), nullable=True
     )
+
+
+class MedicineTracking(Base):
+    """The user's tracked medications (core-app table). Read-only here.
+
+    Partial mapping — only the columns the health snapshot reads. Active =
+    ``stopped_at IS NULL``; private rows are never surfaced. The many
+    scheduling/enum columns (day_pattern, dosage_form, schedule_pattern, the
+    generated effective_end) are left unmapped since we only read names.
+    """
+
+    __tablename__ = "medicine_tracking"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    strength: Mapped[str | None] = mapped_column(sa.String(100), nullable=True)
+    private: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    is_prn: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    stopped_at: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+    starts_at: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+    ends_at: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
 
 
 class FamilyConnect(Base):
