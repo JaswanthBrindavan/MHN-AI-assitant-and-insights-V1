@@ -4,6 +4,10 @@
 -- ALL schema; the Davi repo's Alembic chain (version table davi_alembic_version)
 -- builds local/test databases only and takes no new revisions once this ships.
 --
+-- IDEMPOTENT: every statement is IF NOT EXISTS / duplicate-guarded, so this
+-- migration also succeeds on a database where Davi's local Alembic already
+-- created the tables (RUN_MIGRATIONS_ON_START=true testing shortcut).
+--
 -- Conventions (matching the existing ai_* tables): user_id is a plain uuid with
 -- NO foreign key to "user"; FKs exist only among Davi-owned tables. mcp_chunks
 -- needs the pgvector extension for its embedding column.
@@ -21,7 +25,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Name: active_symptom_states; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.active_symptom_states (
+CREATE TABLE IF NOT EXISTS public.active_symptom_states (
     user_id uuid NOT NULL,
     symptom character varying(128) NOT NULL,
     risk_level character varying(16) NOT NULL,
@@ -33,7 +37,7 @@ CREATE TABLE public.active_symptom_states (
 
 -- Name: condition_registry; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.condition_registry (
+CREATE TABLE IF NOT EXISTS public.condition_registry (
     condition_code character varying(32) NOT NULL,
     display_name character varying(200) NOT NULL,
     aliases jsonb,
@@ -47,7 +51,7 @@ CREATE TABLE public.condition_registry (
 
 -- Name: consent_ledger; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.consent_ledger (
+CREATE TABLE IF NOT EXISTS public.consent_ledger (
     user_id uuid NOT NULL,
     purpose character varying(64) NOT NULL,
     action character varying(16) NOT NULL,
@@ -60,7 +64,7 @@ CREATE TABLE public.consent_ledger (
 
 -- Name: conversation_messages; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.conversation_messages (
+CREATE TABLE IF NOT EXISTS public.conversation_messages (
     session_id uuid NOT NULL,
     role character varying(16) NOT NULL,
     message text NOT NULL,
@@ -72,7 +76,7 @@ CREATE TABLE public.conversation_messages (
 
 -- Name: conversation_sessions; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.conversation_sessions (
+CREATE TABLE IF NOT EXISTS public.conversation_sessions (
     user_id uuid NOT NULL,
     id uuid NOT NULL,
     created_at timestamp with time zone NOT NULL
@@ -81,7 +85,7 @@ CREATE TABLE public.conversation_sessions (
 
 -- Name: conversation_summaries; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.conversation_summaries (
+CREATE TABLE IF NOT EXISTS public.conversation_summaries (
     session_id uuid NOT NULL,
     version integer NOT NULL,
     summary jsonb NOT NULL,
@@ -94,7 +98,7 @@ CREATE TABLE public.conversation_summaries (
 
 -- Name: drug_reference; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.drug_reference (
+CREATE TABLE IF NOT EXISTS public.drug_reference (
     source_id character varying(32),
     name character varying(255) NOT NULL,
     name_normalized character varying(255) NOT NULL,
@@ -120,7 +124,7 @@ CREATE TABLE public.drug_reference (
 
 -- Name: insight_artifacts; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.insight_artifacts (
+CREATE TABLE IF NOT EXISTS public.insight_artifacts (
     user_id uuid NOT NULL,
     condition_code character varying(32) NOT NULL,
     tier character varying(24) NOT NULL,
@@ -142,7 +146,7 @@ CREATE TABLE public.insight_artifacts (
 
 -- Name: insight_templates; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.insight_templates (
+CREATE TABLE IF NOT EXISTS public.insight_templates (
     template_key character varying(48) NOT NULL,
     version integer NOT NULL,
     locale character varying(16) NOT NULL,
@@ -155,7 +159,7 @@ CREATE TABLE public.insight_templates (
 
 -- Name: job_runs; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.job_runs (
+CREATE TABLE IF NOT EXISTS public.job_runs (
     name character varying(64) NOT NULL,
     trigger character varying(32) NOT NULL,
     status character varying(16) NOT NULL,
@@ -170,7 +174,7 @@ CREATE TABLE public.job_runs (
 
 -- Name: mcp_chunks; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.mcp_chunks (
+CREATE TABLE IF NOT EXISTS public.mcp_chunks (
     condition_code character varying(32) NOT NULL,
     chunk_type character varying(48) NOT NULL,
     content text NOT NULL,
@@ -183,7 +187,7 @@ CREATE TABLE public.mcp_chunks (
 
 -- Name: pedigree_conditions; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.pedigree_conditions (
+CREATE TABLE IF NOT EXISTS public.pedigree_conditions (
     user_id uuid NOT NULL,
     slot character varying(32) NOT NULL,
     condition_code character varying(32) NOT NULL,
@@ -201,7 +205,7 @@ CREATE TABLE public.pedigree_conditions (
 
 -- Name: pedigree_members; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.pedigree_members (
+CREATE TABLE IF NOT EXISTS public.pedigree_members (
     user_id uuid NOT NULL,
     slot character varying(32) NOT NULL,
     vital_status character varying(16),
@@ -213,7 +217,7 @@ CREATE TABLE public.pedigree_members (
 
 -- Name: rag_turn_receipts; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.rag_turn_receipts (
+CREATE TABLE IF NOT EXISTS public.rag_turn_receipts (
     user_id uuid NOT NULL,
     session_id uuid,
     query_hash character varying(64) NOT NULL,
@@ -231,7 +235,7 @@ CREATE TABLE public.rag_turn_receipts (
 
 -- Name: risk_rules; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.risk_rules (
+CREATE TABLE IF NOT EXISTS public.risk_rules (
     rule_key character varying(32) NOT NULL,
     pattern_key character varying(48) NOT NULL,
     params jsonb,
@@ -249,7 +253,7 @@ CREATE TABLE public.risk_rules (
 
 -- Name: symptom_logs; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.symptom_logs (
+CREATE TABLE IF NOT EXISTS public.symptom_logs (
     user_id uuid NOT NULL,
     symptom character varying(128) NOT NULL,
     risk_level character varying(16) NOT NULL,
@@ -261,7 +265,7 @@ CREATE TABLE public.symptom_logs (
 
 -- Name: user_memories; Type: TABLE; Schema: public; Owner: -
 
-CREATE TABLE public.user_memories (
+CREATE TABLE IF NOT EXISTS public.user_memories (
     user_id uuid NOT NULL,
     kind character varying(24) NOT NULL,
     mem_key character varying(64) NOT NULL,
@@ -275,242 +279,317 @@ CREATE TABLE public.user_memories (
 
 -- Name: active_symptom_states active_symptom_states_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.active_symptom_states
+DO $$ BEGIN
+    ALTER TABLE ONLY public.active_symptom_states
     ADD CONSTRAINT active_symptom_states_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: condition_registry condition_registry_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.condition_registry
+DO $$ BEGIN
+    ALTER TABLE ONLY public.condition_registry
     ADD CONSTRAINT condition_registry_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: consent_ledger consent_ledger_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.consent_ledger
+DO $$ BEGIN
+    ALTER TABLE ONLY public.consent_ledger
     ADD CONSTRAINT consent_ledger_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: conversation_messages conversation_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.conversation_messages
+DO $$ BEGIN
+    ALTER TABLE ONLY public.conversation_messages
     ADD CONSTRAINT conversation_messages_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: conversation_sessions conversation_sessions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.conversation_sessions
+DO $$ BEGIN
+    ALTER TABLE ONLY public.conversation_sessions
     ADD CONSTRAINT conversation_sessions_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: conversation_summaries conversation_summaries_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.conversation_summaries
+DO $$ BEGIN
+    ALTER TABLE ONLY public.conversation_summaries
     ADD CONSTRAINT conversation_summaries_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: drug_reference drug_reference_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.drug_reference
+DO $$ BEGIN
+    ALTER TABLE ONLY public.drug_reference
     ADD CONSTRAINT drug_reference_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: insight_artifacts insight_artifacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.insight_artifacts
+DO $$ BEGIN
+    ALTER TABLE ONLY public.insight_artifacts
     ADD CONSTRAINT insight_artifacts_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: insight_templates insight_templates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.insight_templates
+DO $$ BEGIN
+    ALTER TABLE ONLY public.insight_templates
     ADD CONSTRAINT insight_templates_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: job_runs job_runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.job_runs
+DO $$ BEGIN
+    ALTER TABLE ONLY public.job_runs
     ADD CONSTRAINT job_runs_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: mcp_chunks mcp_chunks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.mcp_chunks
+DO $$ BEGIN
+    ALTER TABLE ONLY public.mcp_chunks
     ADD CONSTRAINT mcp_chunks_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: pedigree_conditions pedigree_conditions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.pedigree_conditions
+DO $$ BEGIN
+    ALTER TABLE ONLY public.pedigree_conditions
     ADD CONSTRAINT pedigree_conditions_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: pedigree_members pedigree_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.pedigree_members
+DO $$ BEGIN
+    ALTER TABLE ONLY public.pedigree_members
     ADD CONSTRAINT pedigree_members_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: rag_turn_receipts rag_turn_receipts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.rag_turn_receipts
+DO $$ BEGIN
+    ALTER TABLE ONLY public.rag_turn_receipts
     ADD CONSTRAINT rag_turn_receipts_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: risk_rules risk_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.risk_rules
+DO $$ BEGIN
+    ALTER TABLE ONLY public.risk_rules
     ADD CONSTRAINT risk_rules_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: symptom_logs symptom_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.symptom_logs
+DO $$ BEGIN
+    ALTER TABLE ONLY public.symptom_logs
     ADD CONSTRAINT symptom_logs_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: active_symptom_states uq_active_symptom; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.active_symptom_states
+DO $$ BEGIN
+    ALTER TABLE ONLY public.active_symptom_states
     ADD CONSTRAINT uq_active_symptom UNIQUE (user_id, symptom);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: insight_templates uq_insight_template_key_version; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.insight_templates
+DO $$ BEGIN
+    ALTER TABLE ONLY public.insight_templates
     ADD CONSTRAINT uq_insight_template_key_version UNIQUE (template_key, version);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: pedigree_members uq_pedigree_member_slot; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.pedigree_members
+DO $$ BEGIN
+    ALTER TABLE ONLY public.pedigree_members
     ADD CONSTRAINT uq_pedigree_member_slot UNIQUE (user_id, slot);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: user_memories uq_user_memory; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.user_memories
+DO $$ BEGIN
+    ALTER TABLE ONLY public.user_memories
     ADD CONSTRAINT uq_user_memory UNIQUE (user_id, kind, mem_key);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: user_memories user_memories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.user_memories
+DO $$ BEGIN
+    ALTER TABLE ONLY public.user_memories
     ADD CONSTRAINT user_memories_pkey PRIMARY KEY (id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: ix_active_symptom_states_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_active_symptom_states_user_id ON public.active_symptom_states USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_active_symptom_states_user_id ON public.active_symptom_states USING btree (user_id);
 
 
 -- Name: ix_condition_registry_condition_code; Type: INDEX; Schema: public; Owner: -
 
-CREATE UNIQUE INDEX ix_condition_registry_condition_code ON public.condition_registry USING btree (condition_code);
+CREATE UNIQUE INDEX IF NOT EXISTS ix_condition_registry_condition_code ON public.condition_registry USING btree (condition_code);
 
 
 -- Name: ix_consent_ledger_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_consent_ledger_user_id ON public.consent_ledger USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_consent_ledger_user_id ON public.consent_ledger USING btree (user_id);
 
 
 -- Name: ix_conversation_messages_session_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_conversation_messages_session_id ON public.conversation_messages USING btree (session_id);
+CREATE INDEX IF NOT EXISTS ix_conversation_messages_session_id ON public.conversation_messages USING btree (session_id);
 
 
 -- Name: ix_conversation_sessions_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_conversation_sessions_user_id ON public.conversation_sessions USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_conversation_sessions_user_id ON public.conversation_sessions USING btree (user_id);
 
 
 -- Name: ix_conversation_summaries_session_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_conversation_summaries_session_id ON public.conversation_summaries USING btree (session_id);
+CREATE INDEX IF NOT EXISTS ix_conversation_summaries_session_id ON public.conversation_summaries USING btree (session_id);
 
 
 -- Name: ix_drug_reference_composition_normalized; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_drug_reference_composition_normalized ON public.drug_reference USING btree (composition_normalized);
+CREATE INDEX IF NOT EXISTS ix_drug_reference_composition_normalized ON public.drug_reference USING btree (composition_normalized);
 
 
 -- Name: ix_drug_reference_name_normalized; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_drug_reference_name_normalized ON public.drug_reference USING btree (name_normalized);
+CREATE INDEX IF NOT EXISTS ix_drug_reference_name_normalized ON public.drug_reference USING btree (name_normalized);
 
 
 -- Name: ix_insight_artifacts_content_hash; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_insight_artifacts_content_hash ON public.insight_artifacts USING btree (content_hash);
+CREATE INDEX IF NOT EXISTS ix_insight_artifacts_content_hash ON public.insight_artifacts USING btree (content_hash);
 
 
 -- Name: ix_insight_artifacts_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_insight_artifacts_user_id ON public.insight_artifacts USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_insight_artifacts_user_id ON public.insight_artifacts USING btree (user_id);
 
 
 -- Name: ix_job_runs_name; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_job_runs_name ON public.job_runs USING btree (name);
+CREATE INDEX IF NOT EXISTS ix_job_runs_name ON public.job_runs USING btree (name);
 
 
 -- Name: ix_mcp_chunks_condition_code; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_mcp_chunks_condition_code ON public.mcp_chunks USING btree (condition_code);
+CREATE INDEX IF NOT EXISTS ix_mcp_chunks_condition_code ON public.mcp_chunks USING btree (condition_code);
 
 
 -- Name: ix_pedigree_conditions_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_pedigree_conditions_user_id ON public.pedigree_conditions USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_pedigree_conditions_user_id ON public.pedigree_conditions USING btree (user_id);
 
 
 -- Name: ix_pedigree_members_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_pedigree_members_user_id ON public.pedigree_members USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_pedigree_members_user_id ON public.pedigree_members USING btree (user_id);
 
 
 -- Name: ix_rag_turn_receipts_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_rag_turn_receipts_user_id ON public.rag_turn_receipts USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_rag_turn_receipts_user_id ON public.rag_turn_receipts USING btree (user_id);
 
 
 -- Name: ix_risk_rules_rule_key; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_risk_rules_rule_key ON public.risk_rules USING btree (rule_key);
+CREATE INDEX IF NOT EXISTS ix_risk_rules_rule_key ON public.risk_rules USING btree (rule_key);
 
 
 -- Name: ix_symptom_logs_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_symptom_logs_user_id ON public.symptom_logs USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_symptom_logs_user_id ON public.symptom_logs USING btree (user_id);
 
 
 -- Name: ix_user_memories_user_id; Type: INDEX; Schema: public; Owner: -
 
-CREATE INDEX ix_user_memories_user_id ON public.user_memories USING btree (user_id);
+CREATE INDEX IF NOT EXISTS ix_user_memories_user_id ON public.user_memories USING btree (user_id);
 
 
 -- Name: conversation_messages conversation_messages_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.conversation_messages
+DO $$ BEGIN
+    ALTER TABLE ONLY public.conversation_messages
     ADD CONSTRAINT conversation_messages_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.conversation_sessions(id) ON DELETE CASCADE;
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: conversation_summaries conversation_summaries_session_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.conversation_summaries
+DO $$ BEGIN
+    ALTER TABLE ONLY public.conversation_summaries
     ADD CONSTRAINT conversation_summaries_session_id_fkey FOREIGN KEY (session_id) REFERENCES public.conversation_sessions(id) ON DELETE CASCADE;
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: insight_artifacts insight_artifacts_superseded_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.insight_artifacts
+DO $$ BEGIN
+    ALTER TABLE ONLY public.insight_artifacts
     ADD CONSTRAINT insight_artifacts_superseded_by_fkey FOREIGN KEY (superseded_by) REFERENCES public.insight_artifacts(id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- Name: pedigree_conditions pedigree_conditions_consent_grant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 
-ALTER TABLE ONLY public.pedigree_conditions
+DO $$ BEGIN
+    ALTER TABLE ONLY public.pedigree_conditions
     ADD CONSTRAINT pedigree_conditions_consent_grant_id_fkey FOREIGN KEY (consent_grant_id) REFERENCES public.consent_ledger(id);
+EXCEPTION WHEN duplicate_object OR duplicate_table OR invalid_table_definition THEN NULL;
+END $$;
 
 
 -- PostgreSQL database dump complete
