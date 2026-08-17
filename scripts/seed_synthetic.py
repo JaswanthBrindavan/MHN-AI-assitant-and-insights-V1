@@ -122,4 +122,7 @@ async def _main() -> None:
 
 
 if __name__ == "__main__":
+    from scripts._seed_guard import assert_local_database
+
+    assert_local_database()  # never seed synthetic users into a remote/prod DB
     asyncio.run(_main())
