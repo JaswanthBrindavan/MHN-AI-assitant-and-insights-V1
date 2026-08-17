@@ -58,10 +58,21 @@ def bm25_scores(query: str, documents: list[str]) -> list[float]:
     return scores
 
 
-def rrf_fuse(rankings: list[list[str]], k: int = RRF_K) -> dict[str, float]:
-    """Reciprocal Rank Fusion: id → Σ 1/(k + rank) across rankings."""
+def rrf_fuse(
+    rankings: list[list[str]],
+    k: int = RRF_K,
+    ks: list[int] | None = None,
+) -> dict[str, float]:
+    """Reciprocal Rank Fusion: id → Σ 1/(k_i + rank) across rankings.
+
+    ``ks`` optionally assigns each ranking its own constant; a smaller k
+    sharpens that ranking's head so its top results carry more weight.
+    """
+    if ks is not None and len(ks) != len(rankings):
+        raise ValueError("ks must have one entry per ranking")
     fused: dict[str, float] = {}
-    for ranking in rankings:
+    for idx, ranking in enumerate(rankings):
+        k_i = ks[idx] if ks is not None else k
         for rank, item_id in enumerate(ranking, start=1):
-            fused[item_id] = fused.get(item_id, 0.0) + 1.0 / (k + rank)
+            fused[item_id] = fused.get(item_id, 0.0) + 1.0 / (k_i + rank)
     return fused

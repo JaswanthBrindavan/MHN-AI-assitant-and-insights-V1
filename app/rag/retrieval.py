@@ -162,9 +162,14 @@ async def _global_fallback_rows(db: AsyncSession, message: str) -> list[McpChunk
     if not tokens:
         return []
     conditions = [McpChunk.content.ilike(f"%{t}%") for t in tokens]
+    # ORDER BY makes the candidate SELECTION deterministic: LIMIT without it
+    # lets Postgres synchronized seq-scans rotate the pool between calls.
     rows = (
         await db.execute(
-            select(McpChunk).where(or_(*conditions)).limit(GLOBAL_FALLBACK_CANDIDATES)
+            select(McpChunk)
+            .where(or_(*conditions))
+            .order_by(McpChunk.condition_code, McpChunk.chunk_type, McpChunk.id)
+            .limit(GLOBAL_FALLBACK_CANDIDATES)
         )
     ).scalars().all()
     return list(rows)
@@ -172,7 +177,16 @@ async def _global_fallback_rows(db: AsyncSession, message: str) -> list[McpChunk
 
 _VEC_CANDIDATES = 24
 _BM25_CANDIDATES = 24
-# RRF-scale section boost (RRF scores live around 1/60 ≈ 0.0167).
+# Per-ranking RRF constants. The semantic ranking gets a much smaller k so its
+# head dominates: cosine rank 1 over the whole corpus is a far stronger signal
+# than BM25 rank 1 over the crude token-prefiltered pool, and a uniform k=60
+# let lexical coincidences that also scraped into the vector tail double-count
+# past the true semantic top hit ("ringing sound in my ears" lost tinnitus to
+# a chunk that merely contained "sound" and "night").
+_RRF_K_SEMANTIC = 10
+_RRF_K_LEXICAL = 60
+# Section boost sized to flip adjacent semantic head ranks only
+# (1/11 − 1/12 ≈ 0.0076).
 _RRF_SECTION_BOOST = 0.008
 
 
@@ -244,7 +258,9 @@ async def _hybrid_rank(
             by_id.setdefault(str(c.id), c)
 
     # --- reciprocal-rank fusion + section-intent rerank ---
-    fused = rrf_fuse([vec_ranking, bm25_ranking])
+    fused = rrf_fuse(
+        [vec_ranking, bm25_ranking], ks=[_RRF_K_SEMANTIC, _RRF_K_LEXICAL]
+    )
     message_lower = message.lower()
     scored = [
         RetrievedChunk(
