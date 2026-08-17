@@ -148,3 +148,51 @@ One container, uvicorn on `$PORT`, healthcheck `/health`, HTTP/1.1 (Spring's
 `AiClient` pins HTTP_1_1 — same applies if Spring ever calls Davi). Nightly
 `scripts/nightly_sweep.py` as a cron job. Needs `DATABASE_URL` (asyncpg,
 shared DB), the LLM + embedding env, and the auth env above.
+
+## Full local-parity on Railway (Haiku + hybrid search)
+
+To run on Railway EXACTLY like the local setup (Anthropic Haiku answers +
+hybrid BM25⊕vector retrieval), deploy TWO services from this repo:
+
+**1. `davi-embeddings` — Ollama with the model baked in**
+- New Railway service from this repo; Settings → Build → **Dockerfile Path =
+  `Dockerfile.ollama`** (model `qwen3-embedding:0.6b` is pulled at build time —
+  instant cold starts, no volume).
+- **No public domain** (private-only). No env needed.
+- Davi reaches it at `http://davi-embeddings.railway.internal:11434/v1`
+  (swap in the actual service name).
+
+**2. `davi-api` — this service** (default `Dockerfile`, `railway.toml`), with
+the standard env plus:
+
+```bash
+EMBEDDING_BASE_URL=http://davi-embeddings.railway.internal:11434/v1
+EMBEDDING_MODEL=qwen3-embedding:0.6b
+EMBEDDING_DIM=1024
+```
+
+**3. One-time ingest WITH embeddings** (from a dev machine — its GPU embeds
+the 16,637 chunks in ~an hour; the vectors are stored in pgvector, so the
+Railway Ollama only ever embeds short queries afterwards):
+
+```bash
+DATABASE_URL=postgresql+asyncpg://…shared-db… \
+EMBEDDING_BASE_URL=http://localhost:11434/v1 \
+EMBEDDING_MODEL=qwen3-embedding:0.6b EMBEDDING_DIM=1024 \
+python -m scripts.ingest_mcp_corpus "/path/to/MCP/Documents"
+
+DATABASE_URL=postgresql+asyncpg://…shared-db… \
+python -m scripts.ingest_drugs "/path/to/merged_medicines.csv"
+```
+
+Invariant: **ingest-time and query-time embedding model must be identical**
+(qwen3-embedding:0.6b, native 1024 dims). Changing the model means
+re-ingesting. If the embedding service is ever down, retrieval fail-opens to
+keyword mode — degraded relevance on colloquial symptom phrasings, never an
+error.
+
+**Console caveat on a shared DB:** the test console requires
+`AUTH_ENABLED=false` (X-User-Id header identity), which on the shared
+production database would let anyone impersonate any user. Keep
+`AUTH_ENABLED=true` on Railway and test via the API with real session JWTs
+(or the SERVICE_TOKEN path); use the console locally.

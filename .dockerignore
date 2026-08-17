@@ -20,3 +20,4 @@ build/
 
 # Large local-only artifacts
 evals/stress_10k.jsonl
+Dockerfile.ollama
