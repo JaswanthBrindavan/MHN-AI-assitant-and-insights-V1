@@ -166,6 +166,11 @@ hybrid BM25⊕vector retrieval), deploy TWO services from this repo:
   this the deploy loops on "service unavailable".
 - **No public domain** (private-only). No other env needed (model + settings
   are baked into the image at build time).
+- **No Railway Volume** on this service: a volume mounted at `/root/.ollama`
+  starts empty and shadows the baked model (runtime log `total blobs: 0`,
+  embeds fail model-not-found). The image stores models at `/bundled-models`
+  to be immune, and the build fails if the model didn't persist — but there is
+  still no reason to attach one.
 - Davi reaches it at `http://davi-embeddings.railway.internal:11434/v1`
   (swap in the actual service name).
 

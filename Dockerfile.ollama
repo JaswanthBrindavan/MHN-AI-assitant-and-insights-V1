@@ -1,23 +1,40 @@
 # Embedding service for Davi — Ollama with qwen3-embedding:0.6b BAKED IN.
 #
-# Deployed as its own Railway service (Settings → Build → Dockerfile Path =
-# Dockerfile.ollama). Baking the model into the image means cold starts serve
-# immediately — no volume, no startup download. Image ≈ 1.3 GB.
+# Deployed as its own Railway service: Settings → Config-as-code → path =
+# railway.embeddings.toml, plus the PORT=11434 variable (see that file).
+# Baking the model into the image means cold starts serve immediately — no
+# volume, no startup download.
 #
 # PRIVATE-ONLY service: give it NO public domain. Davi reaches it over
 # Railway's private network at  http://<service-name>.railway.internal:11434/v1
 #
+# Do NOT attach a Railway Volume to this service. A volume mounted at
+# /root/.ollama (Ollama's default model dir) starts empty and SHADOWS the
+# baked model — runtime symptom: "total blobs: 0" and every embed request
+# failing with model-not-found. Models live at /bundled-models precisely so
+# no default-path mount can ever hide them.
+#
 # Query-time embedding of a short chat message is fast on CPU (~100–500 ms);
-# the heavy work (embedding all 16,637 corpus chunks) is done ONCE at ingest
+# the heavy work (embedding all ~17K corpus chunks) is done ONCE at ingest
 # time from a dev machine and stored in pgvector — this service never does it.
 
-FROM ollama/ollama:latest
+# Pinned to the version verified on Railway (2026-08-17); bump deliberately.
+FROM ollama/ollama:0.32.14
 
-# Pull the model at BUILD time (serve briefly, pull, stop).
-RUN ollama serve & \
+# Set BEFORE the pull so build-time serve and runtime serve use the same path.
+ENV OLLAMA_MODELS=/bundled-models
+
+# Pull the model at BUILD time (serve briefly in the background, pull, settle).
+RUN mkdir -p /bundled-models && \
+    ollama serve & \
     sleep 5 && \
     ollama pull qwen3-embedding:0.6b && \
     sleep 2
+
+# Assert the model actually persisted into the image layer — fail the BUILD,
+# not the deploy, if it didn't.
+RUN test -f /bundled-models/manifests/registry.ollama.ai/library/qwen3-embedding/0.6b && \
+    test -n "$(ls -A /bundled-models/blobs)"
 
 # Listen on all interfaces for Railway's private network.
 ENV OLLAMA_HOST=0.0.0.0:11434
