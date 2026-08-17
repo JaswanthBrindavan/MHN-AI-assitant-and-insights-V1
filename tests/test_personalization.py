@@ -15,11 +15,18 @@ import pytest
 
 from app.chat.context import build_health_snapshot, is_personal_health_query
 from app.chat.orchestrator import handle_chat
-from app.coredata.service import active_medications
+from app.coredata.service import active_medications, recent_lab_values
 from app.llm.fake import FakeProvider
 from app.models.chat import McpChunk
 from app.models.common import utcnow
-from app.models.coredata import LifestyleLog, MedicineTracking, Report, VitalReading
+from app.models.coredata import (
+    BodyMeasurement,
+    LifestyleLog,
+    ManualTracking,
+    MedicineTracking,
+    Report,
+    VitalReading,
+)
 
 USER = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
@@ -78,7 +85,23 @@ async def _seed_rich(db):
     db.add(Report(
         user_id=USER, filepath="demo/checkup.pdf", private=False,
         created_at=now - timedelta(days=2),
-        content={"tests": [{"name": "HbA1c", "value": "6.2", "unit": "%"}]},
+        content={"tests": [
+            {"name": "HbA1c", "value": "6.2", "unit": "%"},
+            {"name": "Total Cholesterol", "value": "205", "unit": "mg/dL"},
+            {"name": "Vitamin D", "value": "18", "unit": "ng/mL"},
+        ]},
+    ))
+    # Sleep / activity + body measurements (the full-scale sources).
+    db.add(ManualTracking(
+        user_id=USER, type="sleep", value=5.5, unit="h",
+        effective_from=now - timedelta(days=1),
+    ))
+    db.add(ManualTracking(
+        user_id=USER, type="steps", value=4200, unit="steps",
+        effective_from=now - timedelta(days=1),
+    ))
+    db.add(BodyMeasurement(
+        user_id=USER, type="bmi", value=28.4, date=now - timedelta(days=2),
     ))
     for lt, qty, days in (("coffee", 3, 1), ("coffee", 2, 2), ("smoking", 2, 3)):
         db.add(LifestyleLog(
@@ -114,11 +137,34 @@ async def test_health_snapshot_includes_all_recorded_data(db_session):
     snap = await build_health_snapshot(db_session, USER)
     assert "own recorded data" in snap
     assert "coffee" in snap and "smoking" in snap          # lifestyle
+    assert "5.5 h of sleep" in snap and "4200 steps" in snap  # manual tracking
     assert "blood pressure 134/88" in snap                  # vitals
     assert "blood sugar 142" in snap and "heart rate 78" in snap
-    assert "HbA1c" in snap and "6.2%" in snap               # report param
+    assert "bmi 28.4" in snap                               # body measurement
+    assert "HbA1c 6.2 %" in snap                            # lab value
+    assert "Total Cholesterol 205" in snap                  # ALL labs, not just HbA1c
+    assert "Vitamin D 18" in snap
     assert "Metformin 500mg" in snap                        # active med
     assert "SecretDrug" not in snap and "OldDrug" not in snap
+
+
+@pytest.mark.asyncio
+async def test_recent_lab_values_dedupes_newest_first(db_session):
+    now = utcnow()
+    db_session.add(Report(
+        user_id=USER, filepath="old.pdf", private=False,
+        created_at=now - timedelta(days=40),
+        content={"tests": [{"name": "LDL", "value": "160", "unit": "mg/dL"}]},
+    ))
+    db_session.add(Report(
+        user_id=USER, filepath="new.pdf", private=False,
+        created_at=now - timedelta(days=1),
+        content={"tests": [{"name": "LDL", "value": "132", "unit": "mg/dL"}]},
+    ))
+    await db_session.flush()
+    labs = await recent_lab_values(db_session, USER)
+    ldl = [x for x in labs if x.name == "LDL"]
+    assert len(ldl) == 1 and ldl[0].value == "132"  # newest value wins
 
 
 @pytest.mark.asyncio
@@ -159,6 +205,7 @@ async def test_personal_question_passes_snapshot_to_prompt(db_session, monkeypat
     assert "own recorded data" in sys
     assert "Metformin 500mg" in sys
     assert "blood sugar 142" in sys
+    assert "sleep" in sys and "Total Cholesterol" in sys    # full-scale sources
     # …and the personalization directive was activated.
     assert "Personalization:" in sys
 

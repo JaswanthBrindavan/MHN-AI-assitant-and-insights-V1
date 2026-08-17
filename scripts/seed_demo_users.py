@@ -27,8 +27,10 @@ from app.db import get_sessionmaker
 from app.models.common import utcnow
 from app.models.core import User
 from app.models.coredata import (
+    BodyMeasurement,
     FamilyConnect,
     LifestyleLog,
+    ManualTracking,
     Relation,
     Report,
     VitalReading,
@@ -87,6 +89,8 @@ async def _seed_deepa_coredata(db: AsyncSession) -> bool:
     await db.execute(delete(VitalReading).where(VitalReading.user_id.in_([DEEPA, ESHAN])))
     await db.execute(delete(Report).where(Report.user_id.in_([DEEPA, ESHAN])))
     await db.execute(delete(LifestyleLog).where(LifestyleLog.user_id.in_([DEEPA, ESHAN])))
+    await db.execute(delete(ManualTracking).where(ManualTracking.user_id.in_([DEEPA, ESHAN])))
+    await db.execute(delete(BodyMeasurement).where(BodyMeasurement.user_id.in_([DEEPA, ESHAN])))
     await db.execute(
         delete(FamilyConnect).where(
             FamilyConnect.requester_id.in_([DEEPA, ESHAN])
@@ -140,6 +144,23 @@ async def _seed_deepa_coredata(db: AsyncSession) -> bool:
             user_id=DEEPA, log_type=log_type, quantity=qty, unit=unit,
             metadata_json={"source": "seed_demo"},
             logged_at=now - timedelta(days=days_ago),
+        ))
+
+    # Sleep / activity tracking (manual_tracking) — short sleep, modest activity.
+    for mtype, value, unit, days_ago in (
+        ("sleep", 5.8, "h", 1), ("steps", 6400, "steps", 1),
+        ("calories", 2100, "kcal", 1),
+    ):
+        db.add(ManualTracking(
+            user_id=DEEPA, type=mtype, value=value, unit=unit,
+            effective_from=now - timedelta(days=days_ago),
+        ))
+
+    # Body measurements — overweight BMI to make the correlation meaningful.
+    for btype, value in (("weight", 74.0), ("bmi", 28.1)):
+        db.add(BodyMeasurement(
+            user_id=DEEPA, type=btype, value=value,
+            date=now - timedelta(days=12),
         ))
 
     # Deepa's current medications (raw SQL: medicine_tracking has NOT NULL

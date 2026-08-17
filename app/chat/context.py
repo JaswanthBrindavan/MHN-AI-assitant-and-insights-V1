@@ -16,10 +16,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.coredata.service import (
+    BODY_METRIC_ORDER,
+    MANUAL_METRIC_ORDER,
     active_medications,
-    latest_body_measurement,
+    latest_body_metrics,
+    latest_manual_metrics,
     latest_vital,
     lifestyle_totals,
+    recent_lab_values,
     window_start,
 )
 from app.models.core import PedigreeCondition
@@ -74,25 +78,60 @@ async def build_patient_context(
 # First-person present-experience framing → the reader is asking about their
 # OWN symptom/wellbeing, so their recorded data is relevant. Educational
 # framings ("what is X", "how is X diagnosed") are deliberately excluded.
+#
+# Widened from real user phrasings: feelings ("i feel/get/am … <state/time>"),
+# first-person concern ("should I worry about my …", "is my … ok", "how is my
+# …", "am I getting enough …"), possessive symptom/metric nouns ("my fatigue",
+# "my sugar"), and self-referential experience ("I keep …", "I've been …").
+_SYMPTOM_NOUNS = (
+    "fatigue|tiredness|exhaustion|energy|headaches?|migraines?|dizziness|dizzy|"
+    "nausea|pain|aches?|sleep|insomnia|weight|breathing|breath|palpitations?|"
+    "heartbeat|heart rate|pulse|stress|anxiety|mood|appetite|digestion|"
+    "symptoms?|vision|numbness|tingling|cramps?|swelling|"
+    "blood sugar|blood pressure|\\bbp\\b|sugar|cholesterol|hba1c|bmi|vitals?|"
+    "reports?|results?|readings?|levels?|medication|medicine|meds"
+)
 _PERSONAL_RE = re.compile(
     r"\b("
+    # first-person feeling / experience
     r"i feel|i'm feeling|i am feeling|i've been feeling|i have been feeling|"
-    r"i've been|i have been|"
-    r"why do i (?:feel|get|have|keep)|why am i|why is my|"
-    r"i keep (?:feeling|getting)|i (?:feel|get|am) .{0,30}"
-    r"(?:all the time|lately|these days|nowadays|often|every day)|"
-    r"should i (?:be worried|worry)|is it normal (?:that i|for me)|"
-    r"i can'?t stop|i'm always|i am always|"
-    r"my (?:fatigue|tiredness|energy|headaches?|dizziness|dizzy|pain|sleep|"
-    r"weight|symptoms?|blood sugar|blood pressure|bp|sugar)"
+    r"i've been|i have been|i keep (?:feeling|getting)|i can'?t stop|"
+    r"i'm always|i am always|i often|i sometimes|i always|"
+    r"i (?:feel|get|am|feel like|wake up|struggle to) .{0,40}"
+    r"(?:all the time|lately|these days|nowadays|often|every day|at night|"
+    r"in the mornings?|after (?:meals?|eating|coffee|my)|before meals?|tired|"
+    r"exhausted|dizzy|weak|drained|foggy|sleepy|breathless|anxious)|"
+    # first-person 'why/how/should' about oneself
+    r"why (?:do|am|is|are|does) (?:i|my)|how (?:is|are|am) (?:i|my)|"
+    r"why can'?t i|"
+    r"should i (?:be worried|worry|be concerned)|"
+    r"(?:is|are) my .{0,30}(?:ok|okay|normal|fine|high|low|too|alright|"
+    r"a concern|worrying|dangerous)|"
+    r"am i (?:getting enough|drinking enough|sleeping enough|"
+    r"eating (?:too much|enough)|at risk|okay|healthy|fine)|"
+    r"is it normal (?:that i|for me)|"
+    # possessive symptom / metric noun
+    r"my (?:" + _SYMPTOM_NOUNS + r")"
     r")\b",
     re.IGNORECASE,
 )
 # Hinglish / romanized-Hindi first-person symptom framing (DRAFT).
+# A symptom/state word near a "happening / why" marker counts even without an
+# explicit pronoun ("din bhar neend aati rehti hai kyun").
+_HINGLISH_SYMPTOM = (
+    "thakan|kamzori|chakkar|dard|neend|bukhar|sust|ghabrahat|"
+    "saans|jee|ulti|pet|sar dard"
+)
 _PERSONAL_HINGLISH_RE = re.compile(
     r"mujhe .{0,30}(?:rehti hai|rehta hai|hoti hai|hota hai|ho rahi|ho raha|"
-    r"lagti hai|lagta hai)|"
-    r"mujhe kyun|mujhe (?:thakan|kamzori|chakkar|dard)",
+    r"lagti hai|lagta hai|aati hai|aate hain|aata hai)|"
+    r"mujhe kyun|mujhe (?:" + _HINGLISH_SYMPTOM + r")|"
+    r"meri (?:tabiyat|sehat|report|sugar|bp)|"
+    r"mera (?:sugar|bp|weight|vazan)|"
+    # symptom word + happening/why marker, pronoun-free
+    r"(?:" + _HINGLISH_SYMPTOM + r").{0,25}"
+    r"(?:aati|aate|aata|rehti|rehta|hoti|hota|ho rahi|lagti|lagta|kyun)|"
+    r"kyun.{0,25}(?:" + _HINGLISH_SYMPTOM + r")",
     re.IGNORECASE,
 )
 
@@ -113,28 +152,47 @@ def _fmt_date(dt) -> str:
         return ""
 
 
+def _num(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
 async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
-    """A compact, factual [P]-ready summary of the reader's own recorded data.
+    """A compact, factual [P]-ready summary of ALL of the reader's recorded data.
 
-    Recent lifestyle totals, latest vitals + HbA1c + weight, and active
-    medications. Empty string when nothing is on record (empty accounts stay
-    lean). Purely descriptive — no thresholds, no interpretation; the model
-    does the (cautious, correlational) reasoning under the prompt's rules.
+    Pulls every available personal source: recent lifestyle totals, sleep /
+    activity trackers, latest vitals, body measurements, every extracted lab
+    value from recent reports, and active medications. Empty string when
+    nothing is on record (empty accounts stay lean). Purely descriptive — no
+    thresholds, no interpretation; the model does the (cautious, correlational)
+    reasoning under the prompt's rules.
     """
-    from app.chat.data_handlers import _latest_report_param
-
     lines: list[str] = []
 
+    # 1) Lifestyle (past-week totals).
     totals = await lifestyle_totals(db, user_id, window_start("week"))
     if totals:
         order = ("coffee", "tea", "alcohol", "smoking", "water")
-        parts = [
-            f"{int(totals[k]) if float(totals[k]).is_integer() else totals[k]} {k}"
-            for k in order if k in totals
-        ]
+        parts = [f"{_num(totals[k])} {k}" for k in order if k in totals]
         if parts:
             lines.append("Lifestyle logged in the past 7 days: " + ", ".join(parts) + ".")
 
+    # 2) Sleep / activity trackers (latest value per type, past month).
+    manual = await latest_manual_metrics(db, user_id, window_start("month"))
+    if manual:
+        _manual_phrase = {
+            "sleep": lambda v: f"{v} h of sleep",
+            "steps": lambda v: f"{v} steps",
+            "calories": lambda v: f"{v} kcal",
+            "water": lambda v: f"{v} glasses of water",
+        }
+        parts = [
+            _manual_phrase.get(k, lambda v, _k=k: f"{v} {_k}")(_num(manual[k].value))
+            for k in MANUAL_METRIC_ORDER if k in manual
+        ]
+        if parts:
+            lines.append("Recent activity/sleep tracking: " + ", ".join(parts) + ".")
+
+    # 3) Latest vitals.
     vitals: list[str] = []
     bp = await latest_vital(db, user_id, "blood_pressure")
     if bp is not None:
@@ -146,24 +204,32 @@ async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
     hr = await latest_vital(db, user_id, "heart_rate")
     if hr is not None:
         vitals.append(f"heart rate {int(hr.value)} {hr.unit or 'bpm'}")
+    spo2 = await latest_vital(db, user_id, "spo2")
+    if spo2 is not None:
+        vitals.append(f"SpO2 {int(spo2.value)}{spo2.unit or '%'}")
     if vitals:
         lines.append("Latest recorded vitals: " + "; ".join(vitals) + ".")
 
-    hba1c = await _latest_report_param(
-        db, user_id, ("hba1c", "glycated hemoglobin", "glycated haemoglobin")
-    )
-    if hba1c is not None:
-        value, unit, at = hba1c
-        d = _fmt_date(at)
-        lines.append(
-            f"Most recent HbA1c on record: {value}{unit or '%'}"
-            + (f" ({d})" if d else "") + "."
-        )
+    # 4) Body measurements (all types on record).
+    body = await latest_body_metrics(db, user_id)
+    if body:
+        parts = [
+            f"{k.replace('_', ' ')} {_num(body[k].value)}{body[k].unit or ''}"
+            for k in BODY_METRIC_ORDER if k in body
+        ]
+        if parts:
+            lines.append("Body measurements: " + ", ".join(parts) + ".")
 
-    weight = await latest_body_measurement(db, user_id, "weight")
-    if weight is not None:
-        lines.append(f"Latest recorded weight: {weight.value:g} kg.")
+    # 5) Lab values — every extracted parameter from recent reports/scans.
+    labs = await recent_lab_values(db, user_id)
+    if labs:
+        parts = [
+            f"{lv.name} {lv.value}{(' ' + lv.unit) if lv.unit else ''}"
+            for lv in labs
+        ]
+        lines.append("Recent lab results on record: " + "; ".join(parts) + ".")
 
+    # 6) Active medications.
     meds = await active_medications(db, user_id)
     if meds:
         lines.append("Current medications on record: " + ", ".join(meds) + ".")

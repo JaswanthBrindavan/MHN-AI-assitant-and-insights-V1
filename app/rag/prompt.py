@@ -38,8 +38,10 @@ _PERSONALIZATION_RULES = (
     "with [P]. Strict limits: these are possibilities to discuss, never a "
     "diagnosis; do NOT say any recorded value or medication IS the cause of the "
     "symptom; do NOT tell the reader to change or stop a medication — only to "
-    "discuss it with the prescriber. If the reader is on medication, add the "
-    "standard reminder not to change or stop a dose on their own."
+    "discuss it with the prescriber. Whenever you name ANY of the reader's "
+    "medications, you MUST include, in the same reply, the reminder that they "
+    "should not change or stop the dose on their own and should discuss it with "
+    "their prescriber — this is required every time a medication is mentioned."
 )
 
 

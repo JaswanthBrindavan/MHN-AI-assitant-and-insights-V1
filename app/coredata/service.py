@@ -20,6 +20,7 @@ from app.models.coredata import (
     BodyMeasurement,
     FamilyConnect,
     LifestyleLog,
+    ManualTracking,
     MedicineTracking,
     Prescription,
     Relation,
@@ -292,4 +293,163 @@ async def active_medications(
         if r.is_prn:
             label += " (as needed)"
         out.append(label)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Manual tracking (sleep / steps / calories …) — latest value per type
+# --------------------------------------------------------------------------- #
+# Order in which manual-tracking metrics surface (only these are wellbeing-
+# relevant; heart_rate/bp/sugar/spo2 already come from vital_reading).
+MANUAL_METRIC_ORDER = ("sleep", "steps", "calories", "water")
+_MANUAL_UNIT = {"sleep": "h", "steps": "steps", "calories": "kcal", "water": "glass"}
+
+
+async def latest_manual_metrics(
+    db: AsyncSession, user_id: uuid.UUID, since: datetime
+) -> dict[str, MetricPoint]:
+    """Latest value per manual-tracking type recorded since ``since``."""
+    rows = (
+        await db.execute(
+            select(ManualTracking)
+            .where(
+                ManualTracking.user_id == user_id,
+                ManualTracking.value.is_not(None),
+                ManualTracking.type.in_(MANUAL_METRIC_ORDER),
+                ManualTracking.effective_from >= since,
+            )
+            .order_by(
+                ManualTracking.effective_from.desc().nulls_last(),
+                ManualTracking.id.desc(),
+            )
+        )
+    ).scalars().all()
+    out: dict[str, MetricPoint] = {}
+    for r in rows:
+        if r.type in out or r.value is None:
+            continue
+        out[r.type] = MetricPoint(
+            at=r.effective_from or utcnow(),
+            value=float(r.value),
+            unit=r.unit or _MANUAL_UNIT.get(r.type),
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Body measurements — latest value per type
+# --------------------------------------------------------------------------- #
+BODY_METRIC_ORDER = (
+    "weight", "bmi", "body_fat", "muscle_mass", "visceral_fat",
+    "bone_mass", "water", "height",
+)
+_BODY_UNIT = {
+    "weight": "kg", "bmi": "kg/m²", "body_fat": "%", "muscle_mass": "%",
+    "visceral_fat": "", "bone_mass": "kg", "water": "%", "height": "cm",
+}
+
+
+async def latest_body_metrics(
+    db: AsyncSession, user_id: uuid.UUID
+) -> dict[str, MetricPoint]:
+    """Latest value per body-measurement type."""
+    rows = (
+        await db.execute(
+            select(BodyMeasurement)
+            .where(BodyMeasurement.user_id == user_id)
+            .order_by(
+                BodyMeasurement.date.desc().nulls_last(),
+                BodyMeasurement.id.desc(),
+            )
+        )
+    ).scalars().all()
+    out: dict[str, MetricPoint] = {}
+    for r in rows:
+        if r.type in out:
+            continue
+        out[r.type] = MetricPoint(
+            at=r.date or utcnow(), value=float(r.value),
+            unit=_BODY_UNIT.get(r.type),
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Lab values — ALL extracted parameters from recent reports + scans
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class LabValue:
+    name: str
+    value: str
+    unit: str | None
+    at: datetime | None
+
+
+def _collect_params(content, out: list[tuple[str, str, str | None]]) -> None:
+    """Walk a report's extracted JSON, collecting every (name, value, unit)."""
+    if isinstance(content, dict):
+        name = (
+            content.get("name") or content.get("parameter") or content.get("test")
+        )
+        value = None
+        for vk in ("value", "result", "reading"):
+            if content.get(vk) is not None:
+                value = content.get(vk)
+                break
+        if name and value is not None:
+            out.append((str(name).strip(), str(value).strip(), content.get("unit")))
+        for v in content.values():
+            _collect_params(v, out)
+    elif isinstance(content, list):
+        for item in content:
+            _collect_params(item, out)
+
+
+async def recent_lab_values(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    report_limit: int = 6,
+    max_values: int = 14,
+) -> list[LabValue]:
+    """Distinct lab values from the user's most recent reports and scans.
+
+    Newest-first; the first occurrence of each parameter name wins (most recent
+    value). Capped to keep the [P] block bounded.
+    """
+    reports = (
+        await db.execute(
+            select(Report)
+            .where(Report.user_id == user_id, Report.content.is_not(None))
+            .order_by(Report.created_at.desc().nulls_last(), Report.id.desc())
+            .limit(report_limit)
+        )
+    ).scalars().all()
+    scans = (
+        await db.execute(
+            select(ScanImaging)
+            .where(ScanImaging.user_id == user_id, ScanImaging.content.is_not(None))
+            .order_by(ScanImaging.created_at.desc().nulls_last(), ScanImaging.id.desc())
+            .limit(report_limit)
+        )
+    ).scalars().all()
+
+    docs = sorted(
+        [*reports, *scans],
+        key=lambda d: (d.created_at is None,
+                       -(d.created_at.timestamp() if d.created_at else 0)),
+    )
+    seen: set[str] = set()
+    out: list[LabValue] = []
+    for doc in docs:
+        params: list[tuple[str, str, str | None]] = []
+        _collect_params(doc.content, params)
+        for name, value, unit in params:
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(LabValue(name=name, value=value, unit=unit, at=doc.created_at))
+            if len(out) >= max_values:
+                return out
     return out
