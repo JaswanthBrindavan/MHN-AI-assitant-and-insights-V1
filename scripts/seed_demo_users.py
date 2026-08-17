@@ -117,20 +117,50 @@ async def _seed_deepa_coredata(db: AsyncSession) -> bool:
         unit="bpm", recorded_at=now - timedelta(days=2),
     ))
 
-    # Lab report with extracted content (HbA1c lives here).
+    # Lab reports with the PRODUCTION mhn-ai envelope (assembly.build_content):
+    # everything under a namespaced "ai" key; extraction results carry the
+    # model-transcribed fields plus Python-computed value_numeric/abnormal_flag.
+    def _ai_report(title: str, results: list[dict], gen_at: str) -> dict:
+        return {"ai": {
+            "schema_version": "2.1", "state": "complete", "document_id": 9000,
+            "classification": {"section": "reports", "title": title,
+                               "confidence": 0.97},
+            "extraction": {"results": results, "report_date": gen_at,
+                           "patient_age": "34", "patient_gender": "Female"},
+            "insights": None, "generated_at": f"{gen_at}T10:00:00Z",
+        }}
+
     db.add(Report(
-        user_id=DEEPA, filepath="demo/deepa_full_body_checkup.pdf",
+        user_id=DEEPA, filepath="uploads/reports/a91f3c.pdf",
         private=False, created_at=now - timedelta(days=12),
-        content={"tests": [
-            {"name": "HbA1c (Glycated Hemoglobin)", "value": "6.1", "unit": "%"},
-            {"name": "Fasting Blood Sugar", "value": "112", "unit": "mg/dL"},
-            {"name": "Total Cholesterol", "value": "182", "unit": "mg/dL"},
-        ]},
+        content=_ai_report("Full Body Checkup", [
+            {"test_name": "HbA1c (Glycated Hemoglobin)", "value": "6.1",
+             "unit": "%", "reference_range": "< 5.7", "observed_date": "2026-08-02",
+             "source_context": "HbA1c", "value_numeric": 6.1,
+             "abnormal_flag": "high", "range_source": "report_range",
+             "flagged_against": "<= 5.7"},
+            {"test_name": "Fasting Blood Sugar", "value": "112", "unit": "mg/dL",
+             "reference_range": "70-99", "observed_date": "2026-08-02",
+             "source_context": "Glucose, Fasting", "value_numeric": 112.0,
+             "abnormal_flag": "high", "range_source": "report_range",
+             "flagged_against": "70 - 99"},
+            {"test_name": "Total Cholesterol", "value": "182", "unit": "mg/dL",
+             "reference_range": "< 200", "observed_date": "2026-08-02",
+             "source_context": "Lipids", "value_numeric": 182.0,
+             "abnormal_flag": "normal", "range_source": "report_range",
+             "flagged_against": "<= 200"},
+        ], "2026-08-02"),
     ))
     db.add(Report(
-        user_id=DEEPA, filepath="demo/deepa_cbc_report.pdf",
+        user_id=DEEPA, filepath="uploads/reports/b22d7e.pdf",
         private=False, created_at=now - timedelta(days=90),
-        content={"tests": [{"name": "Hemoglobin", "value": "12.9", "unit": "g/dL"}]},
+        content=_ai_report("Complete Blood Count", [
+            {"test_name": "Hemoglobin", "value": "12.9", "unit": "g/dL",
+             "reference_range": "12-15", "observed_date": "2026-05-16",
+             "source_context": "CBC", "value_numeric": 12.9,
+             "abnormal_flag": "normal", "range_source": "report_range",
+             "flagged_against": "12 - 15"},
+        ], "2026-05-16"),
     ))
 
     # Lifestyle logs across the past week.
@@ -220,21 +250,63 @@ async def _seed_deepa_coredata(db: AsyncSession) -> bool:
         relation = Relation(name="Father", inverse="Child")
         db.add(relation)
         await db.flush()
+    # Production consent columns: the owner-side read grants (req_read/acc_read)
+    # are what FileServiceImpl checks; legacy *_file_share kept for realism.
     db.add(FamilyConnect(
         requester_id=DEEPA, acceptor_id=ESHAN, accepted=True,
-        req_file_share=True, acc_file_share=True, relation_id=relation.id,
+        req_file_share=True, acc_file_share=True,
+        req_read=True, acc_read=True, relation_id=relation.id,
     ))
 
-    # Eshan's shared documents.
+    # Eshan's documents, production-shaped. Three consent layers demoed:
+    #   * lipid profile — shared (visible to Deepa)
+    #   * private note  — private=True (never visible)
+    #   * kidney function test — NEWER but per-file EXCLUDED for Deepa via
+    #     file_access_exclusions (production's per-file opt-out)
     db.add(Report(
-        user_id=ESHAN, filepath="demo/eshan_lipid_profile.pdf",
+        user_id=ESHAN, filepath="uploads/reports/e77a01.pdf",
         private=False, created_at=now - timedelta(days=25),
-        content={"tests": [{"name": "LDL Cholesterol", "value": "141", "unit": "mg/dL"}]},
+        content={"ai": {
+            "schema_version": "2.1", "state": "complete", "document_id": 9101,
+            "classification": {"section": "reports", "title": "Lipid Profile",
+                               "confidence": 0.96},
+            "extraction": {"results": [
+                {"test_name": "LDL Cholesterol", "value": "141", "unit": "mg/dL",
+                 "reference_range": "< 100", "observed_date": "2026-07-20",
+                 "source_context": "Lipid panel", "value_numeric": 141.0,
+                 "abnormal_flag": "high", "range_source": "report_range",
+                 "flagged_against": "<= 100"},
+            ], "report_date": "2026-07-20", "patient_age": "62",
+                "patient_gender": "Male"},
+            "insights": None, "generated_at": "2026-07-20T09:00:00Z",
+        }},
     ))
     db.add(Report(
-        user_id=ESHAN, filepath="demo/eshan_private_note.pdf",
+        user_id=ESHAN, filepath="uploads/reports/e77a02.pdf",
         private=True, created_at=now - timedelta(days=5),
     ))
+    excluded = Report(
+        user_id=ESHAN, filepath="uploads/reports/e77a03.pdf",
+        private=False, created_at=now - timedelta(days=10),
+        content={"ai": {
+            "schema_version": "2.1", "state": "complete", "document_id": 9102,
+            "classification": {"section": "reports",
+                               "title": "Kidney Function Test",
+                               "confidence": 0.95},
+            "extraction": None, "insights": None,
+            "generated_at": "2026-08-07T09:00:00Z",
+        }},
+    )
+    db.add(excluded)
+    await db.flush()
+    # Eshan excluded Deepa from the KFT specifically (viewer-keyed row).
+    if await _table_exists(db, "file_access_exclusions"):
+        from app.models.coredata import FileAccessExclusion
+        await db.execute(delete(FileAccessExclusion).where(
+            FileAccessExclusion.user_id == DEEPA))
+        db.add(FileAccessExclusion(
+            user_id=DEEPA, resource_type="reports", resource_id=excluded.id,
+        ))
     await db.flush()
     return True
 
