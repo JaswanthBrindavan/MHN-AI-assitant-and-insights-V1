@@ -161,8 +161,11 @@ hybrid BM25⊕vector retrieval), deploy TWO services from this repo:
   required, not optional: config-as-code overrides dashboard settings, so
   without it the service inherits the repo-root `railway.toml` (the API's
   Dockerfile and a `/health` healthcheck Ollama doesn't serve).
-- **No public domain** (private-only). No env needed (model + settings are
-  baked into the image at build time).
+- Variables → add **`PORT=11434`** — Railway healthchecks the port named by
+  PORT (auto-generated when unset), while Ollama listens on 11434; without
+  this the deploy loops on "service unavailable".
+- **No public domain** (private-only). No other env needed (model + settings
+  are baked into the image at build time).
 - Davi reaches it at `http://davi-embeddings.railway.internal:11434/v1`
   (swap in the actual service name).
 

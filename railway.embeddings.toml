@@ -17,7 +17,12 @@ healthcheckPath = "/"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
 
-# No variables needed: OLLAMA_HOST / OLLAMA_KEEP_ALIVE are baked into the
-# image, the model is baked at build time, and the service must have NO public
-# domain (private networking only:
+# ONE required service variable:  PORT=11434
+# Railway's healthcheck probes the port in the PORT variable, and it
+# auto-generates PORT when unset — but Ollama ignores PORT and listens on
+# 11434 (baked OLLAMA_HOST). Without PORT=11434 the healthcheck probes an
+# unbound port and every deploy fails with "service unavailable".
+#
+# Everything else is baked into the image (OLLAMA_HOST, OLLAMA_KEEP_ALIVE,
+# the model). The service must have NO public domain (private networking only:
 # http://<service-name>.railway.internal:11434/v1).
