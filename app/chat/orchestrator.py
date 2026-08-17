@@ -86,6 +86,10 @@ class ChatResult:
     # Truthful decision trace (the pipeline's actual steps, not simulated
     # reasoning) — rendered as the "thinking" chain in clients.
     trace: list[dict] = field(default_factory=list)
+    # Document cards ([{kind, resource_type, id, title, date, owner}]) for
+    # replies referencing stored files — clients open them via the existing
+    # app flow (Spring presigned URL / health-wallet routes).
+    documents: list[dict] | None = None
 
 
 def _hash(text: str) -> str:
@@ -342,6 +346,7 @@ async def _dispatch(
                     provenance=ability["provenance"],
                     citations=ability.get("citations"),
                     visual=ability.get("visual"),
+                    documents=ability.get("documents"),
                     language=lang,
                     trace=trace,
                 )

@@ -234,3 +234,68 @@ async def test_ai_classification_title_used(db_session):
     await db_session.flush()
     hits = await latest_documents(db_session, OWNER, ["report"])
     assert hits[0].title == "Full Body Checkup"
+
+
+# --------------------------------------------------------------------------- #
+# Document cards + dev-only consent-gated preview
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_document_reply_carries_cards(db_session):
+    from app.chat.orchestrator import handle_chat
+    from app.llm.fake import FakeProvider
+
+    db_session.add(Report(
+        user_id=VIEWER, filepath="uploads/reports/x1.pdf", private=False,
+        created_at=utcnow(), content=PROD_CONTENT,
+    ))
+    await db_session.flush()
+    r = await handle_chat(
+        db_session, VIEWER, "find my latest blood report", FakeProvider()
+    )
+    assert r.documents and r.documents[0]["title"] == "Full Body Checkup"
+    assert r.documents[0]["resource_type"] == "reports"
+    assert isinstance(r.documents[0]["id"], int)
+
+
+@pytest.mark.asyncio
+async def test_preview_consent_gate(db_session, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api.v1.documents import document_preview
+
+    db_session.add(Report(
+        user_id=OWNER, filepath="uploads/reports/x2.pdf", private=False,
+        created_at=utcnow(), content=PROD_CONTENT,
+    ))
+    await db_session.flush()
+    rid = (
+        await db_session.execute(
+            __import__("sqlalchemy").select(Report.id).where(
+                Report.filepath == "uploads/reports/x2.pdf")
+        )
+    ).scalar_one()
+
+    # Owner can view; renders the AI title + extraction table.
+    html = bytes(
+        (await document_preview("reports", rid, OWNER, db_session)).body
+    ).decode()
+    assert "Full Body Checkup" in html and "Fasting Glucose" in html
+
+    # A stranger (no connection) is refused.
+    with pytest.raises(HTTPException) as e:
+        await document_preview("reports", rid, VIEWER, db_session)
+    assert e.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_preview_absent_outside_dev(db_session, monkeypatch):
+    from fastapi import HTTPException
+
+    from app.api.v1.documents import document_preview
+
+    monkeypatch.setenv("APP_ENV", "prod")
+    get_settings.cache_clear()
+    with pytest.raises(HTTPException) as e:
+        await document_preview("reports", 1, VIEWER, db_session)
+    assert e.value.status_code == 404
+    get_settings.cache_clear()

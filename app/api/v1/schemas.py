@@ -109,3 +109,8 @@ class ChatResponse(BaseModel):
     language: str = "en"
     # Truthful pipeline decision trace (rendered as the "thinking" chain).
     trace: list[dict] = Field(default_factory=list)
+    # Document cards for replies that reference stored files:
+    # [{kind, resource_type, id, title, date, owner}] — the client opens the
+    # file via the EXISTING app flow (Spring GET /files/{type}/{id}/url or the
+    # health-wallet detail routes); Davi never mints URLs or touches S3.
+    documents: list[dict] | None = None

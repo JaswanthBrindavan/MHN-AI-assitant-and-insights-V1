@@ -156,6 +156,46 @@ async def _viewer_exclusions(
     return out
 
 
+async def can_view_document(
+    db: AsyncSession,
+    viewer_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    resource_type: str,
+    resource_id: int,
+    *,
+    is_private: bool | None,
+) -> bool:
+    """Production read gate (FileServiceImpl.assertCanRead): owner always;
+    otherwise not-private + accepted connection with the owner-side read grant
+    + no per-file exclusion for this viewer."""
+    if viewer_id == owner_id:
+        return True
+    if is_private:
+        return False
+    fc = (
+        await db.execute(
+            select(FamilyConnect).where(
+                FamilyConnect.accepted.is_(True),
+                (
+                    (FamilyConnect.requester_id == owner_id)
+                    & (FamilyConnect.acceptor_id == viewer_id)
+                )
+                | (
+                    (FamilyConnect.requester_id == viewer_id)
+                    & (FamilyConnect.acceptor_id == owner_id)
+                ),
+            )
+        )
+    ).scalars().first()
+    if fc is None:
+        return False
+    owner_is_requester = fc.requester_id == owner_id
+    if not _owner_read_grant(fc, owner_is_requester=owner_is_requester):
+        return False
+    denied = await _viewer_exclusions(db, viewer_id)
+    return resource_id not in denied.get(resource_type, set())
+
+
 async def latest_documents(
     db: AsyncSession,
     owner_id: uuid.UUID,

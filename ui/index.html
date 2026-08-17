@@ -129,6 +129,38 @@
     animation: caret-blink .8s step-end infinite;
   }
   @keyframes caret-blink { 50% { opacity: 0; } }
+  /* document cards (open the file from a chat reply) */
+  .doccards { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .doccard {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
+  }
+  .doccard .dc-title { font-weight: 600; font-size: 13px; }
+  .doccard .dc-meta { color: var(--muted); font-size: 11px; }
+  .doccard button {
+    margin-left: auto; border: 1px solid var(--border); background: #fff;
+    border-radius: 8px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+  }
+  .doccard button:hover { background: var(--bg); }
+  /* preview overlay */
+  #doc-overlay {
+    position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none;
+    align-items: center; justify-content: center; z-index: 60;
+  }
+  #doc-overlay .panel {
+    width: min(680px, 92vw); height: min(560px, 86vh); background: #fff;
+    border-radius: 14px; overflow: hidden; display: flex; flex-direction: column;
+    box-shadow: 0 24px 60px rgba(0,0,0,.25);
+  }
+  #doc-overlay .panel header {
+    display: flex; align-items: center; padding: 10px 14px;
+    border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px;
+  }
+  #doc-overlay .panel header button {
+    margin-left: auto; border: none; background: none; font-size: 18px;
+    cursor: pointer; color: var(--muted);
+  }
+  #doc-overlay iframe { flex: 1; border: 0; width: 100%; }
   /* thinking chain */
   details.thinking {
     max-width: 100%; margin: 0 0 6px; font-size: 12px;
@@ -314,18 +346,22 @@ function mdLite(text) {
   return html;
 }
 
-// Type the (already safety-validated) reply out word by word. Pacing adapts
-// to length so long answers never take more than ~3s to finish.
+// Type the (already safety-validated) reply out word by word. Progress is
+// ELAPSED-TIME based (not tick-count) so browser timer throttling — e.g. the
+// user switches tabs mid-reply — cannot stall the animation: any late tick
+// jumps to the right position and completes. Total duration caps at ~3s.
 function typeInto(bubble, text, onDone) {
   const tokens = text.split(/(\s+)/);  // words with their whitespace kept
-  const perTick = Math.max(1, Math.ceil(tokens.length / 110));
-  let i = 0;
+  const total = tokens.length;
+  const durationMs = Math.min(3000, Math.max(600, total * 28));
+  const t0 = Date.now();
   bubble.classList.add("typing");
   const timer = setInterval(() => {
-    i = Math.min(tokens.length, i + perTick);
+    const frac = Math.min(1, (Date.now() - t0) / durationMs);
+    const i = Math.max(1, Math.round(total * frac));
     bubble.innerHTML = mdLite(tokens.slice(0, i).join(""));
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    if (i >= tokens.length) {
+    if (frac >= 1) {
       clearInterval(timer);
       bubble.classList.remove("typing");
       if (onDone) onDone();
@@ -363,7 +399,54 @@ function addBotMsg(data) {
   }
 }
 
+async function openDocPreview(doc) {
+  // Dev preview: fetch the consent-gated preview HTML (auth headers can't
+  // ride an iframe src) and render it via srcdoc. In production the client
+  // opens the real file through Spring's presigned URL instead.
+  let overlay = document.getElementById("doc-overlay");
+  if (!overlay) {
+    overlay = document.createElement("div");
+    overlay.id = "doc-overlay";
+    overlay.innerHTML = `<div class="panel"><header><span id="doc-ov-title"></span>
+      <button id="doc-ov-close">✕</button></header><iframe id="doc-ov-frame"></iframe></div>`;
+    document.body.appendChild(overlay);
+    overlay.onclick = e => { if (e.target === overlay) overlay.style.display = "none"; };
+    overlay.querySelector("#doc-ov-close").onclick = () => overlay.style.display = "none";
+  }
+  overlay.querySelector("#doc-ov-title").textContent = doc.title;
+  overlay.style.display = "flex";
+  const frame = overlay.querySelector("#doc-ov-frame");
+  frame.srcdoc = "<p style='font-family:sans-serif;color:#6b7280;margin:20px'>Loading…</p>";
+  try {
+    const res = await fetch(
+      `${API}/documents/${doc.resource_type}/${doc.id}/preview`,
+      { headers: headers() });
+    frame.srcdoc = res.ok ? await res.text() :
+      `<p style='font-family:sans-serif;color:#e11d48;margin:20px'>⚠ ${res.status} — you don't have access to this file.</p>`;
+  } catch (e) {
+    frame.srcdoc = `<p style='font-family:sans-serif;color:#e11d48;margin:20px'>⚠ ${esc(e.message)}</p>`;
+  }
+}
+
 function addBotMsgExtras(d, data) {
+  if (data.documents && data.documents.length) {
+    const wrap = document.createElement("div");
+    wrap.className = "doccards";
+    for (const doc of data.documents) {
+      const card = document.createElement("div");
+      card.className = "doccard";
+      const when = doc.date ? new Date(doc.date).toLocaleDateString(
+        "en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "";
+      card.innerHTML = `<span>📄</span><div><div class="dc-title">${esc(doc.title)}</div>
+        <div class="dc-meta">${esc(doc.kind)} · ${esc(when)}${doc.owner && doc.owner !== "you" ? " · " + esc(doc.owner) : ""}</div></div>`;
+      const btn = document.createElement("button");
+      btn.textContent = "View";
+      btn.onclick = () => openDocPreview(doc);
+      card.appendChild(btn);
+      wrap.appendChild(card);
+    }
+    d.appendChild(wrap);
+  }
   if (data.visual && data.visual.svg) {
     const v = document.createElement("div");
     v.className = "visual"; v.innerHTML = data.visual.svg;

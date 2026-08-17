@@ -48,4 +48,5 @@ async def chat(
         visual=result.visual,
         language=result.language,
         trace=result.trace,
+        documents=result.documents,
     )

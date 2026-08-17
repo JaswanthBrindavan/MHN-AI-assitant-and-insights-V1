@@ -30,6 +30,7 @@ from app.chat.abilities import (
     parse_tracker_add,
 )
 from app.coredata.service import (
+    _RESOURCE_TYPE,
     add_lifestyle_log,
     latest_body_measurement,
     latest_documents,
@@ -350,9 +351,24 @@ async def handle_document_query(
             f"The most recent {hits[0].kind} for {owner_label} is from "
             f"{hits[0].created_at.strftime('%d %b %Y')}."
         )
+    # Document cards: everything a client needs to open the file through the
+    # EXISTING app flow (Spring GET /files/{resource_type}/{id}/url or the
+    # health-wallet detail routes). Davi never mints URLs or touches S3.
+    cards = [
+        {
+            "kind": h.kind,
+            "resource_type": _RESOURCE_TYPE.get(h.kind, h.kind),
+            "id": h.doc_id,
+            "title": h.title or h.filepath.rsplit("/", 1)[-1],
+            "date": h.created_at.isoformat() if h.created_at else None,
+            "owner": h.owner_label,
+        }
+        for h in hits
+    ]
     return {
         "reply": lead + "\n" + "\n".join(lines),
         "action": "open_documents",
+        "documents": cards,
         "provenance": {
             "path": "document_query",
             "kinds": list(query.kinds),
