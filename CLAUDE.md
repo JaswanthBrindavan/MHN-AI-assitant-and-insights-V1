@@ -29,7 +29,7 @@ Rules we follow (do not break these):
   (matching `ai_processing_runs`). FKs among our OWN tables are fine
   (`pedigree_conditions.consent_grant_id`, `insight_artifacts.superseded_by`,
   the `conversation_*` cascade).
-- **Production schema ships as Flyway**: `db/flyway/V5__davi_ai_tables.sql` is
+- **Production schema ships as Flyway**: `db/flyway/V6__davi_ai_tables.sql` is
   the DDL for adoption into mhn-spring's migration chain. Our Alembic chain
   (version table **`davi_alembic_version`**) builds local/test databases only.
   The `"user"` table is in ORM metadata (partial read-only `User` model) but

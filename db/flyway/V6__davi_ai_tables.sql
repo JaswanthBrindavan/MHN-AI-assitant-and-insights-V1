@@ -1,4 +1,4 @@
--- V5__davi_ai_tables.sql — Davi AI assistant tables, for adoption into
+-- V6__davi_ai_tables.sql — Davi AI assistant tables, for adoption into
 -- mhn-spring's Flyway chain (src/main/resources/db/migration/), following the
 -- V4__ai_tables.sql precedent: on the shared production database, Flyway owns
 -- ALL schema; the Davi repo's Alembic chain (version table davi_alembic_version)

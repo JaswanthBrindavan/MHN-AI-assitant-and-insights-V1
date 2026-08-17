@@ -15,7 +15,7 @@ healthcheckPath = "/health"
 
 # NO preDeployCommand, matching mhn-ai's convention: on the shared production
 # database, schema has ONE owner — mhn-spring's Flyway. Davi's tables ship as
-# db/flyway/V5__davi_ai_tables.sql adopted into Spring's migration folder; the
+# db/flyway/V6__davi_ai_tables.sql adopted into Spring's migration folder; the
 # Alembic chain in this repo (version table davi_alembic_version) builds
 # local/test databases only.
 #

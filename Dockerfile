@@ -20,7 +20,7 @@ EXPOSE 8000
 
 # Binds Railway's injected $PORT (8000 locally). Migrations do NOT run by
 # default: on the shared production database, schema is owned by mhn-spring's
-# Flyway (db/flyway/V5__davi_ai_tables.sql) — running Alembic there would
+# Flyway (db/flyway/V6__davi_ai_tables.sql) — running Alembic there would
 # create tables outside Flyway's bookkeeping. For a STANDALONE/test database
 # (e.g. a fresh Railway Postgres), set RUN_MIGRATIONS_ON_START=true and the
 # Davi tables are created via the local Alembic chain (davi_alembic_version).
