@@ -1,0 +1,22 @@
+# Never bake secrets or local state into the image.
+.env
+.env.*
+!.env.example
+
+# Local tooling / caches
+.venv/
+.git/
+.github/
+.claude/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/
+
+# Large local-only artifacts
+evals/stress_10k.jsonl

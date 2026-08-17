@@ -1,0 +1,48 @@
+# Railway build and deploy settings for the Davi AI service.
+#
+# ONE service (api). Unlike mhn-ai there is no queue worker — chat is
+# request/response. The nightly recompute (scripts/nightly_sweep.py) can run as
+# a second Railway service sharing this image with:
+#   start command:  python -m scripts.nightly_sweep
+#   cron schedule:  15 3 * * *   (Railway → Settings → Cron Schedule)
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+
+# NO preDeployCommand, matching mhn-ai's convention: on the shared production
+# database, schema has ONE owner — mhn-spring's Flyway. Davi's tables ship as
+# db/flyway/V5__davi_ai_tables.sql adopted into Spring's migration folder; the
+# Alembic chain in this repo (version table davi_alembic_version) builds
+# local/test databases only.
+#
+# TESTING SHORTCUT: when pointing at a fresh Railway Postgres that Spring has
+# not migrated (standalone testing), set RUN_MIGRATIONS_ON_START=true on the
+# service — the container then runs `alembic upgrade head` once at boot to
+# create the Davi tables. Leave it unset/false against the shared database.
+#
+# ORDERING on a shared environment: Spring must migrate first (its Flyway
+# creates "user", vital_reading, …, plus V5's Davi tables); this service only
+# reads/writes what already exists.
+
+# Misconfiguration (bad DATABASE_URL, missing JWT secret) should surface as a
+# failed deploy, not an endless crash loop.
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+# Required environment (see docs/production_integration.md):
+#   DATABASE_URL          postgresql+asyncpg://…  (shared or test Postgres)
+#   ALEMBIC_DATABASE_URL  postgresql+psycopg2://… (only used when migrating)
+#   AUTH_ENABLED=true
+#   JWT_SECRET            same Base64 value mhn-spring uses (HS512, decoded)
+#   JWT_ALGORITHM=HS512
+#   JWT_SECRET_BASE64=true
+#   SERVICE_TOKEN         optional, ≥32 chars (server-to-server path)
+#   LLM_PROVIDER=anthropic  LLM_MODEL=claude-haiku-4-5-20251001  LLM_API_KEY=…
+#   GROUNDING_MODE=enforce
+#   EMBEDDING_BASE_URL / EMBEDDING_MODEL — leave empty on Railway unless a
+#   hosted embedding endpoint is available; retrieval falls back to keyword
+#   ranking automatically (fail-open by design).
