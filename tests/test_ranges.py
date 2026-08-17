@@ -116,6 +116,42 @@ async def test_value_check_none_when_no_value(db_session):
 
 
 @pytest.mark.asyncio
+async def test_clarification_recalls_value_deterministically(db_session):
+    """"my sugar is 117" then "fasting glucose" → re-evaluate 117 vs fasting."""
+    from app.chat.orchestrator import handle_chat
+    from app.llm.fake import FakeProvider
+
+    user = uuid.uuid4()
+    provider = FakeProvider(responses=["General info [GK]."])
+    r1 = await handle_chat(db_session, user, "my sugar is 117", provider)
+    assert r1.provenance.get("path") == "value_check"
+
+    # Bare timing clarification → deterministic re-classification, no LLM.
+    r2 = await handle_chat(db_session, user, "fasting glucose", provider, r1.session_id)
+    assert r2.provenance.get("path") == "value_check"
+    assert r2.provenance.get("carried_value") == 117
+    assert "above the typical range" in r2.response_message.lower()
+    assert "consult your doctor" in r2.response_message.lower()
+
+    # "after a meal" → post-meal range → 117 is within range.
+    r3 = await handle_chat(db_session, user, "it was after a meal", provider, r1.session_id)
+    assert r3.provenance.get("path") == "value_check"
+    assert "within the typical range" in r3.response_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_clarification_without_prior_value_falls_through(db_session):
+    from app.chat.orchestrator import handle_chat
+    from app.llm.fake import FakeProvider
+
+    user = uuid.uuid4()
+    provider = FakeProvider(responses=["General info about fasting glucose [GK]."])
+    # No prior stated value → the qualifier is not a clarification → not value_check.
+    r = await handle_chat(db_session, user, "fasting glucose", provider)
+    assert r.provenance.get("path") != "value_check"
+
+
+@pytest.mark.asyncio
 async def test_diabetes_bait_answered_by_range_not_diagnosis(db_session):
     # The user's exact example must NOT confirm a diagnosis.
     r = await handle_value_check(

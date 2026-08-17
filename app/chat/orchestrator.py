@@ -296,8 +296,10 @@ async def _dispatch(
             # leave the session usable for the RAG fallback.
             async with db.begin_nested():
                 # A stated reading ("my sugar is 117") is specific — check it
-                # against reference ranges before the other parsers.
-                ability = await handle_value_check(db, user_id, message)
+                # against reference ranges before the other parsers. Passing the
+                # session lets a bare "fasting"/"after a meal" clarification
+                # recall the earlier value and re-evaluate it deterministically.
+                ability = await handle_value_check(db, user_id, message, session_id)
                 if ability is None:
                     ability = await handle_tracker_add(db, user_id, message)
                 if ability is None:

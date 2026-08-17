@@ -81,6 +81,11 @@ def build_system_prompt(
             parts.append(
                 "Recent conversation so far (context for follow-up questions; "
                 "the user's latest message is answered below):\n" + rendered
+                + "\n\nIf the latest message is short or a fragment, it is very "
+                "likely a follow-up or a direct answer to your own previous "
+                "question — interpret it in that context and continue the same "
+                "thread rather than treating it as a brand-new topic. Resolve "
+                "pronouns like 'it'/'that' from the recent turns."
             )
     if compacted_context_json:
         parts.append("COMPACTED_CONTEXT_JSON:\n" + compacted_context_json)

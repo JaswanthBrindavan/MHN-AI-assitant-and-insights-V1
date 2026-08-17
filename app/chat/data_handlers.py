@@ -126,18 +126,100 @@ def _article(label: str) -> str:
     return "A"
 
 
-async def handle_value_check(
-    db: AsyncSession, user_id: uuid.UUID, message: str
-) -> dict | None:
-    """Deterministic reference-range check for a value the user states.
+# Bare timing clarifications the user gives after stating a glucose value.
+_FASTING_RE = re.compile(r"\bfasting\b", re.IGNORECASE)
+_POSTMEAL_RE = re.compile(
+    r"\b(?:after (?:a )?meal|post[- ]?meal|after (?:eating|food)|"
+    r"postprandial|\bpp\b|random)\b",
+    re.IGNORECASE,
+)
 
-    (``db``/``user_id`` are accepted for a uniform handler signature and future
-    recorded-value comparison; the stated-value path needs neither.)
+
+async def _recent_user_messages(
+    db: AsyncSession, session_id: uuid.UUID | None, limit: int = 8
+) -> list[str]:
+    if session_id is None:
+        return []
+    from app.models.chat import ConversationMessage
+    rows = (
+        await db.execute(
+            select(ConversationMessage.message)
+            .where(
+                ConversationMessage.session_id == session_id,
+                ConversationMessage.role == "user",
+            )
+            .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+def _reclassify_glucose(value: float, *, fasting: bool) -> dict:
+    """Re-classify a remembered glucose value once the reader clarifies timing."""
+    key = "fasting_glucose" if fasting else "random_glucose"
+    verdict = health_ranges.classify(key, value)
+    label = "fasting blood sugar" if fasting else "post-meal blood sugar"
+    reading = f"{_g(value)} mg/dL"
+    if verdict is not None and verdict.status == "in_range":
+        body = (
+            f"Thanks — for a {label} reading, {_g(value)} mg/dL is within the "
+            f"typical range ({verdict.range_text}). That's reassuring. Keep "
+            f"monitoring as your doctor advises."
+        )
+        action = "review_with_clinician"
+        status = "in_range"
+    else:
+        direction = (
+            "above" if verdict and verdict.status == "above" else "below"
+        )
+        rng = verdict.range_text if verdict else ""
+        body = (
+            f"Thanks for clarifying. For a {label} reading, {reading} is "
+            f"{direction} the typical range ({rng}). {_NOT_A_DIAGNOSIS_LINE} "
+            f"Please consult your doctor, who can confirm the reading and advise "
+            f"on next steps."
+        )
+        action = "discuss_with_clinician"
+        status = verdict.status if verdict else "above"
+    return {
+        "reply": body,
+        "action": action,
+        "provenance": {
+            "path": "value_check", "metric": key, "status": status,
+            "carried_value": value,
+        },
+    }
+
+
+async def handle_value_check(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    session_id: uuid.UUID | None = None,
+) -> dict | None:
+    """Deterministic reference-range check.
+
+    1. A value stated in THIS message → classify it directly.
+    2. A bare timing clarification ("fasting", "after a meal") that answers an
+       earlier "my sugar is 117" → recall that value and re-classify against the
+       fasting/post-meal range. This makes the follow-up deterministic rather
+       than relying on the model to notice the recent conversation.
     """
     stated = parse_stated_value(message)
-    if stated is None:
+    if stated is not None:
+        return _value_check_reply(stated)
+
+    # Clarification path: only for a SHORT reply carrying a timing qualifier.
+    fasting = bool(_FASTING_RE.search(message))
+    postmeal = bool(_POSTMEAL_RE.search(message))
+    if not (fasting or postmeal) or len(message.split()) > 5:
         return None
-    return _value_check_reply(stated)
+    for prior in await _recent_user_messages(db, session_id):
+        sv = parse_stated_value(prior)
+        if sv is not None and sv.metric == "blood_sugar":
+            return _reclassify_glucose(sv.value, fasting=fasting)
+    return None
 
 
 # --------------------------------------------------------------------------- #
