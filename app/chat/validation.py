@@ -63,17 +63,54 @@ _COND_RE = "|".join(re.escape(c) for c in _CONDITION_LEXICON)
 
 # "you have/are/... <up to a few words> <condition>" — diagnostic assertion.
 # Requires a condition token nearby so benign "you have questions" is not flagged.
-# Conditional/educational phrasings ("if you have X, do Y", "when you have",
-# "people like you have") are not diagnostic assertions — exclude them with
-# fixed-width lookbehinds.
-_DIAG_PREFIX = (
-    r"(?<![Ii]f )(?<![Ww]hen )(?<!ther )(?<![Oo]nce )"
-    r"\byou(?:'ve got| are| are suffering from|'re suffering from"
-    r"|(?: most| almost)?"
-    r"(?: surely| certainly| clearly| obviously| probably| likely| definitely"
-    r"| may| might)? have)\b[^.?!]{0,40}?\b"
+#
+# Two families of phrasing are educational rather than diagnostic and are
+# excluded with fixed-width lookbehinds:
+#   * conditional framings — "if/when/whether/once you have X", and verbs that
+#     make the clause hypothetical: "(if you) think/suspect/expect/believe you
+#     (might) have X", "…that you have X"
+#   * benign head nouns directly before the condition — "a higher risk of X",
+#     "a family history of X", "the chance of X" (central phrasings for a
+#     family-history product, never assertions about the user's own status)
+_CONDITIONAL_GUARDS = (
+    r"(?<![Ii]f )(?<![Ww]hen )(?<!ther )(?<![Oo]nce )(?<![Tt]hat )"
+    r"(?<!ink )(?<!pect )(?<!ieve )"
 )
-_DIAGNOSTIC_RE = re.compile(_DIAG_PREFIX + "(" + _COND_RE + r")\b", re.IGNORECASE)
+_BENIGN_HEAD_GUARDS = (
+    r"(?<!risk of )(?<!risks of )(?<!risk for )(?<!chance of )(?<!chances of )"
+    r"(?<!history of )(?<!likelihood of )(?<!odds of )"
+)
+
+
+def _diagnostic_pattern(condition_alternation: str) -> str:
+    """Full diagnostic-assertion pattern over a condition alternation.
+
+    Two branches: "you … have <condition>" tolerates a gap ("you have severe
+    type 2 diabetes"), while "you are <condition>" is kept tight — a free gap
+    turned risk statements ("you are at higher risk of diabetes") into
+    false positives.
+    """
+    cond = _BENIGN_HEAD_GUARDS + "(?:" + condition_alternation + r")\b"
+    have_branch = (
+        _CONDITIONAL_GUARDS
+        + r"\byou(?:'ve got| are suffering from|'re suffering from"
+        + r"|(?: most| almost)?"
+        + r"(?: surely| certainly| clearly| obviously| probably| likely| definitely"
+        + r"| may| might)? have)\b[^.?!]{0,40}?\b"
+        + cond
+    )
+    are_branch = (
+        _CONDITIONAL_GUARDS
+        + r"\byou(?: are|'re)(?: most| very| quite)?"
+        + r"(?: surely| certainly| clearly| obviously| probably| likely"
+        + r"| definitely| now)?"
+        + r"(?: having| experiencing| developing)?(?: a| an| the)? "
+        + cond
+    )
+    return "(?:" + have_branch + "|" + are_branch + ")"
+
+
+_DIAGNOSTIC_RE = re.compile(_diagnostic_pattern(_COND_RE), re.IGNORECASE)
 
 # Cache of dynamic diagnostic regexes built from registry condition names.
 _dynamic_cache: dict[int, re.Pattern[str]] = {}
@@ -101,7 +138,7 @@ def _dynamic_diagnostic_re(extra_conditions: tuple[str, ...]) -> re.Pattern[str]
     if cached is not None:
         return cached
     alternation = "|".join(re.escape(n) for n in names)
-    pattern = re.compile(_DIAG_PREFIX + "(" + alternation + r")\b", re.IGNORECASE)
+    pattern = re.compile(_diagnostic_pattern(alternation), re.IGNORECASE)
     _dynamic_cache[key] = pattern
     return pattern
 

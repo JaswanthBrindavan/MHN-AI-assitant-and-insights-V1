@@ -50,6 +50,49 @@ def test_every_emergency_phrase_fires_in_sentence(phrase):
     assert result.level == EMERGENCY
 
 
+# --------------------------------------------------------------------------- #
+# Natural-language red flags surfaced by the 10K stress sweep — pin the exact
+# sentences so these gaps never silently reopen.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "he collapsed and won't wake up",
+        "he is unresponsive",
+        "worst headache of my life",
+        "turning blue and limp",  # cyanosis → at least HIGH
+    ],
+)
+def test_stress_found_emergency_or_high(sentence):
+    assert triage(sentence).level in (HIGH, EMERGENCY)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "sudden severe abdominal pain",
+        "high fever with a stiff neck",
+        "coughing up a lot of blood",
+    ],
+)
+def test_stress_found_high(sentence):
+    assert triage(sentence).level in (HIGH, EMERGENCY)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "I want to end it all",
+        "मैं अपने आप को नुकसान पहुँचाना चाहता हूँ",
+        "I feel better off dead",
+    ],
+)
+def test_stress_found_self_harm(sentence):
+    result = triage(sentence)
+    assert result.self_harm
+    assert result.level == EMERGENCY
+
+
 @pytest.mark.parametrize("phrase", HIGH_PHRASES)
 def test_every_high_phrase_fires_at_high(phrase):
     # Exactly HIGH: no bare HIGH phrase may silently escalate (e.g. via the
@@ -292,6 +335,74 @@ def test_benign_you_have_phrasing_not_blocked(reply):
     result = validate_reply(reply, NONE)
     assert result.ok
     assert result.reason == ""
+
+
+# --------------------------------------------------------------------------- #
+# Validation: educational framings must NOT be flagged (false-positive guard)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # Conditional/hypothetical verbs before "you have" — a live Haiku reply
+        # to "what is hypothyroidism?" was blocked over exactly this shape.
+        "If you suspect you have diabetes, see a doctor for testing.",
+        "If you think you have asthma, a doctor can confirm it.",
+        "Doctors can check whether you have anemia with a simple test.",
+        "Your doctor may test to see if you believe you have arthritis symptoms.",
+        # Benign head nouns directly before the condition.
+        "You have a family history of diabetes, which is worth discussing.",
+        "You have a higher risk of hypertension as you age.",
+        "You may have an increased chance of heart disease.",
+        # Risk statements with "you are" — educational, not diagnostic.
+        "You are at higher risk of diabetes given family history.",
+        "You are more likely to develop hypertension than average.",
+    ],
+)
+def test_educational_framings_not_blocked(reply):
+    result = validate_reply(reply, NONE)
+    assert result.ok, f"false positive: {result.reason} on {reply!r}"
+
+
+def test_conditional_framing_with_dynamic_registry_names_not_blocked():
+    # The exact sentence Haiku produced for "what is hypothyroidism?" that the
+    # validator wrongly replaced with the safe reply.
+    reply = (
+        "If you think you might have symptoms of hypothyroidism, "
+        "a doctor can order simple blood tests to check your thyroid function."
+    )
+    result = validate_reply(reply, NONE, ("hypothyroidism", "hyperthyroidism"))
+    assert result.ok, f"false positive: {result.reason}"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        # Bare and hedged assertions stay blocked, static and dynamic alike.
+        "You might have symptoms of hypothyroidism.",
+        "You probably have hypothyroidism.",
+        "You are developing hypothyroidism.",
+    ],
+)
+def test_dynamic_diagnostic_assertions_still_blocked(reply):
+    # "You probably have X" trips the substring list before the diagnostic
+    # regex — either way the reply must be blocked.
+    result = validate_reply(reply, NONE, ("hypothyroidism",))
+    assert not result.ok
+    assert result.reason.startswith("banned:")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "You are having a heart attack.",
+        "You are developing diabetes.",
+        "You are now diabetic.",
+    ],
+)
+def test_tight_are_branch_still_blocks_assertions(reply):
+    result = validate_reply(reply, NONE)
+    assert not result.ok
+    assert result.reason == "banned:diagnostic-assertion"
 
 
 # --------------------------------------------------------------------------- #

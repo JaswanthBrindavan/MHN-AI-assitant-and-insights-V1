@@ -140,3 +140,19 @@ async def test_receipt_written_with_hash_only(db_session, set_grounding_mode):
     assert r.grounding_status == "violations" or r.grounding_status == "grounded"
     # The raw message text must not be stored anywhere on the receipt.
     assert DIABETES_Q not in (r.query_hash + (r.model_name or ""))
+
+
+# --------------------------------------------------------------------------- #
+# Robustness: control characters must not crash the persistence layer.
+# A NUL byte (0x00) is illegal in PostgreSQL text — an unsanitized message
+# raised asyncpg CharacterNotInRepertoireError and 500'd the request (found
+# by scripts.stress_10k).
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_control_characters_do_not_crash(db_session):
+    await _ingest(db_session)
+    provider = FakeProvider(responses=[CLEAN])
+    result = await handle_chat(
+        db_session, USER, "\x00\x01\x02what is diabetes?\x00", provider
+    )
+    assert result.response_message.strip()

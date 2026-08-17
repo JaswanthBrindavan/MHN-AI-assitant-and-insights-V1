@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 
@@ -610,6 +611,17 @@ async def _build_citations(
     return citations or None
 
 
+# C0/C1 control characters carry no linguistic meaning and NUL (0x00) is
+# illegal in PostgreSQL text — an unsanitized NUL in a message raises
+# asyncpg CharacterNotInRepertoireError when the turn is persisted, 500-ing
+# the request. Strip all control chars except tab/newline/carriage-return.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def _sanitize_message(message: str) -> str:
+    return _CONTROL_CHARS.sub("", message)
+
+
 async def handle_chat(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -621,6 +633,7 @@ async def handle_chat(
 
     Compaction fires after the assistant message and never raises.
     """
+    message = _sanitize_message(message)
     session_id = await ensure_session(db, user_id, session_id)
     await add_message(
         db, session_id, "user", message,

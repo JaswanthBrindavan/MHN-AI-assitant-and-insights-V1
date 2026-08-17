@@ -50,6 +50,26 @@ EMERGENCY_PHRASES: tuple[str, ...] = (
     "one sided weakness",
     "weakness on one side",
     "weak on one side",
+    # Collapse / unresponsiveness (DRAFT).
+    "unresponsive",
+    "won't wake up",
+    "wont wake up",
+    "will not wake up",
+    "not waking up",
+    "cannot wake",
+    "can't wake",
+    "collapsed and won't wake",
+    "collapsed and unresponsive",
+    # Thunderclap headache — SAH/stroke red flag (DRAFT).
+    "worst headache of my life",
+    "worst headache ever",
+    "thunderclap headache",
+    # Cyanosis WITH collapse/floppiness — peri-arrest (DRAFT). Bare "turning
+    # blue" stays HIGH; paired with limpness it is an emergency.
+    "blue and limp",
+    "limp and blue",
+    "turning blue and limp",
+    "going blue and limp",
     # --- Hindi / Hinglish (DRAFT — pending clinician + native-speaker review)
     "behosh",            # unconscious
     "बेहोश",
@@ -82,6 +102,25 @@ HIGH_PHRASES: tuple[str, ...] = (
     "blood in stool",
     "blood in my stool",
     "coughing up blood",
+    "coughing up a lot of blood",
+    "coughing blood",
+    "cough up blood",
+    "coughing up phlegm with blood",
+    # Cyanosis beyond the lips (DRAFT).
+    "turning blue",
+    "going blue",
+    "skin turning blue",
+    # Acute abdomen (DRAFT).
+    "severe abdominal pain",
+    "severe stomach pain",
+    "severe belly pain",
+    "sudden severe abdominal pain",
+    # Meningitis co-occurrence baked into the phrase (DRAFT).
+    "fever with a stiff neck",
+    "fever and stiff neck",
+    "stiff neck and fever",
+    "stiff neck with fever",
+    "neck stiffness and fever",
     # --- Hindi / Hinglish (DRAFT — pending clinician + native-speaker review)
     "seene mein tez dard",   # severe chest pain
     "seene me tez dard",
@@ -137,6 +176,13 @@ SELF_HARM_PHRASES: tuple[str, ...] = (
     "dont want to live",
     "don't want to live",
     "no reason to live",
+    "end it all",
+    "end my own life",
+    "take my own life",
+    "taking my own life",
+    "better off dead",
+    "don't want to be here anymore",
+    "dont want to be here anymore",
     # Hindi / Hinglish (DRAFT)
     "khudkushi",
     "atmahatya",
@@ -146,6 +192,12 @@ SELF_HARM_PHRASES: tuple[str, ...] = (
     "मरना चाहती",
     "jeena nahi chahta",
     "jeena nahi chahti",
+    "khud ko nuksan",              # harm myself
+    "apne aap ko nuksan",
+    "अपने आप को नुकसान",
+    "खुद को नुकसान",
+    "नुकसान पहुँचाना चाहता",
+    "नुकसान पहुंचाना चाहता",
 )
 
 # The fixed directive that leads every EMERGENCY response.
