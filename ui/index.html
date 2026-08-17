@@ -123,6 +123,12 @@
   .empty { color: var(--muted); font-size: 13px; }
   .note { font-size: 11px; color: var(--muted); margin-top: 8px; }
   .spinner { color: var(--muted); font-size: 12px; padding: 4px 0; }
+  /* typewriter caret while the reply is being typed out */
+  .bubble.typing > *:last-child::after {
+    content: "▋"; margin-left: 2px; color: var(--muted);
+    animation: caret-blink .8s step-end infinite;
+  }
+  @keyframes caret-blink { 50% { opacity: 0; } }
   /* thinking chain */
   details.thinking {
     max-width: 100%; margin: 0 0 6px; font-size: 12px;
@@ -284,24 +290,47 @@ function esc(t) {
   return t.replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
 }
 function mdLite(text) {
-  // escape first, then apply minimal formatting: **bold** headers + bullets.
+  // escape first, then apply minimal formatting: headings (# / **x**),
+  // bullets (• - *), and inline **bold**.
+  const bold = s => s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
   const lines = esc(text).split("\n");
   let html = "", inList = false;
   for (const line of lines) {
     const t = line.trim();
-    if (t.startsWith("• ")) {
+    if (/^[•\-\*] /.test(t)) {
       if (!inList) { html += "<ul>"; inList = true; }
-      html += "<li>" + t.slice(2) + "</li>";
+      html += "<li>" + bold(t.slice(2)) + "</li>";
       continue;
     }
     if (inList) { html += "</ul>"; inList = false; }
     if (!t) continue;
+    const h = t.match(/^#{1,4} +(.*)$/);
+    if (h) { html += "<h4>" + bold(h[1]) + "</h4>"; continue; }
     const m = t.match(/^\*\*(.+)\*\*$/);
     if (m) { html += "<h4>" + m[1] + "</h4>"; continue; }
-    html += "<p>" + t.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>") + "</p>";
+    html += "<p>" + bold(t) + "</p>";
   }
   if (inList) html += "</ul>";
   return html;
+}
+
+// Type the (already safety-validated) reply out word by word. Pacing adapts
+// to length so long answers never take more than ~3s to finish.
+function typeInto(bubble, text, onDone) {
+  const tokens = text.split(/(\s+)/);  // words with their whitespace kept
+  const perTick = Math.max(1, Math.ceil(tokens.length / 110));
+  let i = 0;
+  bubble.classList.add("typing");
+  const timer = setInterval(() => {
+    i = Math.min(tokens.length, i + perTick);
+    bubble.innerHTML = mdLite(tokens.slice(0, i).join(""));
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (i >= tokens.length) {
+      clearInterval(timer);
+      bubble.classList.remove("typing");
+      if (onDone) onDone();
+    }
+  }, 28);
 }
 
 function addBotMsg(data) {
@@ -320,9 +349,21 @@ function addBotMsg(data) {
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.innerHTML = mdLite(data.response_message);
   d.appendChild(bubble);
 
+  const finish = () => addBotMsgExtras(d, data);
+  // Urgent replies must be readable at once — no animation on the safety path.
+  const urgent = data.risk_level === "emergency" || data.risk_level === "high";
+  if (urgent || data.response_message.length < 60) {
+    bubble.innerHTML = mdLite(data.response_message);
+    finish();
+  } else {
+    messagesEl.appendChild(d);
+    typeInto(bubble, data.response_message, finish);
+  }
+}
+
+function addBotMsgExtras(d, data) {
   if (data.visual && data.visual.svg) {
     const v = document.createElement("div");
     v.className = "visual"; v.innerHTML = data.visual.svg;
@@ -367,7 +408,19 @@ async function sendMessage() {
   input.value = "";
   addUserMsg(text);
   const spin = document.createElement("div");
-  spin.className = "spinner msg"; spin.textContent = "Davi is thinking…";
+  spin.className = "spinner msg";
+  // Mirror the real pipeline order so the wait reads as progress, not a hang.
+  const STAGES = [
+    "Checking safety", "Understanding your question",
+    "Searching clinical profiles", "Asking the model",
+    "Verifying claims & citations", "Almost there",
+  ];
+  let stageIdx = 0;
+  spin.textContent = STAGES[0] + "…";
+  const stageTimer = setInterval(() => {
+    stageIdx = Math.min(stageIdx + 1, STAGES.length - 1);
+    spin.textContent = STAGES[stageIdx] + "…";
+  }, 1100);
   messagesEl.appendChild(spin);
   document.getElementById("send").disabled = true;
   try {
@@ -384,6 +437,7 @@ async function sendMessage() {
   } catch (e) {
     spin.remove(); banner("⚠ Network error: " + e.message);
   } finally {
+    clearInterval(stageTimer);
     document.getElementById("send").disabled = false;
     input.focus();
   }
