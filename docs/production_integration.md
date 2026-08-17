@@ -155,10 +155,14 @@ To run on Railway EXACTLY like the local setup (Anthropic Haiku answers +
 hybrid BM25⊕vector retrieval), deploy TWO services from this repo:
 
 **1. `davi-embeddings` — Ollama with the model baked in**
-- New Railway service from this repo; Settings → Build → **Dockerfile Path =
-  `Dockerfile.ollama`** (model `qwen3-embedding:0.6b` is pulled at build time —
-  instant cold starts, no volume).
-- **No public domain** (private-only). No env needed.
+- New Railway service → Deploy from GitHub repo → select THIS repo (yes, the
+  same repo twice — one repo, two services, like mhn-ai's api+worker).
+- Settings → **Config-as-code → path = `railway.embeddings.toml`** — this is
+  required, not optional: config-as-code overrides dashboard settings, so
+  without it the service inherits the repo-root `railway.toml` (the API's
+  Dockerfile and a `/health` healthcheck Ollama doesn't serve).
+- **No public domain** (private-only). No env needed (model + settings are
+  baked into the image at build time).
 - Davi reaches it at `http://davi-embeddings.railway.internal:11434/v1`
   (swap in the actual service name).
 

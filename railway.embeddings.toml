@@ -1,0 +1,23 @@
+# Railway config for the EMBEDDINGS service (davi-embeddings).
+#
+# Same repo, second service: on the embeddings service set
+#   Settings → Config-as-code → path = railway.embeddings.toml
+# Without this, the service inherits the repo-root railway.toml — which pins
+# the API's Dockerfile and a /health healthcheck Ollama doesn't serve, and
+# config-as-code OVERRIDES dashboard settings (the same shared-config trap
+# mhn-ai documents in its own railway.toml).
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.ollama"
+
+[deploy]
+# Ollama answers 200 "Ollama is running" on GET / — that's its healthcheck.
+healthcheckPath = "/"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+# No variables needed: OLLAMA_HOST / OLLAMA_KEEP_ALIVE are baked into the
+# image, the model is baked at build time, and the service must have NO public
+# domain (private networking only:
+# http://<service-name>.railway.internal:11434/v1).
