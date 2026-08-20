@@ -34,6 +34,7 @@ from app.chat.abilities import (
 )
 from app.coredata.service import (
     _RESOURCE_TYPE,
+    DOCUMENT_KINDS,
     add_lifestyle_log,
     latest_body_measurement,
     latest_documents,
@@ -897,6 +898,14 @@ async def handle_ai_result_query(
     from app.documents.service import fetch_ai_result
     from app.models.coredata import UnclassifiedFile
 
+    # Resolve "this report" to a pipeline document id. Two places to look:
+    #   1. a still-unclassified upload (processing not finished — the row is
+    #      deleted when mhn-ai files the document);
+    #   2. otherwise the newest FILED document, whose content.ai envelope
+    #      carries the ORIGINAL document_id the ai-result endpoint is
+    #      addressed by (verified: mhn-ai assembly.py writes it).
+    document_id: int | None = None
+    name = "your document"
     row = (
         await db.execute(
             select(UnclassifiedFile)
@@ -908,7 +917,37 @@ async def handle_ai_result_query(
             .limit(1)
         )
     ).scalars().first()
-    if row is None:
+    if row is not None:
+        document_id = row.id
+        name = row.name or row.filepath.rsplit("/", 1)[-1]
+    else:
+        newest_at = None
+        for kind in DOCUMENT_KINDS:
+            model, _label = DOCUMENT_KINDS[kind]
+            doc = (
+                await db.execute(
+                    select(model)
+                    .where(model.user_id == user_id)  # type: ignore[attr-defined]
+                    .order_by(
+                        model.created_at.desc().nulls_last(),  # type: ignore[attr-defined]
+                        model.id.desc(),  # type: ignore[attr-defined]
+                    )
+                    .limit(1)
+                )
+            ).scalars().first()
+            if doc is None:
+                continue
+            ai = (getattr(doc, "content", None) or {}).get("ai") or {}
+            doc_id = ai.get("document_id")
+            if not isinstance(doc_id, int):
+                continue
+            at = getattr(doc, "created_at", None)
+            if newest_at is None or (at is not None and at > newest_at):
+                newest_at = at
+                document_id = doc_id
+                title = (ai.get("classification") or {}).get("title")
+                name = str(title) if title else doc.filepath.rsplit("/", 1)[-1]
+    if document_id is None:
         return {
             "reply": (
                 "I couldn't find an uploaded document to analyze yet. Attach "
@@ -918,9 +957,8 @@ async def handle_ai_result_query(
             "action": "none",
             "provenance": {"path": "ai_result", "found": 0},
         }
-    name = row.name or row.filepath.rsplit("/", 1)[-1]
 
-    fetch = await fetch_ai_result(row.id)
+    fetch = await fetch_ai_result(document_id)
     if not fetch.ok:
         return {
             "reply": (
@@ -929,7 +967,7 @@ async def handle_ai_result_query(
                 "shortly."
             ),
             "action": "none",
-            "provenance": {"path": "ai_result", "document_id": row.id,
+            "provenance": {"path": "ai_result", "document_id": document_id,
                            "error": fetch.reason},
         }
     if fetch.result is None or fetch.status != "completed":
@@ -947,7 +985,7 @@ async def handle_ai_result_query(
         return {
             "reply": reply,
             "action": "none",
-            "provenance": {"path": "ai_result", "document_id": row.id,
+            "provenance": {"path": "ai_result", "document_id": document_id,
                            "status": state},
         }
 
@@ -1038,7 +1076,7 @@ async def handle_ai_result_query(
         "action": action,
         "provenance": {
             "path": "ai_result",
-            "document_id": row.id,
+            "document_id": document_id,
             "document_type": fetch.document_type,
             "source": "mhn_ai",
         },

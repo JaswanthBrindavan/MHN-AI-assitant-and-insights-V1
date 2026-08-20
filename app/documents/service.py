@@ -155,18 +155,19 @@ async def submit_document(
 
 
 def build_upload_reply(filename: str, triggered: bool) -> str:
-    """Deterministic, validator-safe confirmation for the chat transcript."""
-    if triggered:
-        return (
-            f"Got your file '{filename}' — it has been sent for automatic "
-            "classification. The extracted details will appear in your "
-            "records shortly, and you can ask me about it anytime — for "
-            "example \"find my latest report\"."
-        )
+    """Deterministic, validator-safe confirmation for the chat transcript.
+
+    The wording never alarms on a failed trigger: Spring submits every
+    confirmed upload to the pipeline itself (AiSubmissionListener), so Davi's
+    own submission is a redundant belt-and-braces call — its failure does not
+    mean processing isn't running. The reason still lands in job_runs and the
+    response's trigger_reason for diagnostics.
+    """
+    del triggered  # copy is deliberately identical either way — see docstring
     return (
-        f"Your file '{filename}' is uploaded, but automatic classification "
-        "could not be started right now. It stays safely in your records "
-        "and can be processed later."
+        f"Got your file '{filename}' — it's queued for automatic "
+        "processing. The extracted details will appear in your records "
+        "shortly; ask me for insights on it once it's done."
     )
 
 
