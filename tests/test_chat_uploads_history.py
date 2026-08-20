@@ -404,3 +404,65 @@ def test_parse_document_query_plural_kinds(message, kind):
 
     q = parse_document_query(message)
     assert q is not None and kind in q.kinds
+
+
+# --------------------------------------------------------------------------- #
+# Restored conversations keep their document cards (meta round-trip) and the
+# document parser tolerates spelling mistakes
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_history_meta_carries_document_cards(client, sessionmaker):
+    from app.models.common import utcnow as _now
+    from app.models.coredata import Report
+
+    async with sessionmaker() as db:
+        db.add(Report(
+            user_id=USER, filepath="reports/abc123uuid.pdf",
+            content={"ai": {"classification": {"title": "CBC Report"}}},
+            private=False, created_at=_now(),
+        ))
+        await db.commit()
+
+    r = await client.post(
+        "/api/v1/chat", headers=HDR, json={"message": "pull my latest lab reports"}
+    )
+    body = r.json()
+    assert body["provenance"]["path"] == "document_query"
+    sid = body["session_id"]
+
+    hist = await client.get(f"/api/v1/chat/sessions/{sid}/messages", headers=HDR)
+    msgs = hist.json()
+    assistant = [m for m in msgs if m["role"] == "assistant"][-1]
+    assert assistant["meta"] is not None
+    docs = assistant["meta"]["documents"]
+    assert docs and docs[0]["title"] == "CBC Report"
+    assert docs[0]["slug"] == "abc123uuid.pdf"
+    assert assistant["meta"]["action"] == "open_documents"
+    # User turns never expose their (triage-internal) intent metadata.
+    user_turn = [m for m in msgs if m["role"] == "user"][-1]
+    assert user_turn["meta"] is None
+
+
+@pytest.mark.parametrize(
+    ("message", "kind"),
+    [
+        ("pull my latest lab reprots", "report"),
+        ("show my prescriptons", "prescription"),
+        ("find my vacination record", "vaccination"),
+        ("show me my latest blod report", "report"),
+        ("my recent secans please", "scan"),
+    ],
+)
+def test_parse_document_query_fuzzy_spelling(message, kind):
+    from app.chat.abilities import parse_document_query_fuzzy
+
+    q = parse_document_query_fuzzy(message)
+    assert q is not None and kind in q.kinds
+
+
+def test_parse_document_query_fuzzy_does_not_invent():
+    from app.chat.abilities import parse_document_query_fuzzy
+
+    # Ordinary sentences with no document intent stay unparsed.
+    assert parse_document_query_fuzzy("I love mountain resorts") is None
+    assert parse_document_query_fuzzy("what helps blood pressure?") is None

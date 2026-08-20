@@ -650,7 +650,9 @@ async def test_extracted_intent_risk_recorded_on_user_message(db_session):
         ).scalars().all()
         assert len(rows) == 1
         assert rows[0].extracted_intent == {"risk": expected_risk}
-        # Assistant reply never carries an extracted intent.
+        # Assistant turns persist their structured extras (action, and
+        # document cards when present) so restored conversations keep them —
+        # never the user's triage internals.
         assistant = (
             await db_session.execute(
                 select(ConversationMessage).where(
@@ -660,4 +662,6 @@ async def test_extracted_intent_risk_recorded_on_user_message(db_session):
             )
         ).scalars().all()
         assert len(assistant) == 1
-        assert assistant[0].extracted_intent is None
+        meta = assistant[0].extracted_intent
+        assert meta is not None and "risk" not in meta
+        assert meta.get("action")

@@ -23,7 +23,7 @@ from app.chat.abilities import (
     SummaryQuery,
     TrackerAdd,
     parse_doctor_consult_query,
-    parse_document_query,
+    parse_document_query_fuzzy,
     parse_family_list_query,
     parse_metric_query,
     parse_stated_value,
@@ -301,7 +301,7 @@ async def _try_backend(
 async def handle_document_query(
     db: AsyncSession, user_id: uuid.UUID, message: str
 ) -> dict | None:
-    query: DocumentQuery | None = parse_document_query(message)
+    query: DocumentQuery | None = parse_document_query_fuzzy(message)
     if query is None:
         return None
 

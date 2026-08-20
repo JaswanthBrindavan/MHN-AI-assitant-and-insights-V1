@@ -156,3 +156,7 @@ class ChatMessageInfo(BaseModel):
     role: str
     message: str
     created_at: datetime | None = None
+    # Structured extras persisted with the message (assistant turns:
+    # {documents, action}) so restored conversations keep their document
+    # cards and action line.
+    meta: dict | None = None

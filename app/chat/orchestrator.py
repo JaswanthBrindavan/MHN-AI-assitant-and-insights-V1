@@ -776,7 +776,21 @@ async def handle_chat(
         extracted_intent={"risk": triage(message).level},
     )
     result = await _dispatch(db, user_id, message, provider, session_id)
-    await add_message(db, session_id, "assistant", result.response_message)
+    # Persist the reply's structured extras alongside the text so a restored
+    # conversation keeps its document cards (and action line) after a reload —
+    # the extracted_intent JSON column already exists for exactly this kind of
+    # per-message metadata.
+    assistant_meta: dict | None = None
+    if result.documents or result.recommended_action:
+        assistant_meta = {}
+        if result.documents:
+            assistant_meta["documents"] = result.documents
+        if result.recommended_action:
+            assistant_meta["action"] = result.recommended_action
+    await add_message(
+        db, session_id, "assistant", result.response_message,
+        extracted_intent=assistant_meta,
+    )
     await maybe_compact(db, session_id)
     result.session_id = session_id
     return result

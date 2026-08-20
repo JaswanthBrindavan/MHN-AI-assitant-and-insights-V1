@@ -533,3 +533,59 @@ def parse_family_list_query(message: str) -> bool:
 
 def parse_doctor_consult_query(message: str) -> bool:
     return bool(_DOCTOR_CONSULT_RE.search(message))
+
+
+# --------------------------------------------------------------------------- #
+# Fuzzy fallback for document queries ("pull my latest lab reprots")
+# --------------------------------------------------------------------------- #
+# Deterministic stdlib spelling tolerance: when the STRICT parse fails, each
+# unknown word (>=4 chars) is corrected to the closest document-vocabulary
+# word at a conservative similarity cutoff, and the parse is retried once.
+# Correction only ever targets this closed vocabulary, so everyday words
+# cannot be pulled into new meanings elsewhere in the pipeline.
+_DOC_VOCAB: tuple[str, ...] = (
+    "report", "reports", "blood", "lab", "test", "tests", "scan", "scans",
+    "xray", "xrays", "x-ray", "x-rays", "mri", "ultrasound", "imaging",
+    "prescription", "prescriptions", "vaccination", "vaccinations",
+    "vaccine", "vaccines", "immunization", "immunisation", "checkup",
+    "checkups", "latest", "last", "recent", "find", "show", "fetch", "pull",
+)
+_DOC_VOCAB_SET = frozenset(_DOC_VOCAB)
+
+
+def _fuzzy_correct_doc_words(message: str) -> str | None:
+    """The message with near-miss words snapped to the document vocabulary.
+
+    None when nothing changed. Words already in the vocabulary, short words,
+    and words with no close-enough match are left untouched.
+    """
+    import difflib
+
+    changed = False
+    out: list[str] = []
+    for token in re.split(r"(\W+)", message):
+        low = token.lower()
+        if (
+            token.isalpha()
+            and len(token) >= 4
+            and low not in _DOC_VOCAB_SET
+        ):
+            close = difflib.get_close_matches(low, _DOC_VOCAB, n=1, cutoff=0.8)
+            if close and close[0] != low:
+                out.append(close[0])
+                changed = True
+                continue
+        out.append(token)
+    return "".join(out) if changed else None
+
+
+def parse_document_query_fuzzy(message: str) -> DocumentQuery | None:
+    """Strict parse first; on failure, one retry over the spelling-corrected
+    message. Deterministic (difflib), stdlib-only."""
+    query = parse_document_query(message)
+    if query is not None:
+        return query
+    corrected = _fuzzy_correct_doc_words(message)
+    if corrected is None:
+        return None
+    return parse_document_query(corrected)

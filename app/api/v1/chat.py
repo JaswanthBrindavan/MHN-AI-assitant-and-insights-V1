@@ -214,7 +214,11 @@ async def list_messages(
     ).scalars().all()
     return [
         ChatMessageInfo(
-            id=m.id, role=m.role, message=m.message, created_at=m.created_at
+            id=m.id, role=m.role, message=m.message, created_at=m.created_at,
+            # User turns keep their intent private (it holds triage internals);
+            # assistant extras are exactly what the client needs to rebuild
+            # cards on restore.
+            meta=m.extracted_intent if m.role == "assistant" else None,
         )
         for m in messages
     ]
