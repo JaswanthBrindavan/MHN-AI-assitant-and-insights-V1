@@ -135,6 +135,8 @@ class UploadedDocumentInfo(BaseModel):
     # From mhn-ai's CreateRunResponse, when accepted.
     run_id: str | None = None
     item_status: str | None = None
+    # Why the submission was NOT accepted (diagnosable without server logs).
+    trigger_reason: str | None = None
 
 
 class ChatUploadResponse(BaseModel):

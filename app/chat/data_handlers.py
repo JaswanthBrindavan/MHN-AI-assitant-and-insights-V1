@@ -22,6 +22,7 @@ from app.chat.abilities import (
     StatedValue,
     SummaryQuery,
     TrackerAdd,
+    parse_ai_result_query,
     parse_doctor_consult_query,
     parse_document_query_fuzzy,
     parse_family_list_query,
@@ -878,4 +879,167 @@ async def handle_doctor_consult_query(
         "reply": lead + extra,
         "action": "none",
         "provenance": {"path": "doctor_consults", "found": len(consults)},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Document AI results — pulled from mhn-ai, never generated here
+# --------------------------------------------------------------------------- #
+async def handle_ai_result_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """"Get insights for this report" → mhn-ai's ai-result for the user's
+    most recent upload. Insights for reports; section extraction for other
+    document types. Davi renders what the pipeline produced — it never
+    invents analysis of a document it cannot see."""
+    if not parse_ai_result_query(message):
+        return None
+    from app.documents.service import fetch_ai_result
+    from app.models.coredata import UnclassifiedFile
+
+    row = (
+        await db.execute(
+            select(UnclassifiedFile)
+            .where(
+                (UnclassifiedFile.user_id == user_id)
+                | (UnclassifiedFile.created_by == user_id)
+            )
+            .order_by(UnclassifiedFile.id.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    if row is None:
+        return {
+            "reply": (
+                "I couldn't find an uploaded document to analyze yet. Attach "
+                "a file here in chat (or upload one in your Health Wallet) "
+                "and I can pull its processed results once it's ready."
+            ),
+            "action": "none",
+            "provenance": {"path": "ai_result", "found": 0},
+        }
+    name = row.name or row.filepath.rsplit("/", 1)[-1]
+
+    fetch = await fetch_ai_result(row.id)
+    if not fetch.ok:
+        return {
+            "reply": (
+                f"I couldn't reach the document-processing service for "
+                f"'{name}' just now. The document is safe — please try again "
+                "shortly."
+            ),
+            "action": "none",
+            "provenance": {"path": "ai_result", "document_id": row.id,
+                           "error": fetch.reason},
+        }
+    if fetch.result is None or fetch.status != "completed":
+        state = fetch.status or "queued"
+        if state == "failed":
+            reply = (
+                f"Automatic processing of '{name}' didn't complete. It can "
+                "be retried from the document's page in your Health Wallet."
+            )
+        else:
+            reply = (
+                f"'{name}' is still being processed (status: {state}). Ask "
+                "me again in a little while and I'll pull the results."
+            )
+        return {
+            "reply": reply,
+            "action": "none",
+            "provenance": {"path": "ai_result", "document_id": row.id,
+                           "status": state},
+        }
+
+    result = fetch.result
+    title = name
+    classification = result.get("classification") or {}
+    if classification.get("title"):
+        title = str(classification["title"])
+
+    lines: list[str] = []
+    action = "review_with_clinician"
+    insights = (result.get("insights") or {})
+    extraction = (result.get("extraction") or {})
+    section_extraction = (result.get("section_extraction") or {})
+
+    if insights.get("insights") or insights.get("summary"):
+        if insights.get("summary"):
+            lines.append(str(insights["summary"]))
+        for item in (insights.get("insights") or [])[:4]:
+            heading = item.get("heading") or "Finding"
+            lines.append(f"\n**{heading}**")
+            if item.get("explanation"):
+                lines.append(str(item["explanation"]))
+            if item.get("suggestion_heading") and item.get("suggestions"):
+                lines.append(
+                    f"_{item['suggestion_heading']}:_ {item['suggestions']}"
+                )
+        disclaimer = insights.get("disclaimer")
+        lines.append(
+            str(disclaimer)
+            if disclaimer
+            else (
+                "These insights are informational only, not a diagnosis — "
+                "please review them with your doctor."
+            )
+        )
+        action = "discuss_with_clinician"
+    elif extraction.get("results"):
+        results = extraction["results"]
+        lines.append(f"Here's what was read from \"{title}\":")
+        abnormal = 0
+        for r in results[:8]:
+            flag = (r.get("abnormal_flag") or "").strip()
+            if flag:
+                abnormal += 1
+            flag_note = f" — {flag}" if flag else ""
+            unit = f" {r.get('unit')}" if r.get("unit") else ""
+            lines.append(
+                f"• {r.get('test_name', 'value')}: {r.get('value', '?')}"
+                f"{unit}{flag_note}"
+            )
+        if len(results) > 8:
+            lines.append(f"…and {len(results) - 8} more values.")
+        if abnormal:
+            lines.append(
+                f"{abnormal} value{'s are' if abnormal != 1 else ' is'} "
+                "flagged outside the printed reference range — worth "
+                "discussing with your doctor."
+            )
+            action = "discuss_with_clinician"
+        else:
+            lines.append(
+                "The extracted values sit within their printed reference "
+                "ranges. Your doctor can confirm what they mean for you."
+            )
+    elif section_extraction.get("fields"):
+        lines.append(f"Here's what was read from \"{title}\":")
+        for key, value in list(section_extraction["fields"].items())[:8]:
+            if value in (None, "", []):
+                continue
+            pretty = str(key).replace("_", " ")
+            lines.append(f"• {pretty}: {value}")
+        flags = section_extraction.get("flags") or []
+        if flags:
+            lines.append(
+                "Note: " + ", ".join(str(f).replace("_", " ") for f in flags[:3])
+                + "."
+            )
+    else:
+        lines.append(
+            f"'{title}' finished processing, but no extractable details came "
+            "back for it. You can view the document itself in your Health "
+            "Wallet."
+        )
+
+    return {
+        "reply": "\n".join(lines),
+        "action": action,
+        "provenance": {
+            "path": "ai_result",
+            "document_id": row.id,
+            "document_type": fetch.document_type,
+            "source": "mhn_ai",
+        },
     }

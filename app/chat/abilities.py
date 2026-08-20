@@ -589,3 +589,26 @@ def parse_document_query_fuzzy(message: str) -> DocumentQuery | None:
     if corrected is None:
         return None
     return parse_document_query(corrected)
+
+
+# --------------------------------------------------------------------------- #
+# Document AI-result requests ("get insights for this report")
+# --------------------------------------------------------------------------- #
+# Answered from mhn-ai's ai-result endpoint (insights for reports, section
+# extraction for other document types) — never by the chat LLM guessing.
+_AI_RESULT_RE = re.compile(
+    r"\b(?:get|pull|show|give(?:\s+me)?|fetch)?\s*insights?\s+"
+    r"(?:for|from|on|of|about)\s+(?:this|that|my|the)\b"
+    r"[^.?!]{0,30}?\b(?:reports?|results?|scans?|files?|documents?|uploads?|pdf)?\b"
+    r"|\b(?:analy[sz]e|interpret)\s+(?:this|that|my|the)\s+"
+    r"(?:latest\s+|last\s+|recent\s+|uploaded\s+)?(?:lab\s+)?"
+    r"(?:reports?|results?|scans?|files?|documents?|uploads?|pdf)\b"
+    r"|\bextractions?\s+(?:for|from|of)\s+(?:this|that|my|the)\b"
+    r"|\bwhat\s+(?:do|does)\s+(?:this|that|my|the)\s+"
+    r"(?:latest\s+|recent\s+)?(?:reports?|results?|scans?)\s+(?:say|show|mean)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_ai_result_query(message: str) -> bool:
+    return bool(_AI_RESULT_RE.search(message))

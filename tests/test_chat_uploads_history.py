@@ -466,3 +466,160 @@ def test_parse_document_query_fuzzy_does_not_invent():
     # Ordinary sentences with no document intent stay unparsed.
     assert parse_document_query_fuzzy("I love mountain resorts") is None
     assert parse_document_query_fuzzy("what helps blood pressure?") is None
+
+
+# --------------------------------------------------------------------------- #
+# "Get insights for this report" — served from mhn-ai's ai-result endpoint
+# --------------------------------------------------------------------------- #
+from app.chat.data_handlers import handle_ai_result_query  # noqa: E402
+from app.documents.service import AiResultFetch, fetch_ai_result  # noqa: E402
+
+
+async def test_fetch_ai_result_two_call_contract(monkeypatch):
+    monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
+    monkeypatch.setenv("MHN_AI_TOKEN", "x" * 32)
+    get_settings.cache_clear()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        assert request.headers["authorization"] == "Bearer " + "x" * 32
+        if request.url.path == "/v1/documents/7/status":
+            return httpx.Response(200, json={
+                "document_id": 7, "status": "completed",
+                "document_type": "reports", "section_row_id": 12,
+            })
+        return httpx.Response(200, json={
+            "document_id": 7, "status": "completed",
+            "classification": {"title": "CBC Report"},
+            "insights": {"summary": "All good.", "insights": []},
+        })
+
+    async with _mock_client(handler) as client:
+        fetch = await fetch_ai_result(7, client=client)
+    assert calls == ["/v1/documents/7/status",
+                     "/v1/documents/reports/7/ai-result"]
+    assert fetch.ok and fetch.document_type == "reports"
+    assert fetch.result is not None
+    assert fetch.result["insights"]["summary"] == "All good."
+
+
+async def test_fetch_ai_result_unclassified_yet(monkeypatch):
+    monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
+    get_settings.cache_clear()
+
+    async with _mock_client(lambda r: httpx.Response(200, json={
+        "document_id": 7, "status": "classifying", "document_type": None,
+    })) as client:
+        fetch = await fetch_ai_result(7, client=client)
+    assert fetch.ok and fetch.result is None and fetch.status == "classifying"
+
+
+async def test_fetch_ai_result_not_configured():
+    assert (await fetch_ai_result(7)).reason == "not_configured"
+
+
+async def _seed_upload(db, name="LR_report.pdf"):
+    row = _row(name=name)
+    db.add(row)
+    await db.flush()
+    return row
+
+
+@pytest.mark.asyncio
+async def test_ai_result_handler_no_upload(db_session):
+    out = await handle_ai_result_query(
+        db_session, USER, "get insights for this report"
+    )
+    assert out is not None
+    assert "couldn't find an uploaded document" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_ai_result_handler_unreachable(db_session, monkeypatch):
+    await _seed_upload(db_session)
+
+    async def _down(document_id, client=None):
+        return AiResultFetch(ok=False, reason="ConnectError: down")
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _down)
+    out = await handle_ai_result_query(
+        db_session, USER, "get insights for this report"
+    )
+    assert out is not None
+    assert "couldn't reach the document-processing service" in out["reply"]
+    assert out["provenance"]["error"] == "ConnectError: down"
+
+
+@pytest.mark.asyncio
+async def test_ai_result_handler_still_processing(db_session, monkeypatch):
+    await _seed_upload(db_session)
+
+    async def _pending(document_id, client=None):
+        return AiResultFetch(ok=True, status="classifying")
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _pending)
+    out = await handle_ai_result_query(db_session, USER, "analyze this report")
+    assert out is not None
+    assert "still being processed" in out["reply"]
+    assert "classifying" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_ai_result_handler_renders_insights(db_session, monkeypatch):
+    await _seed_upload(db_session)
+
+    async def _done(document_id, client=None):
+        return AiResultFetch(ok=True, status="completed",
+            document_type="reports", result={
+                "classification": {"title": "Lipid Profile"},
+                "insights": {
+                    "summary": "Cholesterol values are borderline.",
+                    "insights": [{
+                        "heading": "LDL slightly elevated",
+                        "explanation": "LDL carries cholesterol to tissues.",
+                        "risk_patterns": "Above the printed limit.",
+                        "suggestion_heading": "Diet adjustments",
+                        "suggestions": "More fibre, fewer fried foods.",
+                        "related_tests": ["LDL"],
+                    }],
+                    "disclaimer": "Informational only, not medical advice.",
+                },
+            })
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _done)
+    out = await handle_ai_result_query(
+        db_session, USER, "get insights for this report"
+    )
+    assert out is not None
+    assert out["provenance"]["path"] == "ai_result"
+    assert out["provenance"]["source"] == "mhn_ai"
+    assert "Cholesterol values are borderline." in out["reply"]
+    assert "LDL slightly elevated" in out["reply"]
+    assert "Diet adjustments" in out["reply"]
+    assert "Informational only" in out["reply"]
+    assert out["action"] == "discuss_with_clinician"
+
+
+@pytest.mark.asyncio
+async def test_ai_result_handler_renders_section_extraction(
+    db_session, monkeypatch
+):
+    await _seed_upload(db_session, name="vaccine_card.pdf")
+
+    async def _done(document_id, client=None):
+        return AiResultFetch(ok=True, status="completed",
+            document_type="vaccinations", result={
+                "classification": {"title": "Vaccination Card"},
+                "section_extraction": {
+                    "section": "vaccinations",
+                    "fields": {"vaccine_name": "Tetanus", "dose_number": 2},
+                    "flags": ["dates_out_of_order"],
+                },
+            })
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _done)
+    out = await handle_ai_result_query(db_session, USER, "analyze my document")
+    assert out is not None
+    assert "vaccine name: Tetanus" in out["reply"]
+    assert "dates out of order" in out["reply"]

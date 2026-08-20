@@ -30,6 +30,7 @@ from app.chat.conversation import (
     maybe_compact,
 )
 from app.chat.data_handlers import (
+    handle_ai_result_query,
     handle_doctor_consult_query,
     handle_document_query,
     handle_family_list_query,
@@ -297,6 +298,11 @@ async def _dispatch(
                 ability = await handle_value_check(db, user_id, message, session_id)
                 if ability is None:
                     ability = await handle_tracker_add(db, user_id, message)
+                if ability is None:
+                    # AI-result requests outrank the document LISTING — "get
+                    # insights for this report" must fetch the pipeline's
+                    # result, not list files.
+                    ability = await handle_ai_result_query(db, user_id, message)
                 if ability is None:
                     ability = await handle_document_query(db, user_id, message)
                 if ability is None:

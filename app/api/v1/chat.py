@@ -119,6 +119,7 @@ async def chat_upload(
             triggered=result.accepted,
             run_id=result.run_id,
             item_status=result.item_status,
+            trigger_reason=result.reason,
         ),
     )
 
