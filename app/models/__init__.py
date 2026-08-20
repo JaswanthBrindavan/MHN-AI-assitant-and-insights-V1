@@ -37,6 +37,7 @@ from app.models.coredata import (
     Report,
     ScanImaging,
     TraditionalHealthParameter,
+    UnclassifiedFile,
     Vaccination,
     VitalReading,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "ConditionRegistry",
     "DrugReference",
     "Report",
+    "UnclassifiedFile",
     "ScanImaging",
     "Prescription",
     "Vaccination",

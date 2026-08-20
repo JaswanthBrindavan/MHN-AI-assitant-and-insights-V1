@@ -37,6 +37,32 @@ JWT_SECRET_BASE64=true
 SERVICE_TOKEN=<random ≥32 chars>
 ```
 
+## Triggering mhn-ai from chat uploads (verified: mhn-ai `app/api/v1/runs.py`)
+
+Davi's `POST /api/v1/chat/upload` submits documents to mhn-ai's processing
+API. The contract, verified against the mhn-ai repo:
+
+- **Endpoint**: `POST {MHN_AI_BASE_URL}/v1/document-processing-runs` → `202`
+  `{run_id, created_at, items: [{document_id, item_id, status ("queued" |
+  "failed"), outcome, error_code}]}`. Callers poll
+  `GET /v1/document-processing-runs/{run_id}`.
+- **Auth**: `Authorization: Bearer <token>` where the token is mhn-ai's
+  `MHN_SERVICE_TOKEN` (HTTPBearer + `secrets.compare_digest`; mhn-ai does no
+  user-level authorization — `requested_by_user_id` is audit-only).
+- **Payload**: `{"documents": [{"document_id": <unclassified_files id>,
+  "intended_section": null}], "requested_by_user_id": "<uuid>"}` — the unit
+  is an `unclassified_files` row; `intended_section` stays null for a global
+  (chat) upload.
+- **Bytes**: the worker downloads `unclassified_files.filepath` from
+  Spring's S3 bucket. Davi holds no AWS credentials, so in production the
+  file must reach S3 via Spring's upload flow first — the chat endpoint's
+  `document_id` mode covers that (Spring/BFF creates the row, Davi submits
+  the run). The multipart `file` mode stores bytes under `UPLOAD_DIR` and is
+  for the dev console/chassis.
+
+Davi env: `MHN_AI_BASE_URL` (keep it on the private network),
+`MHN_AI_TOKEN` (same value as mhn-ai's `MHN_SERVICE_TOKEN`).
+
 ## Schema ownership (verified: `railway.toml`, `V4__ai_tables.sql`)
 
 Flyway in `mhn-spring` owns **all** production schema — since 2026-08-06 even

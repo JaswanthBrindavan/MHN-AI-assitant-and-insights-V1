@@ -118,13 +118,15 @@ class ChatResponse(BaseModel):
 
 
 class UploadedDocumentInfo(BaseModel):
-    resource_type: str
+    resource_type: str  # "unclassified_files" — the unit mhn-ai runs process
     doc_id: int
-    # "pending" until mhn-ai's pipeline writes its content.ai envelope
-    # (classified | complete | failed).
+    # "pending" until mhn-ai's pipeline classifies, files, and extracts.
     state: str
-    # Whether mhn-ai accepted the processing request at upload time.
+    # Whether mhn-ai accepted the processing-run submission (202).
     triggered: bool
+    # From mhn-ai's CreateRunResponse, when accepted.
+    run_id: str | None = None
+    item_status: str | None = None
 
 
 class ChatUploadResponse(BaseModel):

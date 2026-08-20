@@ -23,7 +23,14 @@ from app.chat.conversation import add_message, ensure_session, maybe_compact
 from app.chat.orchestrator import handle_chat
 from app.config import get_settings
 from app.db import get_db
-from app.documents.service import build_upload_reply, store_and_trigger
+from app.documents.service import (
+    UPLOAD_RESOURCE_TYPE,
+    StoredUpload,
+    build_upload_reply,
+    get_own_unclassified,
+    store_and_trigger,
+    trigger_mhn_ai,
+)
 from app.llm import get_provider
 from app.llm.base import LLMProvider
 from app.models.chat import ConversationMessage, ConversationSession
@@ -91,21 +98,26 @@ def _save_upload_bytes(filename: str, data: bytes) -> str:
 
 @router.post("/chat/upload", response_model=ChatUploadResponse)
 async def chat_upload(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     message: str = Form(""),
     session_id: str = Form(""),
+    document_id: int | None = Form(None),
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> ChatUploadResponse:
-    """Upload a file in chat: store it, trigger mhn-ai's auto-classifier
-    (classify → file → extract runs THERE), and record the exchange in the
-    conversation history."""
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty file")
-    if len(data) > get_settings().max_upload_bytes:
-        raise HTTPException(status_code=413, detail="File too large")
-    filename = (file.filename or "upload").rsplit("/", 1)[-1][:200]
+    """Store a file shared in chat and trigger mhn-ai's auto-classifier
+    (classify → file → extract runs THERE), recording the exchange in the
+    conversation history.
+
+    Two modes: multipart ``file`` (chassis/dev — Davi stores the bytes and
+    the ``unclassified_files`` row itself), or ``document_id`` of an existing
+    ``unclassified_files`` row (production — the file already reached S3 via
+    Spring's upload flow; Davi only submits the processing run).
+    """
+    if (file is None) == (document_id is None):
+        raise HTTPException(
+            status_code=400, detail="Provide exactly one of file, document_id"
+        )
 
     parsed_session: uuid.UUID | None = None
     if session_id:
@@ -116,8 +128,31 @@ async def chat_upload(
                 status_code=400, detail="Invalid session_id"
             ) from exc
 
-    filepath = _save_upload_bytes(filename, data)
-    stored = await store_and_trigger(db, current_user, data, filepath)
+    if file is not None:
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Empty file")
+        if len(data) > get_settings().max_upload_bytes:
+            raise HTTPException(status_code=413, detail="File too large")
+        filename = (file.filename or "upload").rsplit("/", 1)[-1][:200]
+        filepath = _save_upload_bytes(filename, data)
+        stored = await store_and_trigger(
+            db, current_user, data, filepath, name=filename
+        )
+    else:
+        assert document_id is not None
+        row = await get_own_unclassified(db, current_user, document_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        filename = row.name or row.filepath.rsplit("/", 1)[-1]
+        result = await trigger_mhn_ai(row.id, current_user)
+        stored = StoredUpload(
+            resource_type=UPLOAD_RESOURCE_TYPE,
+            doc_id=row.id,
+            triggered=result.accepted,
+            run_id=result.run_id,
+            item_status=result.item_status,
+        )
     reply = build_upload_reply(filename, stored.triggered)
 
     # The upload is a conversation turn: both sides land in history so
@@ -139,6 +174,8 @@ async def chat_upload(
             doc_id=stored.doc_id,
             state="pending",
             triggered=stored.triggered,
+            run_id=stored.run_id,
+            item_status=stored.item_status,
         ),
     )
 

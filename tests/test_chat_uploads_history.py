@@ -1,14 +1,17 @@
 """Chat file uploads (store → trigger mhn-ai) and chat-history endpoints.
 
 Covers app/documents/service.py and the /chat/upload, /chat/sessions,
-/chat/sessions/{id}/messages endpoints: pending-state storage, the mhn-ai
-bearer-token trigger (accepted / rejected / unreachable / disabled), job_runs
-bookkeeping, conversation persistence of upload turns, history retrieval,
-and object-level authorization.
+/chat/sessions/{id}/messages endpoints against the VERIFIED mhn-ai contract
+(POST /v1/document-processing-runs, bearer MHN_SERVICE_TOKEN, the submitted
+unit being an ``unclassified_files`` id): storage, run submission
+(accepted / rejected / unreachable / disabled), job_runs bookkeeping,
+conversation persistence of upload turns, history retrieval, and
+object-level authorization.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import httpx
@@ -19,17 +22,37 @@ from app.chat.validation import validate_reply
 from app.config import get_settings
 from app.documents.service import (
     build_upload_reply,
+    get_own_unclassified,
     store_and_trigger,
     store_document,
     trigger_mhn_ai,
 )
-from app.models.coredata import Report
+from app.models.coredata import UnclassifiedFile
 from app.models.jobs import JobRun
 
 USER = uuid.UUID("11111111-1111-1111-1111-111111111111")
 OTHER = uuid.UUID("99999999-9999-9999-9999-999999999999")
 HDR = {"X-User-Id": str(USER)}
 OTHER_HDR = {"X-User-Id": str(OTHER)}
+
+RUN_ID = "3d1a2c66-1f7e-4b58-9a54-0d6a4be2b111"
+ITEM_ID = "5e8b9d10-2c3f-4a67-8b12-9c0d1e2f3a45"
+
+
+def _accepted_body(document_id: int) -> dict:
+    return {
+        "run_id": RUN_ID,
+        "created_at": "2026-08-20T12:00:00Z",
+        "items": [
+            {
+                "document_id": document_id,
+                "item_id": ITEM_ID,
+                "status": "queued",
+                "outcome": "created",
+                "error_code": None,
+            }
+        ],
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -45,28 +68,37 @@ def _mock_client(handler) -> httpx.AsyncClient:
 
 
 # --------------------------------------------------------------------------- #
-# store_document — pending row
+# store_document — unclassified_files row
 # --------------------------------------------------------------------------- #
-async def test_store_document_pending_envelope(db_session):
-    row = await store_document(db_session, USER, "var/uploads/abc.pdf")
+async def test_store_document_row(db_session):
+    row = await store_document(
+        db_session, USER, "var/uploads/abc.pdf", name="cbc_report.pdf"
+    )
     assert row.id is not None
     assert row.user_id == USER
+    assert row.created_by == USER
     assert row.filepath == "var/uploads/abc.pdf"
-    assert row.content is not None
-    assert row.content["ai"]["state"] == "pending"
-    assert row.content["ai"]["source"] == "davi_chat_upload"
+    assert row.name == "cbc_report.pdf"
     assert row.private is False
 
 
+async def test_get_own_unclassified_scoping(db_session):
+    row = await store_document(db_session, USER, "k.pdf", name="k.pdf")
+    assert await get_own_unclassified(db_session, USER, row.id) is not None
+    assert await get_own_unclassified(db_session, OTHER, row.id) is None
+    assert await get_own_unclassified(db_session, USER, 999999) is None
+
+
 # --------------------------------------------------------------------------- #
-# trigger_mhn_ai
+# trigger_mhn_ai — the verified run-submission contract
 # --------------------------------------------------------------------------- #
 async def test_trigger_disabled_without_base_url():
     assert get_settings().mhn_ai_base_url == ""
-    assert await trigger_mhn_ai("reports", 1, USER, "k.pdf") is False
+    result = await trigger_mhn_ai(1, USER)
+    assert result.accepted is False
 
 
-async def test_trigger_posts_payload_and_bearer_token(monkeypatch):
+async def test_trigger_submits_run_with_contract_payload(monkeypatch):
     monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
     monkeypatch.setenv("MHN_AI_TOKEN", "x" * 32)
     get_settings.cache_clear()
@@ -75,31 +107,34 @@ async def test_trigger_posts_payload_and_bearer_token(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
         seen["auth"] = request.headers.get("authorization")
-        seen["json"] = request.read()
-        return httpx.Response(202)
+        seen["request_id"] = request.headers.get("x-request-id")
+        seen["json"] = json.loads(request.read())
+        return httpx.Response(202, json=_accepted_body(42))
 
     async with _mock_client(handler) as client:
-        ok = await trigger_mhn_ai(
-            "reports", 42, USER, "var/uploads/k.pdf", client=client
-        )
-    assert ok is True
-    assert seen["url"] == "http://mhn-ai.internal:8000/process"
+        result = await trigger_mhn_ai(42, USER, client=client)
+
+    assert result.accepted is True
+    assert result.run_id == RUN_ID
+    assert result.item_status == "queued"
+    assert seen["url"] == (
+        "http://mhn-ai.internal:8000/v1/document-processing-runs"
+    )
     assert seen["auth"] == "Bearer " + "x" * 32
-    body = seen["json"].decode()
-    assert '"document_id": 42' in body or '"document_id":42' in body
-    assert str(USER) in body
-    assert "reports" in body
+    assert seen["request_id"]
+    assert seen["json"] == {
+        "documents": [{"document_id": 42, "intended_section": None}],
+        "requested_by_user_id": str(USER),
+    }
 
 
-async def test_trigger_rejected_status_returns_false(monkeypatch):
+async def test_trigger_rejected_status_not_accepted(monkeypatch):
     monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
     get_settings.cache_clear()
 
-    async with _mock_client(lambda r: httpx.Response(503)) as client:
-        assert (
-            await trigger_mhn_ai("reports", 1, USER, "k.pdf", client=client)
-            is False
-        )
+    async with _mock_client(lambda r: httpx.Response(401)) as client:
+        result = await trigger_mhn_ai(1, USER, client=client)
+    assert result.accepted is False
 
 
 async def test_trigger_connection_error_never_raises(monkeypatch):
@@ -110,10 +145,20 @@ async def test_trigger_connection_error_never_raises(monkeypatch):
         raise httpx.ConnectError("down", request=request)
 
     async with _mock_client(boom) as client:
-        assert (
-            await trigger_mhn_ai("reports", 1, USER, "k.pdf", client=client)
-            is False
-        )
+        result = await trigger_mhn_ai(1, USER, client=client)
+    assert result.accepted is False
+
+
+async def test_trigger_unparseable_202_still_accepted(monkeypatch):
+    monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
+    get_settings.cache_clear()
+
+    async with _mock_client(
+        lambda r: httpx.Response(202, content=b"not json")
+    ) as client:
+        result = await trigger_mhn_ai(1, USER, client=client)
+    assert result.accepted is True
+    assert result.run_id is None
 
 
 # --------------------------------------------------------------------------- #
@@ -123,15 +168,18 @@ async def test_store_and_trigger_success_job(db_session, monkeypatch):
     monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
     get_settings.cache_clear()
 
-    async with _mock_client(lambda r: httpx.Response(200)) as client:
+    async with _mock_client(
+        lambda r: httpx.Response(202, json=_accepted_body(1))
+    ) as client:
         stored = await store_and_trigger(
-            db_session, USER, b"bytes", "var/uploads/k.pdf", client=client
+            db_session, USER, b"bytes", "var/uploads/k.pdf",
+            name="k.pdf", client=client,
         )
     assert stored.triggered is True
-    assert stored.resource_type == "reports"
-    job = (
-        await db_session.execute(select(JobRun))
-    ).scalars().one()
+    assert stored.resource_type == "unclassified_files"
+    assert stored.run_id == RUN_ID
+    assert stored.item_status == "queued"
+    job = (await db_session.execute(select(JobRun))).scalars().one()
     assert job.name == "chat_upload_trigger"
     assert job.trigger == "chat"
     assert job.status == "success"
@@ -140,15 +188,14 @@ async def test_store_and_trigger_success_job(db_session, monkeypatch):
 
 async def test_store_and_trigger_untriggered_job(db_session):
     stored = await store_and_trigger(
-        db_session, USER, b"bytes", "var/uploads/k.pdf"
+        db_session, USER, b"bytes", "var/uploads/k.pdf", name="k.pdf"
     )
     assert stored.triggered is False
     job = (await db_session.execute(select(JobRun))).scalars().one()
     assert job.status == "stored_not_triggered"
     # The document is stored regardless.
-    doc = (await db_session.execute(select(Report))).scalars().one()
-    assert doc.content is not None
-    assert doc.content["ai"]["state"] == "pending"
+    doc = (await db_session.execute(select(UnclassifiedFile))).scalars().one()
+    assert doc.user_id == USER
 
 
 # --------------------------------------------------------------------------- #
@@ -178,7 +225,7 @@ async def test_upload_endpoint_stores_and_replies(client):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["document"]["resource_type"] == "reports"
+    assert body["document"]["resource_type"] == "unclassified_files"
     assert body["document"]["state"] == "pending"
     assert body["document"]["triggered"] is False  # no mhn-ai URL in tests
     assert "Stored your file 'cbc_report.pdf'" in body["response_message"]
@@ -220,6 +267,53 @@ async def test_upload_endpoint_threads_existing_session(client):
     hist = await client.get(f"/api/v1/chat/sessions/{sid}/messages", headers=HDR)
     roles = [m["role"] for m in hist.json()]
     assert roles == ["user", "assistant", "user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_upload_endpoint_document_id_mode(client, sessionmaker):
+    async with sessionmaker() as db:
+        row = await store_document(db, USER, "s3/key/abc.pdf", name="abc.pdf")
+        await db.commit()
+        doc_id = row.id
+    resp = await client.post(
+        "/api/v1/chat/upload",
+        headers=HDR,
+        data={"document_id": str(doc_id), "message": "process this"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["document"]["doc_id"] == doc_id
+    assert body["document"]["triggered"] is False  # no mhn-ai URL in tests
+    assert "abc.pdf" in body["response_message"]
+
+
+@pytest.mark.asyncio
+async def test_upload_endpoint_document_id_of_other_user_404(
+    client, sessionmaker
+):
+    async with sessionmaker() as db:
+        row = await store_document(db, OTHER, "s3/key/x.pdf", name="x.pdf")
+        await db.commit()
+        doc_id = row.id
+    resp = await client.post(
+        "/api/v1/chat/upload", headers=HDR, data={"document_id": str(doc_id)}
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_upload_endpoint_requires_exactly_one_mode(client):
+    neither = await client.post(
+        "/api/v1/chat/upload", headers=HDR, data={"message": "hi"}
+    )
+    assert neither.status_code == 400
+    both = await client.post(
+        "/api/v1/chat/upload",
+        headers=HDR,
+        files=_file(),
+        data={"document_id": "1"},
+    )
+    assert both.status_code == 400
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ def _pg_enum(name: str, *values: str):
 # Table names owned by the core app that this module maps (merged into
 # EXTERNAL_TABLES in app.models.core).
 COREDATA_TABLES = {
+    "unclassified_files",
     "reports",
     "scans_imaging",
     "prescriptions",
@@ -50,6 +51,29 @@ COREDATA_TABLES = {
     "traditional_health_parameters",
     "thp_age_range",
 }
+
+
+class UnclassifiedFile(Base):
+    """A document as uploaded, before mhn-ai classifies and files it.
+
+    This is the unit mhn-ai's document-processing runs operate on: Spring (or
+    Davi's chat upload) inserts a row here, and the pipeline classifies it,
+    files it into its section table, and extracts values. ``filepath`` is the
+    S3 key the worker downloads (Davi's dev/chassis uploads store a local
+    stand-in path).
+    """
+
+    __tablename__ = "unclassified_files"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    filepath: Mapped[str] = mapped_column(sa.String(500), nullable=False)
+    private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(sa.Uuid, nullable=True)
+    name: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
 
 
 class Report(Base):

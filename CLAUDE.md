@@ -96,9 +96,10 @@ app/
   chat/data_handlers.py deterministic ability handlers (run in SAVEPOINTs)
   charts/svg.py        deterministic SVG line/bar charts (visual payload)
   i18n/                language detection + localized safety replies (DRAFT)
-  documents/service.py chat uploads: store pending reports row + trigger the
-                       mhn-ai pipeline API (bearer AI_TOKEN pattern, fail-open;
-                       MHN_AI_BASE_URL/MHN_AI_TOKEN env; job_runs bookkeeping)
+  documents/service.py chat uploads: insert unclassified_files row + submit an
+                       mhn-ai document-processing run (verified contract:
+                       POST /v1/document-processing-runs, bearer
+                       MHN_SERVICE_TOKEN; fail-open; job_runs bookkeeping)
   api/v1/              health, pedigree, insights, chat (+ /chat/upload,
                        /chat/sessions history endpoints), schemas
 evals/scenarios.json   safety-invariant scenarios (scripts/run_evals.py + pytest)
