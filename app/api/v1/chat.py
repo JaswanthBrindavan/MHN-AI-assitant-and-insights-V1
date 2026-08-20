@@ -1,12 +1,11 @@
-"""Chat endpoints — orchestrated chat, file uploads, and history retrieval."""
+"""Chat endpoints — orchestrated chat, upload triggering, and history."""
 
 from __future__ import annotations
 
 import logging
 import uuid
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,21 +14,19 @@ from app.api.v1.schemas import (
     ChatRequest,
     ChatResponse,
     ChatSessionInfo,
+    ChatUploadRequest,
     ChatUploadResponse,
     UploadedDocumentInfo,
 )
 from app.auth import authorize_user, get_current_user_id
 from app.chat.conversation import add_message, ensure_session, maybe_compact
 from app.chat.orchestrator import handle_chat
-from app.config import get_settings
 from app.db import get_db
 from app.documents.service import (
     UPLOAD_RESOURCE_TYPE,
-    StoredUpload,
     build_upload_reply,
     get_own_unclassified,
-    store_and_trigger,
-    trigger_mhn_ai,
+    submit_document,
 )
 from app.llm import get_provider
 from app.llm.base import LLMProvider
@@ -78,89 +75,35 @@ async def chat(
     )
 
 
-def _save_upload_bytes(filename: str, data: bytes) -> str:
-    """Persist upload bytes under upload_dir; the returned path is the opaque
-    storage key (the chassis/dev stand-in for an S3 key). Falls back to the
-    bare filename when the disk write fails — filing must still succeed."""
-    try:
-        upload_dir = Path(get_settings().upload_dir)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        suffix = Path(filename).suffix[:16]
-        key = f"{uuid.uuid4().hex}{suffix}"
-        path = upload_dir / key
-        path.write_bytes(data)
-        return str(path)
-    except Exception:  # noqa: BLE001 — storage is best-effort in the chassis
-        logger.warning("upload byte storage failed; filing metadata only",
-                       exc_info=True)
-        return filename
-
-
 @router.post("/chat/upload", response_model=ChatUploadResponse)
 async def chat_upload(
-    file: UploadFile | None = File(None),
-    message: str = Form(""),
-    session_id: str = Form(""),
-    document_id: int | None = Form(None),
+    payload: ChatUploadRequest,
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> ChatUploadResponse:
-    """Store a file shared in chat and trigger mhn-ai's auto-classifier
-    (classify → file → extract runs THERE), recording the exchange in the
-    conversation history.
+    """A document was shared in chat: trigger mhn-ai's auto-classifier for it
+    and record the exchange in the conversation history.
 
-    Two modes: multipart ``file`` (chassis/dev — Davi stores the bytes and
-    the ``unclassified_files`` row itself), or ``document_id`` of an existing
-    ``unclassified_files`` row (production — the file already reached S3 via
-    Spring's upload flow; Davi only submits the processing run).
+    Davi does NOTHING with the document itself. The file reaches S3 and the
+    ``unclassified_files`` row through Spring's existing upload flow — exactly
+    like every other upload in the product — and this endpoint then submits
+    the processing run to mhn-ai the same way Spring does. Davi only reads
+    the row to check it belongs to the caller.
     """
-    if (file is None) == (document_id is None):
-        raise HTTPException(
-            status_code=400, detail="Provide exactly one of file, document_id"
-        )
+    row = await get_own_unclassified(db, current_user, payload.document_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    filename = row.name or row.filepath.rsplit("/", 1)[-1]
 
-    parsed_session: uuid.UUID | None = None
-    if session_id:
-        try:
-            parsed_session = uuid.UUID(session_id)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail="Invalid session_id"
-            ) from exc
-
-    if file is not None:
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="Empty file")
-        if len(data) > get_settings().max_upload_bytes:
-            raise HTTPException(status_code=413, detail="File too large")
-        filename = (file.filename or "upload").rsplit("/", 1)[-1][:200]
-        filepath = _save_upload_bytes(filename, data)
-        stored = await store_and_trigger(
-            db, current_user, data, filepath, name=filename
-        )
-    else:
-        assert document_id is not None
-        row = await get_own_unclassified(db, current_user, document_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="Document not found")
-        filename = row.name or row.filepath.rsplit("/", 1)[-1]
-        result = await trigger_mhn_ai(row.id, current_user)
-        stored = StoredUpload(
-            resource_type=UPLOAD_RESOURCE_TYPE,
-            doc_id=row.id,
-            triggered=result.accepted,
-            run_id=result.run_id,
-            item_status=result.item_status,
-        )
-    reply = build_upload_reply(filename, stored.triggered)
+    result = await submit_document(db, current_user, row.id)
+    reply = build_upload_reply(filename, result.accepted)
 
     # The upload is a conversation turn: both sides land in history so
     # follow-ups ("what was in that report?") have context.
-    sid = await ensure_session(db, current_user, parsed_session)
+    sid = await ensure_session(db, current_user, payload.session_id)
     user_text = f"[uploaded file: {filename}]"
-    if message.strip():
-        user_text += f" {message.strip()}"
+    if payload.message.strip():
+        user_text += f" {payload.message.strip()}"
     await add_message(db, sid, "user", user_text[:4000])
     await add_message(db, sid, "assistant", reply)
     await maybe_compact(db, sid)
@@ -170,12 +113,12 @@ async def chat_upload(
         response_message=reply,
         session_id=sid,
         document=UploadedDocumentInfo(
-            resource_type=stored.resource_type,
-            doc_id=stored.doc_id,
+            resource_type=UPLOAD_RESOURCE_TYPE,
+            doc_id=row.id,
             state="pending",
-            triggered=stored.triggered,
-            run_id=stored.run_id,
-            item_status=stored.item_status,
+            triggered=result.accepted,
+            run_id=result.run_id,
+            item_status=result.item_status,
         ),
     )
 

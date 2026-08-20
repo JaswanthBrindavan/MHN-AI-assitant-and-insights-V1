@@ -54,11 +54,12 @@ API. The contract, verified against the mhn-ai repo:
   is an `unclassified_files` row; `intended_section` stays null for a global
   (chat) upload.
 - **Bytes**: the worker downloads `unclassified_files.filepath` from
-  Spring's S3 bucket. Davi holds no AWS credentials, so in production the
-  file must reach S3 via Spring's upload flow first — the chat endpoint's
-  `document_id` mode covers that (Spring/BFF creates the row, Davi submits
-  the run). The multipart `file` mode stores bytes under `UPLOAD_DIR` and is
-  for the dev console/chassis.
+  Spring's S3 bucket. Davi does NOTHING with documents itself — no bytes, no
+  rows: a chat upload goes through Spring's existing upload flow (S3 + the
+  `unclassified_files` row) exactly like every other upload, and Davi's
+  `POST /api/v1/chat/upload` then takes the resulting `document_id`, checks
+  the row belongs to the caller (READ only), and submits the run — the same
+  call Spring makes.
 
 Davi env: `MHN_AI_BASE_URL` (keep it on the private network),
 `MHN_AI_TOKEN` (same value as mhn-ai's `MHN_SERVICE_TOKEN`).

@@ -54,16 +54,12 @@ class Settings(BaseSettings):
     pipeline_version: int = 1
     app_env: str = "dev"
 
-    # Chat file uploads. Bytes are saved under upload_dir (opaque names,
-    # mirroring an S3 key); in production the real file store is Spring's S3 —
-    # this is the chassis/dev equivalent.
-    upload_dir: str = "var/uploads"
-    max_upload_bytes: int = 10 * 1024 * 1024
-    # mhn-ai pipeline trigger (classify → file → extract happens THERE, never
-    # here): POST {base}/v1/document-processing-runs with this bearer token —
-    # the SAME value as mhn-ai's MHN_SERVICE_TOKEN (verified contract, see
-    # app/documents/service.py). Empty base URL = trigger disabled (uploads
-    # still store; documents stay unprocessed and retryable).
+    # mhn-ai pipeline trigger for chat uploads (Davi handles no document
+    # bytes or rows — files reach S3 + unclassified_files via Spring):
+    # POST {base}/v1/document-processing-runs with this bearer token — the
+    # SAME value as mhn-ai's MHN_SERVICE_TOKEN (verified contract, see
+    # app/documents/service.py). Empty base URL = trigger disabled (the chat
+    # turn still succeeds; documents stay unprocessed and retryable).
     mhn_ai_base_url: str = ""
     mhn_ai_token: str = ""
     mhn_ai_timeout_seconds: float = 10.0

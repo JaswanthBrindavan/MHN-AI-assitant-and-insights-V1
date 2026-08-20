@@ -117,6 +117,14 @@ class ChatResponse(BaseModel):
     documents: list[dict] | None = None
 
 
+class ChatUploadRequest(BaseModel):
+    # An existing unclassified_files id — the file itself reached S3 + that
+    # row via Spring's upload flow; Davi only submits the processing run.
+    document_id: int
+    message: str = Field(default="", max_length=4000)
+    session_id: uuid.UUID | None = None
+
+
 class UploadedDocumentInfo(BaseModel):
     resource_type: str  # "unclassified_files" — the unit mhn-ai runs process
     doc_id: int

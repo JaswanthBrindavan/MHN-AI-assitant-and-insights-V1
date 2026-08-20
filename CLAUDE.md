@@ -96,8 +96,9 @@ app/
   chat/data_handlers.py deterministic ability handlers (run in SAVEPOINTs)
   charts/svg.py        deterministic SVG line/bar charts (visual payload)
   i18n/                language detection + localized safety replies (DRAFT)
-  documents/service.py chat uploads: insert unclassified_files row + submit an
-                       mhn-ai document-processing run (verified contract:
+  documents/service.py chat uploads: Davi touches NO document bytes/rows —
+                       Spring's flow owns S3 + unclassified_files; this only
+                       submits the mhn-ai processing run (verified contract:
                        POST /v1/document-processing-runs, bearer
                        MHN_SERVICE_TOKEN; fail-open; job_runs bookkeeping)
   api/v1/              health, pedigree, insights, chat (+ /chat/upload,

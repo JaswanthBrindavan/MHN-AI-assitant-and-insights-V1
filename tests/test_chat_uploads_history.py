@@ -1,12 +1,13 @@
-"""Chat file uploads (store → trigger mhn-ai) and chat-history endpoints.
+"""Chat upload triggering (mhn-ai run submission) and chat-history endpoints.
 
-Covers app/documents/service.py and the /chat/upload, /chat/sessions,
-/chat/sessions/{id}/messages endpoints against the VERIFIED mhn-ai contract
-(POST /v1/document-processing-runs, bearer MHN_SERVICE_TOKEN, the submitted
-unit being an ``unclassified_files`` id): storage, run submission
-(accepted / rejected / unreachable / disabled), job_runs bookkeeping,
-conversation persistence of upload turns, history retrieval, and
-object-level authorization.
+Davi handles no document bytes or rows — files reach S3 + unclassified_files
+via Spring's upload flow. Covers app/documents/service.py and the
+/chat/upload, /chat/sessions, /chat/sessions/{id}/messages endpoints against
+the VERIFIED mhn-ai contract (POST /v1/document-processing-runs, bearer
+MHN_SERVICE_TOKEN, the submitted unit being an ``unclassified_files`` id):
+run submission (accepted / rejected / unreachable / disabled), ownership
+checks, job_runs bookkeeping, conversation persistence of upload turns,
+history retrieval, and object-level authorization.
 """
 
 from __future__ import annotations
@@ -23,10 +24,10 @@ from app.config import get_settings
 from app.documents.service import (
     build_upload_reply,
     get_own_unclassified,
-    store_and_trigger,
-    store_document,
+    submit_document,
     trigger_mhn_ai,
 )
+from app.models.common import utcnow
 from app.models.coredata import UnclassifiedFile
 from app.models.jobs import JobRun
 
@@ -37,6 +38,22 @@ OTHER_HDR = {"X-User-Id": str(OTHER)}
 
 RUN_ID = "3d1a2c66-1f7e-4b58-9a54-0d6a4be2b111"
 ITEM_ID = "5e8b9d10-2c3f-4a67-8b12-9c0d1e2f3a45"
+
+
+def _row(
+    user_id: uuid.UUID = USER,
+    created_by: uuid.UUID | None = None,
+    name: str | None = "cbc_report.pdf",
+) -> UnclassifiedFile:
+    """An unclassified_files row as Spring's upload flow would create it."""
+    return UnclassifiedFile(
+        user_id=user_id,
+        filepath=f"uploads/{uuid.uuid4().hex}.pdf",
+        name=name,
+        private=False,
+        created_by=created_by or user_id,
+        created_at=utcnow(),
+    )
 
 
 def _accepted_body(document_id: int) -> dict:
@@ -55,38 +72,29 @@ def _accepted_body(document_id: int) -> dict:
     }
 
 
-@pytest.fixture(autouse=True)
-def _upload_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
 def _mock_client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
 # --------------------------------------------------------------------------- #
-# store_document — unclassified_files row
+# get_own_unclassified — read-only ownership check
 # --------------------------------------------------------------------------- #
-async def test_store_document_row(db_session):
-    row = await store_document(
-        db_session, USER, "var/uploads/abc.pdf", name="cbc_report.pdf"
-    )
-    assert row.id is not None
-    assert row.user_id == USER
-    assert row.created_by == USER
-    assert row.filepath == "var/uploads/abc.pdf"
-    assert row.name == "cbc_report.pdf"
-    assert row.private is False
-
-
 async def test_get_own_unclassified_scoping(db_session):
-    row = await store_document(db_session, USER, "k.pdf", name="k.pdf")
+    row = _row()
+    db_session.add(row)
+    await db_session.flush()
     assert await get_own_unclassified(db_session, USER, row.id) is not None
     assert await get_own_unclassified(db_session, OTHER, row.id) is None
     assert await get_own_unclassified(db_session, USER, 999999) is None
+
+
+async def test_get_own_unclassified_uploader_can_submit(db_session):
+    # Family-connect: OTHER uploaded a document ABOUT USER — the uploader
+    # may also submit it for processing.
+    row = _row(user_id=USER, created_by=OTHER)
+    db_session.add(row)
+    await db_session.flush()
+    assert await get_own_unclassified(db_session, OTHER, row.id) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -162,40 +170,29 @@ async def test_trigger_unparseable_202_still_accepted(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# store_and_trigger — job bookkeeping
+# submit_document — job bookkeeping
 # --------------------------------------------------------------------------- #
-async def test_store_and_trigger_success_job(db_session, monkeypatch):
+async def test_submit_document_success_job(db_session, monkeypatch):
     monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
     get_settings.cache_clear()
 
     async with _mock_client(
-        lambda r: httpx.Response(202, json=_accepted_body(1))
+        lambda r: httpx.Response(202, json=_accepted_body(7))
     ) as client:
-        stored = await store_and_trigger(
-            db_session, USER, b"bytes", "var/uploads/k.pdf",
-            name="k.pdf", client=client,
-        )
-    assert stored.triggered is True
-    assert stored.resource_type == "unclassified_files"
-    assert stored.run_id == RUN_ID
-    assert stored.item_status == "queued"
+        result = await submit_document(db_session, USER, 7, client=client)
+    assert result.accepted is True
+    assert result.run_id == RUN_ID
     job = (await db_session.execute(select(JobRun))).scalars().one()
     assert job.name == "chat_upload_trigger"
     assert job.trigger == "chat"
     assert job.status == "success"
-    assert job.input_hash is not None and len(job.input_hash) == 64
 
 
-async def test_store_and_trigger_untriggered_job(db_session):
-    stored = await store_and_trigger(
-        db_session, USER, b"bytes", "var/uploads/k.pdf", name="k.pdf"
-    )
-    assert stored.triggered is False
+async def test_submit_document_failed_trigger_job(db_session):
+    result = await submit_document(db_session, USER, 7)
+    assert result.accepted is False
     job = (await db_session.execute(select(JobRun))).scalars().one()
-    assert job.status == "stored_not_triggered"
-    # The document is stored regardless.
-    doc = (await db_session.execute(select(UnclassifiedFile))).scalars().one()
-    assert doc.user_id == USER
+    assert job.status == "trigger_failed"
 
 
 # --------------------------------------------------------------------------- #
@@ -211,34 +208,53 @@ def test_upload_reply_validator_safe(triggered: bool):
 # --------------------------------------------------------------------------- #
 # POST /chat/upload endpoint
 # --------------------------------------------------------------------------- #
-def _file(name: str = "cbc_report.pdf", data: bytes = b"%PDF-1.4 test"):
-    return {"file": (name, data, "application/pdf")}
+async def _seed_row(sessionmaker, **kw) -> int:
+    async with sessionmaker() as db:
+        row = _row(**kw)
+        db.add(row)
+        await db.commit()
+        return row.id
 
 
 @pytest.mark.asyncio
-async def test_upload_endpoint_stores_and_replies(client):
+async def test_upload_endpoint_triggers_and_replies(client, sessionmaker):
+    doc_id = await _seed_row(sessionmaker)
     resp = await client.post(
         "/api/v1/chat/upload",
         headers=HDR,
-        files=_file(),
-        data={"message": "please store this report"},
+        json={"document_id": doc_id, "message": "please store this report"},
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["document"]["resource_type"] == "unclassified_files"
+    assert body["document"]["doc_id"] == doc_id
     assert body["document"]["state"] == "pending"
     assert body["document"]["triggered"] is False  # no mhn-ai URL in tests
-    assert "Stored your file 'cbc_report.pdf'" in body["response_message"]
+    assert "cbc_report.pdf" in body["response_message"]
     assert body["session_id"]
 
 
 @pytest.mark.asyncio
-async def test_upload_endpoint_records_conversation(client):
+async def test_upload_endpoint_writes_no_document_rows(client, sessionmaker):
+    doc_id = await _seed_row(sessionmaker)
+    await client.post(
+        "/api/v1/chat/upload", headers=HDR, json={"document_id": doc_id}
+    )
+    async with sessionmaker() as db:
+        rows = (
+            await db.execute(select(UnclassifiedFile))
+        ).scalars().all()
+    # Only the seeded row exists — Davi never creates document rows.
+    assert [r.id for r in rows] == [doc_id]
+
+
+@pytest.mark.asyncio
+async def test_upload_endpoint_records_conversation(client, sessionmaker):
+    doc_id = await _seed_row(sessionmaker)
     resp = await client.post(
         "/api/v1/chat/upload",
         headers=HDR,
-        files=_file(),
-        data={"message": "store it"},
+        json={"document_id": doc_id, "message": "store it"},
     )
     sid = resp.json()["session_id"]
     hist = await client.get(f"/api/v1/chat/sessions/{sid}/messages", headers=HDR)
@@ -248,11 +264,12 @@ async def test_upload_endpoint_records_conversation(client):
     assert msgs[0]["role"] == "user"
     assert msgs[0]["message"] == "[uploaded file: cbc_report.pdf] store it"
     assert msgs[1]["role"] == "assistant"
-    assert "Stored your file" in msgs[1]["message"]
+    assert "cbc_report.pdf" in msgs[1]["message"]
 
 
 @pytest.mark.asyncio
-async def test_upload_endpoint_threads_existing_session(client):
+async def test_upload_endpoint_threads_existing_session(client, sessionmaker):
+    doc_id = await _seed_row(sessionmaker)
     first = await client.post(
         "/api/v1/chat", headers=HDR, json={"message": "hello"}
     )
@@ -260,8 +277,7 @@ async def test_upload_endpoint_threads_existing_session(client):
     resp = await client.post(
         "/api/v1/chat/upload",
         headers=HDR,
-        files=_file(),
-        data={"session_id": sid},
+        json={"document_id": doc_id, "session_id": sid},
     )
     assert resp.json()["session_id"] == sid
     hist = await client.get(f"/api/v1/chat/sessions/{sid}/messages", headers=HDR)
@@ -270,92 +286,32 @@ async def test_upload_endpoint_threads_existing_session(client):
 
 
 @pytest.mark.asyncio
-async def test_upload_endpoint_document_id_mode(client, sessionmaker):
-    async with sessionmaker() as db:
-        row = await store_document(db, USER, "s3/key/abc.pdf", name="abc.pdf")
-        await db.commit()
-        doc_id = row.id
+async def test_upload_endpoint_unknown_document_404(client):
     resp = await client.post(
-        "/api/v1/chat/upload",
-        headers=HDR,
-        data={"document_id": str(doc_id), "message": "process this"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["document"]["doc_id"] == doc_id
-    assert body["document"]["triggered"] is False  # no mhn-ai URL in tests
-    assert "abc.pdf" in body["response_message"]
-
-
-@pytest.mark.asyncio
-async def test_upload_endpoint_document_id_of_other_user_404(
-    client, sessionmaker
-):
-    async with sessionmaker() as db:
-        row = await store_document(db, OTHER, "s3/key/x.pdf", name="x.pdf")
-        await db.commit()
-        doc_id = row.id
-    resp = await client.post(
-        "/api/v1/chat/upload", headers=HDR, data={"document_id": str(doc_id)}
+        "/api/v1/chat/upload", headers=HDR, json={"document_id": 999999}
     )
     assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_upload_endpoint_requires_exactly_one_mode(client):
-    neither = await client.post(
-        "/api/v1/chat/upload", headers=HDR, data={"message": "hi"}
+async def test_upload_endpoint_other_users_document_404(client, sessionmaker):
+    doc_id = await _seed_row(sessionmaker, user_id=OTHER, created_by=OTHER)
+    resp = await client.post(
+        "/api/v1/chat/upload", headers=HDR, json={"document_id": doc_id}
     )
-    assert neither.status_code == 400
-    both = await client.post(
-        "/api/v1/chat/upload",
-        headers=HDR,
-        files=_file(),
-        data={"document_id": "1"},
-    )
-    assert both.status_code == 400
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_upload_endpoint_rejects_empty_file(client):
+async def test_upload_endpoint_filename_falls_back_to_filepath(
+    client, sessionmaker
+):
+    doc_id = await _seed_row(sessionmaker, name=None)
     resp = await client.post(
-        "/api/v1/chat/upload", headers=HDR, files=_file(data=b"")
+        "/api/v1/chat/upload", headers=HDR, json={"document_id": doc_id}
     )
-    assert resp.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_upload_endpoint_rejects_oversize(client, monkeypatch):
-    monkeypatch.setenv("MAX_UPLOAD_BYTES", "10")
-    get_settings.cache_clear()
-    resp = await client.post(
-        "/api/v1/chat/upload", headers=HDR, files=_file(data=b"x" * 11)
-    )
-    assert resp.status_code == 413
-
-
-@pytest.mark.asyncio
-async def test_upload_endpoint_rejects_bad_session_id(client):
-    resp = await client.post(
-        "/api/v1/chat/upload",
-        headers=HDR,
-        files=_file(),
-        data={"session_id": "not-a-uuid"},
-    )
-    assert resp.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_upload_endpoint_saves_bytes_to_upload_dir(client, tmp_path):
-    resp = await client.post(
-        "/api/v1/chat/upload", headers=HDR, files=_file(data=b"CONTENT")
-    )
-    assert resp.status_code == 200
-    upload_dir = tmp_path / "uploads"
-    saved = list(upload_dir.iterdir())
-    assert len(saved) == 1
-    assert saved[0].read_bytes() == b"CONTENT"
-    assert saved[0].suffix == ".pdf"
+    # No stored name → the S3 key's basename is used in the reply.
+    assert ".pdf" in resp.json()["response_message"]
 
 
 # --------------------------------------------------------------------------- #
