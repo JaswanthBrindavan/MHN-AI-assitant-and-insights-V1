@@ -66,12 +66,19 @@ class DocumentQuery:
     wants_date: bool = False
 
 
+# Every kind term tolerates a plural — "pull my latest lab reports" is the
+# NATURAL phrasing and used to fall through to the LLM, which then wrongly
+# claimed it had no access to records.
 _DOC_KIND_TERMS: tuple[tuple[str, str], ...] = (
-    (r"blood report|lab report|blood test|lab test|test report|report", "report"),
-    (r"scan|x-?ray|mri|ct|ultrasound|imaging", "scan"),
-    (r"prescription", "prescription"),
-    (r"vaccination|vaccine|immuni[sz]ation", "vaccination"),
-    (r"\btest\b|check-?up|checkup", "report"),
+    (
+        r"blood reports?|lab reports?|blood tests?|lab tests?|test reports?"
+        r"|reports?",
+        "report",
+    ),
+    (r"scans?|x-?rays?|mri|ct|ultrasounds?|imaging", "scan"),
+    (r"prescriptions?", "prescription"),
+    (r"vaccinations?|vaccines?|immuni[sz]ations?", "vaccination"),
+    (r"\btests?\b|check-?ups?|checkups?", "report"),
 )
 
 _DOC_INTENT_RE = re.compile(

@@ -382,3 +382,25 @@ async def test_history_preserved_across_requests(client):
     assert "what is anemia?" in texts
     assert "is it serious?" in texts
     assert len(texts) == 4
+
+
+# --------------------------------------------------------------------------- #
+# Plural document phrasings (found live: "pull my latest lab reports" fell
+# through to the LLM, which then wrongly claimed it had no record access)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("message", "kind"),
+    [
+        ("pull my latest lab reports", "report"),
+        ("show me my blood reports", "report"),
+        ("find my recent scans", "scan"),
+        ("do I have any prescriptions in my records?", "prescription"),
+        ("show my vaccinations", "vaccination"),
+        ("my latest x-rays please", "scan"),
+    ],
+)
+def test_parse_document_query_plural_kinds(message, kind):
+    from app.chat.abilities import parse_document_query
+
+    q = parse_document_query(message)
+    assert q is not None and kind in q.kinds
