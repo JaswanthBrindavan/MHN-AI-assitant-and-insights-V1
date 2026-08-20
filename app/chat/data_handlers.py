@@ -362,10 +362,11 @@ async def handle_document_query(
         {
             "kind": h.kind,
             "resource_type": _RESOURCE_TYPE.get(h.kind, h.kind),
-            # The app's file routes address the production `uuid` column, not
-            # the internal serial id — send the uuid whenever the database
-            # has one, and only fall back to the serial id without it.
-            "id": h.doc_uuid or h.doc_id,
+            # Spring's file routes address the serial id (verified:
+            # FileController GET /files/{type}/{id}/url takes Integer id).
+            # Clients open the FILE via that presigned-URL endpoint — the
+            # wallet detail page only exists for the viewer's own documents.
+            "id": h.doc_id,
             "title": h.title or h.filepath.rsplit("/", 1)[-1],
             "date": h.created_at.isoformat() if h.created_at else None,
             "owner": h.owner_label,

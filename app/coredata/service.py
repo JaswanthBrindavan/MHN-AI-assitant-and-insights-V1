@@ -12,7 +12,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,10 +49,7 @@ class DocumentHit:
     # AI classification title (content.ai.classification.title) — production
     # scans have no name column, so this is their canonical display name.
     title: str | None = None
-    # Production's public identifier (a ddl-auto ``uuid`` column the app's
-    # file routes address; the serial ``id`` is internal). None on databases
-    # that predate the column — clients then fall back to the serial id.
-    doc_uuid: str | None = None
+
 
 
 # --------------------------------------------------------------------------- #
@@ -201,33 +197,6 @@ async def can_view_document(
     return resource_id not in denied.get(resource_type, set())
 
 
-async def _document_uuids(
-    db: AsyncSession, model, ids: list[int]
-) -> dict[int, str]:
-    """id → public uuid for the given document rows.
-
-    The ``uuid`` column is a production ddl-auto addition and is not in the
-    baseline schema, so it is read with raw SQL inside a SAVEPOINT and fails
-    open to {} on databases (sqlite tests, older dumps) that lack it.
-    """
-    if not ids:
-        return {}
-    table = model.__tablename__
-    try:
-        async with db.begin_nested():
-            rows = (
-                await db.execute(
-                    sa.text(
-                        f'SELECT id, uuid FROM {table} WHERE id IN :ids'  # noqa: S608 — table name from our own model registry
-                    ).bindparams(sa.bindparam("ids", expanding=True)),
-                    {"ids": ids},
-                )
-            ).all()
-        return {int(i): str(u) for i, u in rows if u is not None}
-    except Exception:  # noqa: BLE001 — column may not exist on this database
-        return {}
-
-
 async def latest_documents(
     db: AsyncSession,
     owner_id: uuid.UUID,
@@ -262,9 +231,9 @@ async def latest_documents(
             )
         ).scalars().all()
         denied_ids = denied.get(_RESOURCE_TYPE.get(kind, kind), set())
-        kept = [r for r in rows if r.id not in denied_ids]
-        uuids = await _document_uuids(db, model, [r.id for r in kept])
-        for r in kept:
+        for r in rows:
+            if r.id in denied_ids:
+                continue
             hits.append(
                 DocumentHit(
                     kind=kind,
@@ -273,7 +242,6 @@ async def latest_documents(
                     created_at=r.created_at,
                     owner_label=owner_label,
                     title=_ai_title(getattr(r, "content", None)),
-                    doc_uuid=uuids.get(r.id),
                 )
             )
     hits.sort(
