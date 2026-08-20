@@ -367,6 +367,10 @@ async def handle_document_query(
             # Clients open the FILE via that presigned-URL endpoint — the
             # wallet detail page only exists for the viewer's own documents.
             "id": h.doc_id,
+            # The wallet detail route's public slug is the file's storage-key
+            # UUID — the last segment of the S3 filepath ("reports/<uuid>"),
+            # never the DB id (mirrors the app's fileSlugFromPath).
+            "slug": h.filepath.rsplit("/", 1)[-1],
             "title": h.title or h.filepath.rsplit("/", 1)[-1],
             "date": h.created_at.isoformat() if h.created_at else None,
             "owner": h.owner_label,
