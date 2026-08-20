@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -114,3 +115,34 @@ class ChatResponse(BaseModel):
     # file via the EXISTING app flow (Spring GET /files/{type}/{id}/url or the
     # health-wallet detail routes); Davi never mints URLs or touches S3.
     documents: list[dict] | None = None
+
+
+class UploadedDocumentInfo(BaseModel):
+    resource_type: str
+    doc_id: int
+    # "pending" until mhn-ai's pipeline writes its content.ai envelope
+    # (classified | complete | failed).
+    state: str
+    # Whether mhn-ai accepted the processing request at upload time.
+    triggered: bool
+
+
+class ChatUploadResponse(BaseModel):
+    response_message: str
+    session_id: uuid.UUID
+    document: UploadedDocumentInfo
+
+
+class ChatSessionInfo(BaseModel):
+    session_id: uuid.UUID
+    created_at: datetime | None = None
+    last_message_at: datetime | None = None
+    message_count: int
+    preview: str = ""
+
+
+class ChatMessageInfo(BaseModel):
+    id: uuid.UUID
+    role: str
+    message: str
+    created_at: datetime | None = None

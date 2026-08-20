@@ -54,6 +54,20 @@ class Settings(BaseSettings):
     pipeline_version: int = 1
     app_env: str = "dev"
 
+    # Chat file uploads. Bytes are saved under upload_dir (opaque names,
+    # mirroring an S3 key); in production the real file store is Spring's S3 —
+    # this is the chassis/dev equivalent.
+    upload_dir: str = "var/uploads"
+    max_upload_bytes: int = 10 * 1024 * 1024
+    # mhn-ai pipeline trigger (classify → file → extract happens THERE, never
+    # here). Bearer-token server-to-server call, mirroring Spring↔mhn-ai's
+    # AI_TOKEN pattern. Empty base URL = trigger disabled (upload still
+    # stores; the document stays in state "pending").
+    mhn_ai_base_url: str = ""
+    mhn_ai_token: str = ""
+    mhn_ai_process_path: str = "/process"
+    mhn_ai_timeout_seconds: float = 10.0
+
 
 @lru_cache
 def get_settings() -> Settings:
