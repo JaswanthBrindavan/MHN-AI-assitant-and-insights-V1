@@ -410,9 +410,13 @@ async def handle_tracker_add(
         )
     elif add.log_type == "alcohol":
         note = " Tracked as an alcohol entry."
+    # "2 cups of coffee" reads naturally; "5 cigarettes of smoking" does not —
+    # skip the kind when the unit already names the thing being counted.
+    unit_is_the_kind = add.unit in ("cigarette", "beedi", "drink")
+    what = f"{qty} {unit}" if unit_is_the_kind else f"{qty} {unit} of {add.log_type}"
     return {
         "reply": (
-            f"Logged: {qty} {unit} of {add.log_type} for {day}. "
+            f"Logged: {what} for {day}. "
             f"You can see this in your lifestyle tracker.{note}"
         ),
         "action": "logged",

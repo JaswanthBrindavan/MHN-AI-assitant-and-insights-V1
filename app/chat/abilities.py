@@ -118,7 +118,9 @@ _QTY = r"(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|ha
 _TRACKER_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
         re.compile(
-            rf"\b(?:had|drank|drink|took|finished)\s+{_QTY}\s*"
+            # Statement verbs ("I had/drank …") plus command verbs
+            # ("log/add/track/record 2 cups of coffee [to my tracker]").
+            rf"\b(?:had|drank|drink|took|finished|log(?:ged)?|add|track|record)\s+{_QTY}\s*"
             r"(cups?|glass(?:es)?|mugs?|shots?|pegs?|bottles?|cans?|litres?|liters?|ml)?\s*"
             r"(?:of\s+)?(coffee|tea|chai|water|beer|wine|whisky|whiskey|rum|vodka|alcohol|drinks?)\b",
             re.IGNORECASE,
@@ -129,6 +131,18 @@ _TRACKER_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (
         re.compile(
             rf"\bsmoked\s+{_QTY}\s*(cigs?|cigarettes?|beedis?|bidis?|smokes?)?\b",
+            re.IGNORECASE,
+        ),
+        "smoke",
+        "smoking",
+    ),
+    (
+        # "I had 5 cigarettes" / "log 2 cigs" — unlike "smoked", these verbs
+        # need the explicit cigarette unit or they would swallow unrelated
+        # counts ("had 2 idlis").
+        re.compile(
+            rf"\b(?:had|log(?:ged)?|add|track|record)\s+{_QTY}\s*"
+            r"(cigs?|cigarettes?|beedis?|bidis?)\b",
             re.IGNORECASE,
         ),
         "smoke",
@@ -237,9 +251,74 @@ METRIC_REGISTRY: dict[str, dict] = {
                                                   "glycated haemoglobin"),
         "display": "HbA1c", "unit": "%",
     },
+    # Common lab parameters pulled from extracted reports (same report_param
+    # machinery as HbA1c). Before these existed, everyday asks like "what was
+    # my last TSH" fell through to the LLM instead of the data path.
+    "total_cholesterol": {
+        "source": "report_param",
+        "param_terms": ("total cholesterol", "cholesterol"),
+        "display": "total cholesterol", "unit": "mg/dL",
+    },
+    "ldl": {
+        "source": "report_param",
+        "param_terms": ("ldl cholesterol", "ldl"),
+        "display": "LDL cholesterol", "unit": "mg/dL",
+    },
+    "hdl": {
+        "source": "report_param",
+        "param_terms": ("hdl cholesterol", "hdl"),
+        "display": "HDL cholesterol", "unit": "mg/dL",
+    },
+    "triglycerides": {
+        "source": "report_param",
+        "param_terms": ("triglycerides", "triglyceride"),
+        "display": "triglycerides", "unit": "mg/dL",
+    },
+    "tsh": {
+        "source": "report_param",
+        "param_terms": ("tsh", "thyroid stimulating hormone"),
+        "display": "TSH", "unit": "mIU/L",
+    },
+    "creatinine": {
+        "source": "report_param",
+        "param_terms": ("creatinine", "serum creatinine"),
+        "display": "creatinine", "unit": "mg/dL",
+    },
+    "uric_acid": {
+        "source": "report_param",
+        "param_terms": ("uric acid", "serum uric acid"),
+        "display": "uric acid", "unit": "mg/dL",
+    },
+    "vitamin_d": {
+        "source": "report_param",
+        "param_terms": ("vitamin d", "25-oh vitamin d", "25 oh vitamin d"),
+        "display": "vitamin D", "unit": "ng/mL",
+    },
+    "vitamin_b12": {
+        "source": "report_param",
+        "param_terms": ("vitamin b12", "vitamin b-12", "b12"),
+        "display": "vitamin B12", "unit": "pg/mL",
+    },
+    "sgpt": {
+        "source": "report_param",
+        "param_terms": ("sgpt", "alt", "alanine aminotransferase"),
+        "display": "SGPT (ALT)", "unit": "U/L",
+    },
+    "sgot": {
+        "source": "report_param",
+        "param_terms": ("sgot", "ast", "aspartate aminotransferase"),
+        "display": "SGOT (AST)", "unit": "U/L",
+    },
+    "hemoglobin": {
+        "source": "report_param",
+        "param_terms": ("hemoglobin", "haemoglobin"),
+        "display": "hemoglobin", "unit": "g/dL",
+    },
 }
 
 _METRIC_TERMS: tuple[tuple[str, str], ...] = (
+    # Order matters: specific terms before generic ones ("glycated hemoglobin"
+    # before "hemoglobin", "ldl/hdl" before "cholesterol").
     (r"hba1c|hb a1c|a1c|glycated h(?:a)?emoglobin", "hba1c"),
     (r"blood pressure|\bbp\b", "blood_pressure"),
     (r"blood sugar|sugar (?:level|reading)|glucose|fasting sugar", "blood_sugar"),
@@ -247,6 +326,18 @@ _METRIC_TERMS: tuple[tuple[str, str], ...] = (
     (r"spo2|oxygen (?:level|saturation)", "spo2"),
     (r"\bweight\b", "weight"),
     (r"\bbmi\b", "bmi"),
+    (r"\bldl\b", "ldl"),
+    (r"\bhdl\b", "hdl"),
+    (r"\btriglycerides?\b", "triglycerides"),
+    (r"\b(?:total )?cholesterol\b", "total_cholesterol"),
+    (r"\btsh\b|thyroid stimulating hormone", "tsh"),
+    (r"\bcreatinine\b", "creatinine"),
+    (r"\buric acid\b", "uric_acid"),
+    (r"\bvitamin d3?\b|\b25.?oh vitamin d\b", "vitamin_d"),
+    (r"\bvitamin b.?12\b|\bb12\b", "vitamin_b12"),
+    (r"\bsgpt\b|\balt\b|alanine aminotransferase", "sgpt"),
+    (r"\bsgot\b|\bast\b|aspartate aminotransferase", "sgot"),
+    (r"\bh(?:a)?emoglobin\b|\bhb\b", "hemoglobin"),
 )
 _METRIC_INTENT_RE = re.compile(
     r"\b(?:what(?:'s| is| was| are)|latest|last|recent|current|my|show|check|"
@@ -355,7 +446,8 @@ class SummaryQuery:
 
 _SUMMARY_RE = re.compile(
     r"\b(?:health\s+)?summary\b|\bhow (?:did|have) i (?:do|done|been)\b|"
-    r"\boverview of my health\b|\bhealth report card\b",
+    r"\boverview of my health\b|\bhealth report card\b|"
+    r"\bsummari[sz]e my health\b",
     re.IGNORECASE,
 )
 _PERIOD_RE: tuple[tuple[str, str], ...] = (
@@ -388,7 +480,8 @@ class SuggestionQuery:
 
 
 _SUGGESTION_RE = re.compile(
-    r"\bsuggestions?\b|\btips\b|\badvice\b|\bwhat (?:should|can) i do\b|"
+    r"\bsuggestions?\b|\bsuggest\b|\btips\b|\badvice\b|"
+    r"\bwhat (?:should|can) i do\b|"
     r"\bhow (?:do|can) i (?:manage|prevent|improve|control)\b|"
     r"\blifestyle changes?\b|\bdiet plan\b|\bprecautions?\b",
     re.IGNORECASE,

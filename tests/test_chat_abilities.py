@@ -427,3 +427,74 @@ async def test_tracker_message_with_red_flag_stays_emergency(db_session):
         await db_session.execute(select(LifestyleLog))
     ).scalars().all()
     assert rows == []
+
+
+# --------------------------------------------------------------------------- #
+# Parser coverage extensions (command-verb tracker, lab metrics, verb forms)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("message", "log_type", "qty", "unit", "offset"),
+    [
+        ("Log 2 cups of coffee", "coffee", 2.0, "cup", 0),
+        ("add 3 cups of tea to my tracker", "tea", 3.0, "cup", 0),
+        ("record 2 glasses of water", "water", 2.0, "glass", 0),
+        ("track one peg of whisky", "alcohol", 1.0, "peg", 0),
+        ("I had 5 cigarettes yesterday.", "smoking", 5.0, "cigarette", 1),
+        ("log 2 cigs for me", "smoking", 2.0, "cigarette", 0),
+        ("add 2 beedis yesterday", "smoking", 2.0, "beedi", 1),
+    ],
+)
+def test_parse_tracker_command_and_had_cigarette_forms(
+    message, log_type, qty, unit, offset
+):
+    add = parse_tracker_add(message)
+    assert add is not None
+    assert add.log_type == log_type
+    assert add.quantity == qty
+    assert add.unit == unit
+    assert add.day_offset == offset
+
+
+def test_parse_tracker_had_requires_cigarette_unit():
+    # "had N <not-a-tracked-thing>" must not log anything.
+    assert parse_tracker_add("I had 2 idlis today") is None
+    assert parse_tracker_add("I had 3 meetings yesterday") is None
+
+
+@pytest.mark.parametrize(
+    ("message", "metric"),
+    [
+        ("What was my last TSH value?", "tsh"),
+        ("What is my latest creatinine?", "creatinine"),
+        ("What was my last uric acid reading?", "uric_acid"),
+        ("What's my latest vitamin D level?", "vitamin_d"),
+        ("Show my most recent B12 level.", "vitamin_b12"),
+        ("What is my most recent SGPT level?", "sgpt"),
+        ("What was my most recent LDL?", "ldl"),
+        ("What was my last HDL?", "hdl"),
+        ("What are my latest triglycerides?", "triglycerides"),
+        ("What's my most recent cholesterol level?", "total_cholesterol"),
+        ("What was my last hemoglobin value?", "hemoglobin"),
+    ],
+)
+def test_parse_metric_lab_params(message, metric):
+    q = parse_metric_query(message)
+    assert q is not None and q.metric == metric
+
+
+def test_parse_metric_lab_params_guards_hold():
+    # Education phrasing must not hijack the data path.
+    assert parse_metric_query("What is a normal TSH range?") is None
+    assert parse_metric_query("Are eggs good or bad for cholesterol?") is None
+    # "glycated hemoglobin" still resolves to HbA1c, not hemoglobin.
+    q = parse_metric_query("my latest glycated hemoglobin")
+    assert q is not None and q.metric == "hba1c"
+
+
+def test_parse_summary_summarize_verb():
+    q = parse_summary_query("Summarize my health for this month.")
+    assert q is not None and q.period == "month"
+
+
+def test_parse_suggestion_suggest_verb():
+    assert parse_suggestion_query("Suggest healthy habits for my PCOS.") is not None

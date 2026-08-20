@@ -25,7 +25,17 @@ _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(get_settings().database_url, future=True)
+        # pool_pre_ping revalidates pooled connections before use and
+        # pool_recycle retires idle ones, so the first request after an idle
+        # period never lands on a connection the server already dropped
+        # (hosted Postgres closes idle connections; without this the first
+        # post-idle chat request 500s and only the retry succeeds).
+        _engine = create_async_engine(
+            get_settings().database_url,
+            future=True,
+            pool_pre_ping=True,
+            pool_recycle=300,
+        )
     return _engine
 
 

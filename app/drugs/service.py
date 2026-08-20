@@ -139,6 +139,24 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     if prefix:
         return _first_active(prefix)
 
+    # Dose-without-unit forms: "medrol 4" must find "Medrol 4mg Tablet", where
+    # the space-anchored prefix above cannot ("medrol 4 %" ≠ "medrol 4mg …").
+    # Only terms ending in a digit get this looser window so short brand stems
+    # ("pan") still cannot swallow unrelated products ("panadol").
+    if re.search(r"\d$", norm):
+        dose_prefix = list(
+            (
+                await db.execute(
+                    select(DrugReference)
+                    .where(DrugReference.name_normalized.like(f"{norm}%"))
+                    .order_by(DrugReference.name_normalized, DrugReference.id)
+                    .limit(25)
+                )
+            ).scalars().all()
+        )
+        if dose_prefix:
+            return _first_active(dose_prefix)
+
     candidates = list(
         (
             await db.execute(
@@ -225,3 +243,66 @@ def build_drug_reply(drug: DrugReference) -> str:
         "situation — your doctor or pharmacist knows your context best."
     )
     return " ".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Interaction / combination questions ("can I take X and Y together")
+# --------------------------------------------------------------------------- #
+# The drug_reference dataset carries no interaction data, so these questions
+# must never be answered substantively — neither by the LLM (ungrounded) nor
+# with the generic safe fallback (a non-answer). Instead they get a dedicated
+# deterministic reply that names both items and routes to a pharmacist.
+_TERM = r"([a-z0-9][a-z0-9 \-\.]{1,60}?)"
+_INTERACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        rf"\bcan i (?:take|have|use) {_TERM} (?:and|with|along with) {_TERM}"
+        r"(?: together)?\s*[?.!]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bis it (?:safe|ok|okay) to (?:take|have|use|combine) {_TERM} "
+        rf"(?:and|with|along with) {_TERM}\s*[?.!]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bdoes {_TERM} interact with {_TERM}\s*[?.!]*$", re.IGNORECASE
+    ),
+    re.compile(
+        rf"\bcan {_TERM} (?:and|be taken with) {_TERM} be taken together\b",
+        re.IGNORECASE,
+    ),
+)
+_INTERACTION_TERM_NOISE = re.compile(
+    r"^(?:my|the|this|that|a|an|some)\s+", re.IGNORECASE
+)
+
+
+def extract_interaction_query(message: str) -> tuple[str, str] | None:
+    """Return the two combined terms if the message asks about mixing them."""
+    for pattern in _INTERACTION_PATTERNS:
+        m = pattern.search(message)
+        if m:
+            terms = []
+            for raw in (m.group(1), m.group(2)):
+                term = raw.strip().strip("?.!,").strip()
+                term = _INTERACTION_TERM_NOISE.sub("", term).strip()
+                term = _TERM_TRAILING_NOISE.sub("", term).strip()
+                if len(term) < 3:
+                    return None
+                terms.append(term)
+            return (terms[0], terms[1])
+    return None
+
+
+def build_interaction_reply(term_a: str, term_b: str) -> str:
+    """Deterministic, validator-safe reply for a combination question."""
+    return (
+        f"Whether {term_a} and {term_b} can be taken together depends on "
+        "things I cannot verify from here — the doses, the timing, your other "
+        "medicines, and factors like kidney and liver function. I don't have "
+        "a validated interaction checker, so please ask a pharmacist or the "
+        "prescriber about this specific combination before taking them "
+        f"together. {MEDICATION_NOTE} This is general information, not "
+        "medical advice for your specific situation — your doctor or "
+        "pharmacist knows your context best."
+    )

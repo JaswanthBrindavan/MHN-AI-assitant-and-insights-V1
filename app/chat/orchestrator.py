@@ -52,7 +52,14 @@ from app.chat.router import (
 from app.chat.scope import is_off_topic
 from app.chat.validation import validate_reply
 from app.config import get_settings
-from app.drugs.service import build_drug_reply, extract_drug_query_term, find_drug
+from app.drugs.service import (
+    NON_DRUG_TERMS,
+    build_drug_reply,
+    build_interaction_reply,
+    extract_drug_query_term,
+    extract_interaction_query,
+    find_drug,
+)
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
 from app.i18n.language import detect_language, language_directive
 from app.i18n.replies import (
@@ -357,6 +364,50 @@ async def _dispatch(
     #    drug database (never the LLM). Only at NONE risk: any red-flag match
     #    stays on the symptom path so escalation is preserved. Fail-open.
     if risk == NONE:
+        # 5a) Combination questions ("can I take X and Y together") — the drug
+        # dataset has no interaction data, so instead of an ungrounded LLM
+        # answer or the generic fallback, name both items deterministically
+        # and route to a pharmacist. Fires only when at least one term is a
+        # verified medicine (so "honey and lemon" still reaches the LLM).
+        try:
+            pair = extract_interaction_query(message)
+            if pair and not all(t.lower() in NON_DRUG_TERMS for t in pair):
+                names: list[str] = []
+                matched_any = False
+                for raw in pair:
+                    hit = None
+                    if raw.lower() not in NON_DRUG_TERMS:
+                        async with db.begin_nested():
+                            hit = await find_drug(db, raw)
+                    names.append(hit.name if hit is not None else raw)
+                    matched_any = matched_any or hit is not None
+                if matched_any:
+                    t("Drug interaction question",
+                      f"'{names[0]}' + '{names[1]}' — deterministic "
+                      "check-with-pharmacist reply (no interaction data, "
+                      "no LLM)")
+                    await _write_receipt(
+                        db, user_id=user_id, session_id=session_id,
+                        message=message, model_name=provider.model_name,
+                        retrieved=None, grounding=None,
+                        grounding_status="n/a", used_rag=False,
+                    )
+                    return ChatResult(
+                        response_message=build_interaction_reply(*names),
+                        risk_level=risk,
+                        recommended_action="discuss_with_prescriber",
+                        provenance={
+                            "path": "drug_interaction_query",
+                            "drugs": names,
+                            "source": "drug_reference",
+                        },
+                        language=lang,
+                        trace=trace,
+                    )
+        except Exception:  # noqa: BLE001 — must never break a reply
+            logger.warning(
+                "drug interaction check failed; continuing", exc_info=True
+            )
         try:
             term = extract_drug_query_term(message)
             drug = None

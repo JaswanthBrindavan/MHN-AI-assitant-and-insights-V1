@@ -91,7 +91,17 @@ def build_system_prompt(
                 "pronouns like 'it'/'that' from the recent turns."
             )
     if compacted_context_json:
-        parts.append("COMPACTED_CONTEXT_JSON:\n" + compacted_context_json)
+        # The compacted summary lists topics/phrases DISCUSSED earlier in the
+        # conversation — including hypotheticals, questions about relatives,
+        # and this-session tests. Without this framing the model has presented
+        # discussed conditions as the reader's own medical history.
+        parts.append(
+            "COMPACTED_CONTEXT_JSON (topics, flags, and phrases mentioned "
+            "earlier in this conversation — NOT the reader's medical record; "
+            "a condition appearing here means it was discussed, not that the "
+            "reader has it; never present these as the reader's own "
+            "conditions or history):\n" + compacted_context_json
+        )
     if chunks:
         parts.append("Retrieved knowledge blocks:\n" + format_chunks(chunks))
     else:

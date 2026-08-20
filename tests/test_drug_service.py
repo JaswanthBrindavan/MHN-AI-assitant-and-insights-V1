@@ -23,7 +23,13 @@ from sqlalchemy import select
 from app.chat.orchestrator import handle_chat
 from app.chat.replies import HIGH_ESCALATION, MEDICATION_NOTE
 from app.chat.validation import validate_reply
-from app.drugs.service import build_drug_reply, extract_drug_query_term, find_drug
+from app.drugs.service import (
+    build_drug_reply,
+    build_interaction_reply,
+    extract_drug_query_term,
+    extract_interaction_query,
+    find_drug,
+)
 from app.llm.fake import FakeProvider
 from app.models.chat import RagTurnReceipt
 from app.models.knowledge import DrugReference
@@ -653,3 +659,141 @@ async def test_orchestrator_receipt_written_for_drug_turn(db_session):
     assert r.grounding is None
     # Hashes only — the raw message never appears on the receipt.
     assert message not in (r.query_hash + r.model_name + r.grounding_status)
+
+
+# --------------------------------------------------------------------------- #
+# Dose-suffix prefix window ("medrol 4" → "Medrol 4mg Tablet")
+# --------------------------------------------------------------------------- #
+async def test_find_dose_suffix_without_unit(db_session):
+    await _seed(db_session, _drug("Medrol 4mg Tablet"))
+    hit = await find_drug(db_session, "Medrol 4")
+    assert hit is not None and hit.name == "Medrol 4mg Tablet"
+
+
+async def test_find_dose_suffix_requires_digit_terminated_term(db_session):
+    # Short brand stems must still not swallow unrelated products.
+    await _seed(db_session, _drug("Panadol 500 Tablet"))
+    assert await find_drug(db_session, "pan") is None
+
+
+async def test_find_space_prefix_preferred_over_dose_suffix(db_session):
+    await _seed(db_session, _drug("Medrol 4 Tablet"), _drug("Medrol 4mg Tablet"))
+    hit = await find_drug(db_session, "medrol 4")
+    assert hit is not None and hit.name == "Medrol 4 Tablet"
+
+
+async def test_orchestrator_dose_suffix_drug_query(db_session):
+    await _seed(db_session, _drug("Medrol 4mg Tablet"))
+    provider = FakeProvider()
+    result = await handle_chat(
+        db_session, USER, "side effects of Medrol 4?", provider
+    )
+    assert result.provenance["path"] == "drug_query"
+    assert result.provenance["drug"] == "Medrol 4mg Tablet"
+    assert provider.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Interaction / combination questions
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "Can I take cetirizine and paracetamol together?",
+            ("cetirizine", "paracetamol"),
+        ),
+        ("can i take Gaviscon with alcohol", ("Gaviscon", "alcohol")),
+        ("Is it safe to take Sporlac with milk?", ("Sporlac", "milk")),
+        (
+            "does metformin interact with telmisartan",
+            ("metformin", "telmisartan"),
+        ),
+        (
+            "Can I take Dolo 650 and Crocin together?",
+            ("Dolo 650", "Crocin"),
+        ),
+    ],
+)
+def test_extract_interaction_pairs(message: str, expected: tuple[str, str]):
+    assert extract_interaction_query(message) == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Is it safe to take Sporlac during pregnancy?",
+        "Can I take metformin on an empty stomach?",
+        "side effects of dolo 650",
+        "what should I eat for breakfast",
+    ],
+)
+def test_extract_interaction_non_matches(message: str):
+    assert extract_interaction_query(message) is None
+
+
+def test_interaction_reply_validator_safe_and_has_note():
+    reply = build_interaction_reply("Cetirizine 10 Tablet", "Paracetamol 500")
+    assert MEDICATION_NOTE in reply
+    assert "pharmacist" in reply
+    assert validate_reply(reply, "none").ok
+
+
+async def test_orchestrator_interaction_query_deterministic(db_session):
+    await _seed(
+        db_session, _drug("Cetirizine 10 Tablet"), _drug("Paracetamol 500")
+    )
+    provider = FakeProvider()
+    result = await handle_chat(
+        db_session,
+        USER,
+        "Can I take cetirizine and paracetamol together?",
+        provider,
+    )
+    assert result.provenance["path"] == "drug_interaction_query"
+    assert result.provenance["drugs"] == [
+        "Cetirizine 10 Tablet",
+        "Paracetamol 500",
+    ]
+    assert result.recommended_action == "discuss_with_prescriber"
+    assert MEDICATION_NOTE in result.response_message
+    assert provider.calls == []
+
+
+async def test_orchestrator_interaction_with_alcohol(db_session):
+    await _seed(db_session, _drug("Gaviscon Syrup"))
+    provider = FakeProvider()
+    result = await handle_chat(
+        db_session, USER, "Can I take Gaviscon with alcohol?", provider
+    )
+    assert result.provenance["path"] == "drug_interaction_query"
+    # Alcohol is not looked up as a medicine; the raw term is kept.
+    assert result.provenance["drugs"] == ["Gaviscon Syrup", "alcohol"]
+    assert provider.calls == []
+
+
+async def test_orchestrator_interaction_unknown_terms_fall_through(
+    db_session, set_grounding_mode
+):
+    set_grounding_mode("log")
+    provider = FakeProvider()
+    result = await handle_chat(
+        db_session, USER, "Can I take honey and lemon together?", provider
+    )
+    # Neither term is a verified medicine → normal LLM path, not the shortcut.
+    assert result.provenance["path"] == "symptom_rag"
+    assert len(provider.calls) == 1
+
+
+async def test_orchestrator_interaction_respects_risk_floor(db_session):
+    await _seed(db_session, _drug("Dolo 650"))
+    provider = FakeProvider()
+    result = await handle_chat(
+        db_session,
+        USER,
+        "Can I take dolo 650 and crocin together? Also he passed out.",
+        provider,
+    )
+    assert result.risk_level == "emergency"
+    assert result.provenance["path"] == "triage_emergency"
+    assert provider.calls == []
