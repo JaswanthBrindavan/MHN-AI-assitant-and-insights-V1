@@ -45,6 +45,10 @@ class TriggerResult:
     accepted: bool
     run_id: str | None = None
     item_status: str | None = None  # "queued" | "failed" (publish_failed) | …
+    # Why a submission was NOT accepted ("not_configured", "http_401",
+    # "connect_error: …") — recorded in job_runs and surfaced to the client
+    # so a misconfigured trigger is diagnosable without server logs.
+    reason: str | None = None
 
 
 async def get_own_unclassified(
@@ -76,7 +80,7 @@ async def trigger_mhn_ai(
     """
     settings = get_settings()
     if not settings.mhn_ai_base_url:
-        return TriggerResult(accepted=False)
+        return TriggerResult(accepted=False, reason="not_configured")
     url = settings.mhn_ai_base_url.rstrip("/") + _RUNS_PATH
     headers = {"X-Request-Id": uuid.uuid4().hex}
     if settings.mhn_ai_token:
@@ -101,7 +105,9 @@ async def trigger_mhn_ai(
                 "mhn-ai run submission rejected: HTTP %s for doc %s",
                 resp.status_code, document_id,
             )
-            return TriggerResult(accepted=False)
+            return TriggerResult(
+                accepted=False, reason=f"http_{resp.status_code}"
+            )
         run_id: str | None = None
         item_status: str | None = None
         try:
@@ -115,12 +121,15 @@ async def trigger_mhn_ai(
         return TriggerResult(
             accepted=True, run_id=run_id, item_status=item_status
         )
-    except Exception:  # noqa: BLE001 — the chat turn must succeed regardless
+    except Exception as exc:  # noqa: BLE001 — the chat turn must succeed regardless
         logger.warning(
             "mhn-ai run submission failed for doc %s", document_id,
             exc_info=True,
         )
-        return TriggerResult(accepted=False)
+        return TriggerResult(
+            accepted=False,
+            reason=f"{type(exc).__name__}: {str(exc)[:120]}",
+        )
 
 
 async def submit_document(
@@ -139,6 +148,8 @@ async def submit_document(
     db.add(job)
     result = await trigger_mhn_ai(document_id, user_id, client=client)
     job.status = "success" if result.accepted else "trigger_failed"
+    if not result.accepted:
+        job.error = result.reason
     job.finished_at = utcnow()
     return result
 
@@ -157,3 +168,85 @@ def build_upload_reply(filename: str, triggered: bool) -> str:
         "could not be started right now. It stays safely in your records "
         "and can be processed later."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Reading a document's AI result (insights / section extraction) from mhn-ai
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class AiResultFetch:
+    ok: bool
+    #: Lifecycle status of the latest processing item, when the status call
+    #: succeeded ("completed", "classifying", "failed", …).
+    status: str | None = None
+    document_type: str | None = None
+    #: The full DocumentAiResult JSON, when the typed result call succeeded.
+    result: dict | None = None
+    reason: str | None = None
+
+
+async def fetch_ai_result(
+    document_id: int,
+    client: httpx.AsyncClient | None = None,
+) -> AiResultFetch:
+    """Pull a document's AI result from mhn-ai. Never raises.
+
+    Two verified calls: ``GET /v1/documents/{id}/status`` names the type the
+    result is readable under, then ``GET /v1/documents/{type}/{id}/ai-result``
+    returns it — insights for reports, section extraction for other types.
+    """
+    settings = get_settings()
+    if not settings.mhn_ai_base_url:
+        return AiResultFetch(ok=False, reason="not_configured")
+    base = settings.mhn_ai_base_url.rstrip("/")
+    headers = {"X-Request-Id": uuid.uuid4().hex}
+    if settings.mhn_ai_token:
+        headers["Authorization"] = f"Bearer {settings.mhn_ai_token}"
+
+    async def _get(c: httpx.AsyncClient, path: str) -> httpx.Response:
+        return await c.get(base + path, headers=headers)
+
+    try:
+        if client is not None:
+            status_resp = await _get(client, f"/v1/documents/{document_id}/status")
+        else:
+            async with httpx.AsyncClient(
+                timeout=settings.mhn_ai_timeout_seconds
+            ) as c:
+                status_resp = await _get(c, f"/v1/documents/{document_id}/status")
+        if status_resp.status_code != 200:
+            return AiResultFetch(
+                ok=False, reason=f"status_http_{status_resp.status_code}"
+            )
+        status_body = status_resp.json()
+        lifecycle = status_body.get("status")
+        doc_type = status_body.get("document_type")
+        if not doc_type:
+            # Not classified yet (or a type with no addressable result).
+            return AiResultFetch(ok=True, status=lifecycle, document_type=None)
+
+        path = f"/v1/documents/{doc_type}/{document_id}/ai-result"
+        if client is not None:
+            result_resp = await _get(client, path)
+        else:
+            async with httpx.AsyncClient(
+                timeout=settings.mhn_ai_timeout_seconds
+            ) as c:
+                result_resp = await _get(c, path)
+        if result_resp.status_code != 200:
+            return AiResultFetch(
+                ok=False, status=lifecycle, document_type=doc_type,
+                reason=f"result_http_{result_resp.status_code}",
+            )
+        return AiResultFetch(
+            ok=True, status=lifecycle, document_type=doc_type,
+            result=result_resp.json(),
+        )
+    except Exception as exc:  # noqa: BLE001 — the chat turn must succeed regardless
+        logger.warning(
+            "mhn-ai ai-result fetch failed for doc %s", document_id,
+            exc_info=True,
+        )
+        return AiResultFetch(
+            ok=False, reason=f"{type(exc).__name__}: {str(exc)[:120]}"
+        )
