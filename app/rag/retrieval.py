@@ -279,7 +279,27 @@ async def _hybrid_rank(
         for chunk_id, score in fused.items()
     ]
     scored.sort(key=lambda c: (-c.score, c.condition_code, c.chunk_type, c.id))
-    return scored[:k]
+
+    # --- MMR diversity rerank over the fused shortlist ---
+    # The fused top-k often carries near-duplicate chunks (the same section
+    # from overview + suggestions). Rerank the top 2k with maximal marginal
+    # relevance over the chunk embeddings so the k slots carry k different
+    # pieces of information. Fail-open: any surprise keeps the fused order.
+    try:
+        from app.rag.ranking import mmr_rerank
+
+        shortlist = scored[: max(k * 2, k)]
+        vectors = {
+            c.id: list(by_id[c.id].embedding)
+            for c in shortlist
+            if by_id[c.id].embedding is not None
+        }
+        order = mmr_rerank([c.id for c in shortlist], vectors, k)
+        by_chunk_id = {c.id: c for c in shortlist}
+        return [by_chunk_id[cid] for cid in order]
+    except Exception:  # noqa: BLE001 — reranking must never break retrieval
+        logger.warning("MMR rerank failed; keeping fused order", exc_info=True)
+        return scored[:k]
 
 
 async def retrieve_chunks(

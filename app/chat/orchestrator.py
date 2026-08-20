@@ -30,7 +30,9 @@ from app.chat.conversation import (
     maybe_compact,
 )
 from app.chat.data_handlers import (
+    handle_doctor_consult_query,
     handle_document_query,
+    handle_family_list_query,
     handle_metric_query,
     handle_suggestion_query,
     handle_summary_query,
@@ -278,25 +280,7 @@ async def _dispatch(
             trace=trace,
         )
 
-    # 4) Data query — serve stored insights/pedigree; never compute.
-    if intent == DATA_QUERY:
-        t("Intent", "question about the user's own records — serving stored data")
-        reply = await _data_query_reply(db, user_id)
-        await _write_receipt(
-            db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
-        )
-        return ChatResult(
-            response_message=reply,
-            risk_level=risk,
-            recommended_action="review_with_clinician",
-            provenance={"path": "data_query"},
-            language=lang,
-            trace=trace,
-        )
-
-    # 4.5) Deterministic data abilities — documents, tracker adds, metric
+    # 4) Deterministic data abilities — documents, tracker adds, metric
     #      pulls, health summaries, MCP suggestions. NONE risk only (the
     #      triage floor always wins) and fail-open: any crash falls through
     #      to the RAG path.
@@ -315,6 +299,12 @@ async def _dispatch(
                     ability = await handle_tracker_add(db, user_id, message)
                 if ability is None:
                     ability = await handle_document_query(db, user_id, message)
+                if ability is None:
+                    ability = await handle_family_list_query(db, user_id, message)
+                if ability is None:
+                    ability = await handle_doctor_consult_query(
+                        db, user_id, message
+                    )
                 if ability is None:
                     ability = await handle_metric_query(db, user_id, message)
                 if ability is None:
@@ -360,6 +350,27 @@ async def _dispatch(
         except Exception:  # noqa: BLE001 — abilities must never break a reply
             logger.warning("data ability failed; continuing", exc_info=True)
 
+    # 4.5) Data query — serve stored insights/pedigree; never compute. Runs
+    #      AFTER the abilities so a precise parse ("show me my last BP
+    #      reading" → metric pull) beats the generic data-path phrasing
+    #      ("show me my …") instead of being shadowed by it.
+    if intent == DATA_QUERY:
+        t("Intent", "question about the user's own records — serving stored data")
+        reply = await _data_query_reply(db, user_id)
+        await _write_receipt(
+            db, user_id=user_id, session_id=session_id, message=message,
+            model_name=provider.model_name, retrieved=None, grounding=None,
+            grounding_status="n/a", used_rag=False,
+        )
+        return ChatResult(
+            response_message=reply,
+            risk_level=risk,
+            recommended_action="review_with_clinician",
+            provenance={"path": "data_query"},
+            language=lang,
+            trace=trace,
+        )
+
     # 5) Drug-information question — deterministic reply from the validated
     #    drug database (never the LLM). Only at NONE risk: any red-flag match
     #    stays on the symptom path so escalation is preserved. Fail-open.
@@ -372,14 +383,17 @@ async def _dispatch(
         try:
             pair = extract_interaction_query(message)
             if pair and not all(t.lower() in NON_DRUG_TERMS for t in pair):
-                names: list[str] = []
+                # Reply with the USER'S OWN terms, not the canonical product
+                # names — a composition match can resolve "ibuprofen" to an
+                # obscure brand, and answering about that brand reads wrong.
+                # The lookup is only the is-this-a-medicine gate.
+                names: list[str] = list(pair)
                 matched_any = False
                 for raw in pair:
                     hit = None
                     if raw.lower() not in NON_DRUG_TERMS:
                         async with db.begin_nested():
                             hit = await find_drug(db, raw)
-                    names.append(hit.name if hit is not None else raw)
                     matched_any = matched_any or hit is not None
                 if matched_any:
                     t("Drug interaction question",
@@ -593,7 +607,9 @@ async def _dispatch(
 
     # A provider outage must degrade to the deterministic safe reply, never
     # crash a patient-facing endpoint.
-    t("Generate", f"asking the model ({provider.model_name})")
+    # The provider/model identity is never disclosed — not in replies (the
+    # validator enforces that) and not here in the user-visible trace either.
+    t("Generate", "asking the assistant")
     try:
         answer = await provider.generate(system=system, user=message)
     except Exception:  # noqa: BLE001 — fail open

@@ -139,11 +139,15 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     if prefix:
         return _first_active(prefix)
 
-    # Dose-without-unit forms: "medrol 4" must find "Medrol 4mg Tablet", where
-    # the space-anchored prefix above cannot ("medrol 4 %" ≠ "medrol 4mg …").
-    # Only terms ending in a digit get this looser window so short brand stems
-    # ("pan") still cannot swallow unrelated products ("panadol").
-    if re.search(r"\d$", norm):
+    # Looser prefix windows, in order of confidence:
+    #   * dose-without-unit forms — "medrol 4" must find "Medrol 4mg Tablet",
+    #     where the space-anchored prefix above cannot ("medrol 4 %" ≠
+    #     "medrol 4mg …");
+    #   * bare brand stems ≥4 chars — "digene"/"moov"/"volini" must find
+    #     "Digene Acidity & Gas Relief …" even when the DB name never has the
+    #     stem as its own word. Short stems ("pan") stay excluded so they
+    #     cannot swallow unrelated products ("panadol").
+    if re.search(r"\d$", norm) or len(norm) >= 4:
         dose_prefix = list(
             (
                 await db.execute(
@@ -193,12 +197,12 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
 def build_drug_reply(drug: DrugReference) -> str:
     """A deterministic, validator-safe drug-information reply."""
     parts: list[str] = []
+    # No manufacturer: it adds nothing a patient can act on, and the reply
+    # should read like drug information, not a product listing.
     comp = ", ".join(c for c in (drug.composition1, drug.composition2) if c)
     intro = f"{drug.name}"
     if comp:
         intro += f" contains {comp}"
-    if drug.manufacturer:
-        intro += f" (manufactured by {drug.manufacturer})"
     parts.append(intro + ".")
 
     uses = [u for u in (drug.uses or []) if u][:MAX_LIST_ITEMS]

@@ -444,8 +444,11 @@ def test_reply_intro_composition_and_manufacturer():
     reply = build_drug_reply(_full_drug())
     assert (
         "Augmentin 625 Duo Tablet contains Amoxycillin (500mg), "
-        "Clavulanic Acid (125mg) (manufactured by GSK Pharmaceuticals Ltd)."
+        "Clavulanic Acid (125mg)."
     ) in reply
+    # The manufacturer is deliberately omitted — patients cannot act on it.
+    assert "manufactured" not in reply
+    assert "GSK" not in reply
 
 
 def test_reply_composition2_only():
@@ -751,10 +754,8 @@ async def test_orchestrator_interaction_query_deterministic(db_session):
         provider,
     )
     assert result.provenance["path"] == "drug_interaction_query"
-    assert result.provenance["drugs"] == [
-        "Cetirizine 10 Tablet",
-        "Paracetamol 500",
-    ]
+    # The reply uses the USER'S terms, not canonical product names.
+    assert result.provenance["drugs"] == ["cetirizine", "paracetamol"]
     assert result.recommended_action == "discuss_with_prescriber"
     assert MEDICATION_NOTE in result.response_message
     assert provider.calls == []
@@ -767,8 +768,7 @@ async def test_orchestrator_interaction_with_alcohol(db_session):
         db_session, USER, "Can I take Gaviscon with alcohol?", provider
     )
     assert result.provenance["path"] == "drug_interaction_query"
-    # Alcohol is not looked up as a medicine; the raw term is kept.
-    assert result.provenance["drugs"] == ["Gaviscon Syrup", "alcohol"]
+    assert result.provenance["drugs"] == ["Gaviscon", "alcohol"]
     assert provider.calls == []
 
 

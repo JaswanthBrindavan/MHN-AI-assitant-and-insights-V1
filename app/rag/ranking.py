@@ -76,3 +76,55 @@ def rrf_fuse(
         for rank, item_id in enumerate(ranking, start=1):
             fused[item_id] = fused.get(item_id, 0.0) + 1.0 / (k_i + rank)
     return fused
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def mmr_rerank(
+    ranked_ids: list[str],
+    vectors: dict[str, list[float]],
+    k: int,
+    lam: float = 0.75,
+) -> list[str]:
+    """Maximal-marginal-relevance rerank over an already relevance-ordered list.
+
+    Balances staying near the fused relevance order (weight ``lam``) against
+    penalising candidates too similar to chunks already selected — so the k
+    slots carry k different pieces of information instead of four restatements
+    of the same section. Deterministic; ids without a vector keep their fused
+    position unpenalised. Relevance is taken from the input ORDER (reciprocal
+    rank), so the caller's fusion scoring stays the single source of truth.
+    """
+    if k <= 0 or not ranked_ids:
+        return []
+    relevance = {cid: 1.0 / (i + 1) for i, cid in enumerate(ranked_ids)}
+    selected: list[str] = []
+    remaining = list(ranked_ids)
+    while remaining and len(selected) < k:
+        best_id, best_score = None, None
+        for cid in remaining:
+            penalty = 0.0
+            vec = vectors.get(cid)
+            if vec is not None and selected:
+                penalty = max(
+                    (
+                        _cosine(vec, vectors[sid])
+                        for sid in selected
+                        if vectors.get(sid) is not None
+                    ),
+                    default=0.0,
+                )
+            score = lam * relevance[cid] - (1.0 - lam) * penalty
+            if best_score is None or score > best_score:
+                best_id, best_score = cid, score
+        assert best_id is not None
+        selected.append(best_id)
+        remaining.remove(best_id)
+    return selected

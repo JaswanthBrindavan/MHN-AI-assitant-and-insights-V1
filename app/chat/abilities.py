@@ -492,3 +492,37 @@ def parse_suggestion_query(message: str) -> SuggestionQuery | None:
     if _SUGGESTION_RE.search(message):
         return SuggestionQuery(raw_message=message)
     return None
+
+
+# --------------------------------------------------------------------------- #
+# App-data lookups: family connections & doctor consults
+# --------------------------------------------------------------------------- #
+# "my family history" belongs to the insights data path, so these patterns
+# anchor on connect/members/who-phrasing and never on "family" alone.
+_FAMILY_LIST_RE = re.compile(
+    r"\bwho(?:\s+all)?(?:\s+(?:is|are))?(?:\s+there)?\s+in\s+my\s+family\b"
+    r"(?!\s+histor)"
+    r"|\bmy\s+family\s+connect(?:ion)?s?\b"
+    r"|\blist\s+my\s+family\b"
+    r"|\bmy\s+family\s+members\b"
+    r"|\bwho\s+am\s+i\s+connected\s+(?:to|with)\b",
+    re.IGNORECASE,
+)
+
+_DOCTOR_CONSULT_RE = re.compile(
+    r"\b(?:whom|who|which\s+doctor)\s+did\s+i\s+(?:last\s+)?"
+    r"(?:consult|see|visit)\b"
+    r"|\bmy\s+(?:last|latest|recent)\s+(?:doctor\s+)?consult(?:ation)?s?\b"
+    r"|\bmy\s+doctor\s+connect(?:ion)?s?\b"
+    r"|\bwho\s+(?:is|are)\s+my\s+doctors?\b"
+    r"|\bwhich\s+doctors?\s+am\s+i\s+connected\s+(?:to|with)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_family_list_query(message: str) -> bool:
+    return bool(_FAMILY_LIST_RE.search(message))
+
+
+def parse_doctor_consult_query(message: str) -> bool:
+    return bool(_DOCTOR_CONSULT_RE.search(message))

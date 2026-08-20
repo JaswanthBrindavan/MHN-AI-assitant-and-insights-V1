@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,6 +50,10 @@ class DocumentHit:
     # AI classification title (content.ai.classification.title) — production
     # scans have no name column, so this is their canonical display name.
     title: str | None = None
+    # Production's public identifier (a ddl-auto ``uuid`` column the app's
+    # file routes address; the serial ``id`` is internal). None on databases
+    # that predate the column — clients then fall back to the serial id.
+    doc_uuid: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +201,33 @@ async def can_view_document(
     return resource_id not in denied.get(resource_type, set())
 
 
+async def _document_uuids(
+    db: AsyncSession, model, ids: list[int]
+) -> dict[int, str]:
+    """id → public uuid for the given document rows.
+
+    The ``uuid`` column is a production ddl-auto addition and is not in the
+    baseline schema, so it is read with raw SQL inside a SAVEPOINT and fails
+    open to {} on databases (sqlite tests, older dumps) that lack it.
+    """
+    if not ids:
+        return {}
+    table = model.__tablename__
+    try:
+        async with db.begin_nested():
+            rows = (
+                await db.execute(
+                    sa.text(
+                        f'SELECT id, uuid FROM {table} WHERE id IN :ids'  # noqa: S608 — table name from our own model registry
+                    ).bindparams(sa.bindparam("ids", expanding=True)),
+                    {"ids": ids},
+                )
+            ).all()
+        return {int(i): str(u) for i, u in rows if u is not None}
+    except Exception:  # noqa: BLE001 — column may not exist on this database
+        return {}
+
+
 async def latest_documents(
     db: AsyncSession,
     owner_id: uuid.UUID,
@@ -230,9 +262,9 @@ async def latest_documents(
             )
         ).scalars().all()
         denied_ids = denied.get(_RESOURCE_TYPE.get(kind, kind), set())
-        for r in rows:
-            if r.id in denied_ids:
-                continue
+        kept = [r for r in rows if r.id not in denied_ids]
+        uuids = await _document_uuids(db, model, [r.id for r in kept])
+        for r in kept:
             hits.append(
                 DocumentHit(
                     kind=kind,
@@ -241,6 +273,7 @@ async def latest_documents(
                     created_at=r.created_at,
                     owner_label=owner_label,
                     title=_ai_title(getattr(r, "content", None)),
+                    doc_uuid=uuids.get(r.id),
                 )
             )
     hits.sort(
@@ -582,3 +615,127 @@ async def recent_lab_values(
             if len(out) >= max_values:
                 return out
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Family connections & doctor consults (read-only app-data lookups)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class FamilyMemberInfo:
+    name: str | None
+    relation: str | None  # from the viewer's perspective
+    accepted: bool
+    shares_documents: bool
+
+
+async def list_family_connections(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[FamilyMemberInfo]:
+    """Everyone in the user's Family Connect, with the viewer-side relation
+    name and whether the other person currently shares documents."""
+    rows = (
+        await db.execute(
+            select(FamilyConnect, Relation)
+            .join(Relation, FamilyConnect.relation_id == Relation.id, isouter=True)
+            .where(
+                (FamilyConnect.requester_id == user_id)
+                | (FamilyConnect.acceptor_id == user_id)
+            )
+            .order_by(FamilyConnect.id)
+        )
+    ).all()
+    other_ids = [
+        fc.acceptor_id if fc.requester_id == user_id else fc.requester_id
+        for fc, _rel in rows
+    ]
+    names: dict[uuid.UUID, str] = {}
+    if other_ids:
+        try:
+            from app.models.core import User
+
+            for uid, uname in (
+                await db.execute(
+                    select(User.id, User.name).where(User.id.in_(other_ids))
+                )
+            ).all():
+                names[uid] = uname
+        except Exception:  # noqa: BLE001 — user table may be absent standalone
+            names = {}
+    out: list[FamilyMemberInfo] = []
+    for fc, rel in rows:
+        viewer_is_requester = fc.requester_id == user_id
+        other = fc.acceptor_id if viewer_is_requester else fc.requester_id
+        relation = None
+        if rel is not None:
+            relation = rel.name if viewer_is_requester else rel.inverse
+        shares = _owner_read_grant(
+            fc, owner_is_requester=not viewer_is_requester
+        )
+        out.append(
+            FamilyMemberInfo(
+                name=names.get(other),
+                relation=relation,
+                accepted=bool(fc.accepted),
+                shares_documents=bool(fc.accepted) and shares,
+            )
+        )
+    return out
+
+
+@dataclass(frozen=True)
+class ConsultInfo:
+    doctor_name: str | None
+    specialization: str | None
+    connected_at: datetime | None
+    status: str  # "connected" | "pending"
+
+
+async def recent_doctor_consults(
+    db: AsyncSession, user_id: uuid.UUID, limit: int = 5
+) -> list[ConsultInfo]:
+    """The user's doctor connections through the app, newest first."""
+    from app.models.coredata import Doctor, DoctorConnect, DoctorSpecialization
+
+    rows = (
+        await db.execute(
+            select(DoctorConnect, Doctor, DoctorSpecialization)
+            .join(Doctor, DoctorConnect.doctor_id == Doctor.id)
+            .join(
+                DoctorSpecialization,
+                Doctor.specialization_id == DoctorSpecialization.id,
+                isouter=True,
+            )
+            .where(DoctorConnect.user_id == user_id)
+            .order_by(
+                DoctorConnect.created_at.desc().nulls_last(), DoctorConnect.id.desc()
+            )
+            .limit(limit)
+        )
+    ).all()
+    doctor_user_ids = [d.user_id for _dc, d, _sp in rows]
+    names: dict[uuid.UUID, str] = {}
+    if doctor_user_ids:
+        try:
+            from app.models.core import User
+
+            for uid, uname in (
+                await db.execute(
+                    select(User.id, User.name).where(User.id.in_(doctor_user_ids))
+                )
+            ).all():
+                names[uid] = uname
+        except Exception:  # noqa: BLE001
+            names = {}
+    return [
+        ConsultInfo(
+            doctor_name=names.get(d.user_id),
+            specialization=sp.name if sp is not None else None,
+            connected_at=dc.created_at,
+            status=(
+                "connected"
+                if dc.doctor_acceptance and dc.user_acceptance
+                else "pending"
+            ),
+        )
+        for dc, d, sp in rows
+    ]

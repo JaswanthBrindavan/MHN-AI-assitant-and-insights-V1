@@ -28,6 +28,9 @@ from app.models.core import (
 # Core-app partial mappings (external tables; excluded from our migrations).
 from app.models.coredata import (
     BodyMeasurement,
+    Doctor,
+    DoctorConnect,
+    DoctorSpecialization,
     FamilyConnect,
     FamilyFileAccess,
     LifestyleLog,
@@ -68,6 +71,9 @@ __all__ = [
     "DrugReference",
     "Report",
     "UnclassifiedFile",
+    "Doctor",
+    "DoctorConnect",
+    "DoctorSpecialization",
     "ScanImaging",
     "Prescription",
     "Vaccination",

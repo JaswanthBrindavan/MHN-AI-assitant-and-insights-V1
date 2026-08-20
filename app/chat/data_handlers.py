@@ -22,7 +22,9 @@ from app.chat.abilities import (
     StatedValue,
     SummaryQuery,
     TrackerAdd,
+    parse_doctor_consult_query,
     parse_document_query,
+    parse_family_list_query,
     parse_metric_query,
     parse_stated_value,
     parse_suggestion_query,
@@ -36,6 +38,8 @@ from app.coredata.service import (
     latest_documents,
     latest_vital,
     lifestyle_totals,
+    list_family_connections,
+    recent_doctor_consults,
     resolve_family_member,
     vital_series,
     window_start,
@@ -358,7 +362,10 @@ async def handle_document_query(
         {
             "kind": h.kind,
             "resource_type": _RESOURCE_TYPE.get(h.kind, h.kind),
-            "id": h.doc_id,
+            # The app's file routes address the production `uuid` column, not
+            # the internal serial id — send the uuid whenever the database
+            # has one, and only fall back to the serial id without it.
+            "id": h.doc_uuid or h.doc_id,
             "title": h.title or h.filepath.rsplit("/", 1)[-1],
             "date": h.created_at.isoformat() if h.created_at else None,
             "owner": h.owner_label,
@@ -399,9 +406,12 @@ async def handle_tracker_add(
         add.day_offset, f"{add.day_offset} days ago"
     )
     qty = f"{add.quantity:g}"
-    unit = add.unit if add.quantity == 1 else add.unit + (
-        "" if add.unit.endswith("s") else "s"
-    )
+    if add.quantity == 1:
+        unit = add.unit
+    elif add.unit.endswith(("s", "sh", "ch", "x")):
+        unit = add.unit + "es"  # glass → glasses
+    else:
+        unit = add.unit + "s"
     note = ""
     if add.log_type == "smoking":
         note = (
@@ -776,4 +786,91 @@ async def handle_suggestion_query(
             }
             for r in rows
         ],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Family connections & doctor consults
+# --------------------------------------------------------------------------- #
+async def handle_family_list_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    if not parse_family_list_query(message):
+        return None
+    members = await list_family_connections(db, user_id)
+    if not members:
+        return {
+            "reply": (
+                "You don't have any family connections yet. You can invite "
+                "family members from the Family Connect section of the app."
+            ),
+            "action": "none",
+            "provenance": {"path": "family_connections", "found": 0},
+        }
+    lines = []
+    for m in members:
+        who = m.name or "A family member"
+        rel = f" — your {m.relation}" if m.relation else ""
+        if not m.accepted:
+            status = "invitation pending"
+        elif m.shares_documents:
+            status = "shares documents with you"
+        else:
+            status = "connected"
+        lines.append(f"• {who}{rel} ({status})")
+    n = len(members)
+    lead = (
+        f"You have {n} {'person' if n == 1 else 'people'} in your "
+        "Family Connect:"
+    )
+    return {
+        "reply": lead + "\n" + "\n".join(lines),
+        "action": "none",
+        "provenance": {"path": "family_connections", "found": n},
+    }
+
+
+async def handle_doctor_consult_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    if not parse_doctor_consult_query(message):
+        return None
+    consults = await recent_doctor_consults(db, user_id)
+    if not consults:
+        return {
+            "reply": (
+                "I couldn't find any doctor consultations through the app "
+                "yet. You can connect with a doctor from the Doctor Connect "
+                "section."
+            ),
+            "action": "none",
+            "provenance": {"path": "doctor_consults", "found": 0},
+        }
+    latest = consults[0]
+    who = latest.doctor_name or "a doctor"
+    spec = f" ({latest.specialization})" if latest.specialization else ""
+    when = (
+        f" on {latest.connected_at.strftime('%d %b %Y')}"
+        if latest.connected_at
+        else ""
+    )
+    if latest.status == "connected":
+        lead = f"Your most recent doctor connection is {who}{spec}, connected{when}."
+    else:
+        lead = (
+            f"Your most recent doctor request is with {who}{spec}, "
+            f"still pending acceptance{when}."
+        )
+    extra = ""
+    if len(consults) > 1:
+        others = []
+        for c in consults[1:4]:
+            nm = c.doctor_name or "a doctor"
+            sp = f" ({c.specialization})" if c.specialization else ""
+            others.append(f"• {nm}{sp} — {c.status}")
+        extra = "\nOther doctor connections:\n" + "\n".join(others)
+    return {
+        "reply": lead + extra,
+        "action": "none",
+        "provenance": {"path": "doctor_consults", "found": len(consults)},
     }

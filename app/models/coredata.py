@@ -35,6 +35,9 @@ def _pg_enum(name: str, *values: str):
 # EXTERNAL_TABLES in app.models.core).
 COREDATA_TABLES = {
     "unclassified_files",
+    "doctor",
+    "doctor_connect",
+    "doctor_specialization",
     "reports",
     "scans_imaging",
     "prescriptions",
@@ -285,6 +288,46 @@ class Relation(Base):
     id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
     name: Mapped[str] = mapped_column(sa.String(100), nullable=False)
     inverse: Mapped[str] = mapped_column(sa.String(100), nullable=False)
+
+
+class Doctor(Base):
+    """Partial mapping of the core app's doctor directory (read-only)."""
+
+    __tablename__ = "doctor"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    verified: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    specialization_id: Mapped[int | None] = mapped_column(
+        sa.Integer, nullable=True
+    )
+
+
+class DoctorSpecialization(Base):
+    __tablename__ = "doctor_specialization"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+
+
+class DoctorConnect(Base):
+    """Partial mapping of doctor-patient connections (read-only). A consult
+    relationship exists once both sides have accepted."""
+
+    __tablename__ = "doctor_connect"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    doctor_id: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    doctor_acceptance: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True
+    )
+    user_acceptance: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True
+    )
+    created_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
 
 
 class FamilyFileAccess(Base):

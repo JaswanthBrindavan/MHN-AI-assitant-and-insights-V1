@@ -62,6 +62,11 @@ _ALIAS_STOPLIST = {
     "burning", "itching", "swelling", "growth", "spots", "patches",
     "attack", "failure", "disease", "disorder", "syndrome", "infection",
     "deficiency", "excess",
+    # Abortion-type qualifiers that arrive as single-word aliases from the
+    # corpus ("missed / threatened / induced abortion"). As bare words they
+    # hijack everyday sentences — "I missed my dose" must never scope to
+    # Miscarriage.
+    "missed", "threatened", "induced", "elective",
 }
 
 
