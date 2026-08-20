@@ -33,6 +33,29 @@ _IDENTITY_TERMS = (
     "are you human",
     "what can you do",
 )
+# Questions about the underlying AI model/provider ("what model are you",
+# "are you chatgpt", "who built you"). Routed to the canned identity reply so
+# the provider/model is never disclosed and no LLM is involved. Every branch
+# is word-boundaried and anchored on you/this so clinical text never matches:
+# "my SGPT level" (liver enzyme), "what model of BP monitor do you recommend",
+# "is this claudication" must all stay on their normal paths.
+_MODEL_QUESTION_RE = re.compile(
+    r"\b(?:what|which)\s+(?:ai\s+)?(?:model|llm|ai|chatbot)\b[^.?!]{0,30}?"
+    r"\b(?:are\s+you|is\s+this|do\s+you\s+(?:use|run)|you\s+(?:use|run|based)"
+    r"|powers?\s+(?:you|this))\b"
+    r"|\b(?:are\s+you|is\s+this)\b[^.?!]{0,40}?"
+    r"\b(?:chatgpt|gpt-\d[\w.-]*|claude|gemini|llama|mistral|deepseek|grok"
+    r"|copilot|an?\s+ai|a\s+bot|a\s+robot|an?\s+llm"
+    r"|an?\s+(?:large\s+)?language\s+model)\b"
+    r"|\bwho\s+(?:made|built|created|developed|trained|designed|owns|runs)\s+you\b"
+    r"|\bwhat\s+(?:are\s+you|is\s+this)\s+(?:built|powered|made|running|based"
+    r"|trained)\s+(?:on|by|with)\b"
+    r"|\b(?:built|powered|based|runs?|running|trained)\s+on\s+"
+    r"(?:chatgpt|gpt|claude|openai|anthropic|gemini|google|llama|mistral)\b"
+    r"|\bdo\s+you\s+use\s+(?:chatgpt|gpt|claude|openai|anthropic|gemini|llama)\b"
+    r"|\b(?:anthropic|openai)\b",
+    re.IGNORECASE,
+)
 # Signals the user is asking about their OWN stored data.
 _DATA_QUERY_TERMS = (
     "my insights",
@@ -58,7 +81,11 @@ def route(message: str, triage_matched: bool) -> str:
         return SYMPTOM_RAG
 
     text = message.lower()
-    if _matches(text, _IDENTITY_TERMS) or _GREETING_RE.match(message):
+    if (
+        _matches(text, _IDENTITY_TERMS)
+        or _MODEL_QUESTION_RE.search(message)
+        or _GREETING_RE.match(message)
+    ):
         return CONVERSATIONAL
     if _matches(text, _DATA_QUERY_TERMS):
         return DATA_QUERY
@@ -67,4 +94,7 @@ def route(message: str, triage_matched: bool) -> str:
 
 def is_identity_question(message: str) -> bool:
     """Distinguish an identity question from a plain greeting."""
-    return _matches(message.lower(), _IDENTITY_TERMS)
+    return bool(
+        _matches(message.lower(), _IDENTITY_TERMS)
+        or _MODEL_QUESTION_RE.search(message)
+    )

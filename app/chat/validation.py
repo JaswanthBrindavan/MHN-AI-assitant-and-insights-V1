@@ -166,6 +166,17 @@ _BANNED_SUBSTRINGS = (
     "caused by your medication",
 )
 
+# The underlying model/provider must never be named to the user — Davi answers
+# identity questions deterministically as "Davi" (router + canned reply), and
+# this is the last line of defense if a leak slips into generated text.
+# Word-boundaried: "SGPT" (liver enzyme) and "claudication" must never match.
+_PROVIDER_LEAK_RE = re.compile(
+    r"\b(?:anthropic|openai|chatgpt|gpt-\d[\w.-]*|claude|gemini|deepseek"
+    r"|mistral|grok|copilot)\b"
+    r"|\b(?:large\s+)?language\s+model\b",
+    re.IGNORECASE,
+)
+
 # Markers that count as an escalation directive at HIGH/EMERGENCY.
 _ESCALATION_MARKERS = (
     "emergency",
@@ -200,6 +211,8 @@ def find_banned(
     for phrase in _BANNED_SUBSTRINGS:
         if phrase in low:
             return phrase
+    if _PROVIDER_LEAK_RE.search(text):
+        return "provider-leak"
     if _DIAGNOSTIC_RE.search(text):
         return "diagnostic-assertion"
     if extra_conditions:

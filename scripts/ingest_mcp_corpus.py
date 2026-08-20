@@ -150,6 +150,12 @@ async def ingest_mcp_folder(db: AsyncSession, folder: Path) -> dict:
         if vectors:
             stats["embedded"] += len(vectors)
         await db.flush()
+        if stats["ingested"] % 25 == 0:
+            print(
+                f"  progress: {stats['ingested']}/{len(files)} conditions, "
+                f"{stats['chunks']} chunks, {stats['embedded']} embedded",
+                flush=True,
+            )
 
     reset_index_cache()
     return stats

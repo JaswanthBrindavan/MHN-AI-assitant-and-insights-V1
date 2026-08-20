@@ -121,6 +121,11 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
 - **Fail open**: grounding/validation/receipts/compaction/provider crashes →
   safe reply + WARNING, never an exception to the caller.
 - **No PHI in logs / receipts**: receipts store SHA-256 of the message only.
+- **Identity privacy**: the underlying model/provider is never disclosed.
+  Model/provider questions route to the canned identity reply (no LLM); the
+  system prompt forbids naming providers; the validator bans provider names in
+  generated text (`provider-leak`) — word-boundaried so SGPT/claudication and
+  "what model of BP monitor" stay on their normal paths.
 - **Drug path is deterministic**: drug-information questions are answered from
   drug_reference (never the LLM), only at NONE risk (the triage floor wins),
   gated by NON_DRUG_TERMS, with ordered candidate windows for reproducibility.

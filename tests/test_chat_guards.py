@@ -122,6 +122,15 @@ def test_guard_modules_have_no_llm_imports():
     ]
     for f in files:
         src = f.read_text().lower()
-        assert "import" in src  # sanity: file has imports
-        for banned in ("ollama", "openai", "httpx", "llmprovider", "app.llm"):
-            assert banned not in src, f"{f.name} references {banned}"
+        # Only IMPORT lines matter: brand names may appear as DATA (the
+        # identity router matches "are you chatgpt/openai" etc.), but no
+        # guard module may import an LLM client or the app.llm package.
+        import_lines = [
+            line.strip()
+            for line in src.splitlines()
+            if line.strip().startswith(("import ", "from "))
+        ]
+        assert import_lines  # sanity: file has imports
+        for line in import_lines:
+            for banned in ("ollama", "openai", "httpx", "llmprovider", "app.llm"):
+                assert banned not in line, f"{f.name} imports {banned}: {line}"
