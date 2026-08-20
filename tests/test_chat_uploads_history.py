@@ -623,3 +623,51 @@ async def test_ai_result_handler_renders_section_extraction(
     assert out is not None
     assert "vaccine name: Tetanus" in out["reply"]
     assert "dates out of order" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_ai_result_handler_follows_filed_document(db_session, monkeypatch):
+    """After mhn-ai files a document the unclassified row is DELETED — the
+    handler must recover the pipeline id from the filed row's content.ai
+    envelope (assembly writes the original document_id there)."""
+    from app.models.coredata import Report
+
+    db_session.add(Report(
+        user_id=USER, filepath="reports/relocated-uuid.pdf",
+        content={"ai": {
+            "schema_version": "2.1", "state": "complete", "document_id": 42,
+            "classification": {"title": "Lab Results"},
+        }},
+        private=False, created_at=utcnow(),
+    ))
+    await db_session.flush()
+    seen: dict = {}
+
+    async def _done(document_id, client=None):
+        seen["id"] = document_id
+        return AiResultFetch(ok=True, status="completed",
+            document_type="reports", result={
+                "classification": {"title": "Lab Results"},
+                "extraction": {"results": [
+                    {"test_name": "Hemoglobin", "value": "10.2",
+                     "unit": "g/dL", "abnormal_flag": "low"},
+                ]},
+            })
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _done)
+    out = await handle_ai_result_query(
+        db_session, USER, "get insights for this report"
+    )
+    assert out is not None
+    assert seen["id"] == 42  # the ORIGINAL pipeline id, not the reports row id
+    assert "Hemoglobin: 10.2 g/dL — low" in out["reply"]
+    assert out["action"] == "discuss_with_clinician"
+
+
+def test_upload_reply_never_alarms():
+    # Spring submits every upload itself — a failed redundant trigger must
+    # not read as "classification is not running".
+    for triggered in (True, False):
+        reply = build_upload_reply("x.pdf", triggered)
+        assert "could not be started" not in reply
+        assert "queued for automatic processing" in reply
