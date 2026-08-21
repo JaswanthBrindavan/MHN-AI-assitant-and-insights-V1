@@ -773,3 +773,56 @@ async def test_ai_result_falls_back_to_envelope_when_unreachable(
     assert "Cholesterol values are borderline." in out["reply"]
     assert out["provenance"]["source"] == "content_envelope"
     assert out["action"] == "discuss_with_clinician"
+
+
+@pytest.mark.asyncio
+async def test_ai_result_this_means_the_previous_turns_document(
+    db_session, monkeypatch
+):
+    """"Give insights for this" right after a document listing must target the
+    LISTED document — not whatever was uploaded or filed most recently."""
+    from app.chat.conversation import add_message, ensure_session
+    from app.models.coredata import Report, ScanImaging
+
+    referenced = Report(
+        user_id=USER, filepath="reports/blood.pdf",
+        content={"ai": {"document_id": 42,
+                        "classification": {"title": "Laboratory Test Results"}}},
+        private=False, created_at=utcnow(),
+    )
+    # A NEWER unrelated document that the old resolution would have chosen.
+    newer = ScanImaging(
+        user_id=USER, filepath="scans_imaging/dexa.pdf",
+        content={"ai": {"document_id": 99,
+                        "classification": {"title": "DEXA Scan Report"}}},
+        private=False, created_at=utcnow(),
+    )
+    db_session.add_all([referenced, newer])
+    await db_session.flush()
+
+    sid = await ensure_session(db_session, USER, None)
+    await add_message(db_session, sid, "user", "show me my latest blood report")
+    await add_message(
+        db_session, sid, "assistant", "Here is the most recent document…",
+        extracted_intent={"documents": [{
+            "kind": "report", "resource_type": "reports", "id": referenced.id,
+            "title": "Laboratory Test Results", "owner": "you",
+        }]},
+    )
+    seen: dict = {}
+
+    async def _done(document_id, client=None):
+        seen["id"] = document_id
+        return AiResultFetch(ok=True, status="completed",
+            document_type="reports", result={
+                "classification": {"title": "Laboratory Test Results"},
+                "insights": {"summary": "Values look stable.", "insights": []},
+            })
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _done)
+    out = await handle_ai_result_query(
+        db_session, USER, "give insights for this", session_id=sid
+    )
+    assert out is not None
+    assert seen["id"] == 42  # the LISTED report, not the newer DEXA (99)
+    assert "Values look stable." in out["reply"]

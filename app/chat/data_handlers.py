@@ -929,7 +929,10 @@ async def handle_doctor_consult_query(
 # Document AI results — pulled from mhn-ai, never generated here
 # --------------------------------------------------------------------------- #
 async def handle_ai_result_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    session_id: uuid.UUID | None = None,
 ) -> dict | None:
     """"Get insights for this report" → mhn-ai's ai-result for the user's
     most recent upload. Insights for reports; section extraction for other
@@ -940,7 +943,9 @@ async def handle_ai_result_query(
     from app.documents.service import fetch_ai_result
     from app.models.coredata import UnclassifiedFile
 
-    # Resolve "this report" to a pipeline document id. Two places to look:
+    # Resolve "this report" to a pipeline document id, in order:
+    #   0. the document the CONVERSATION is about — the last reply in this
+    #      session that carried document cards (persisted in message meta);
     #   1. a still-unclassified upload (processing not finished — the row is
     #      deleted when mhn-ai files the document);
     #   2. otherwise the newest FILED document, whose content.ai envelope
@@ -949,7 +954,56 @@ async def handle_ai_result_query(
     document_id: int | None = None
     envelope_ai: dict | None = None
     name = "your document"
-    row = (
+
+    if session_id is not None:
+        from app.models.chat import ConversationMessage
+
+        recent = (
+            await db.execute(
+                select(ConversationMessage)
+                .where(
+                    ConversationMessage.session_id == session_id,
+                    ConversationMessage.role == "assistant",
+                )
+                .order_by(
+                    ConversationMessage.created_at.desc(),
+                    ConversationMessage.id.desc(),
+                )
+                .limit(10)
+            )
+        ).scalars().all()
+        _CARD_MODELS = {model.__tablename__: model
+                        for model, _lbl in DOCUMENT_KINDS.values()}
+        for m in recent:
+            cards = ((m.extracted_intent or {}).get("documents")) or []
+            if not cards:
+                continue
+            card = cards[0]
+            card_id = card.get("id")
+            rtype = card.get("resource_type")
+            if not isinstance(card_id, int):
+                break
+            if rtype == "unclassified":
+                # A pending upload's card id IS the pipeline document id.
+                document_id = card_id
+                name = str(card.get("title") or name)
+            else:
+                model = _CARD_MODELS.get(str(rtype))
+                if model is not None:
+                    doc = (
+                        await db.execute(
+                            select(model).where(model.id == card_id)  # type: ignore[attr-defined]
+                        )
+                    ).scalars().first()
+                    if doc is not None and doc.user_id == user_id:
+                        ai = (getattr(doc, "content", None) or {}).get("ai") or {}
+                        if isinstance(ai.get("document_id"), int):
+                            document_id = ai["document_id"]
+                            envelope_ai = ai
+                            name = str(card.get("title") or name)
+            break  # only the most recent card-bearing reply counts as "this"
+
+    row = None if document_id is not None else (
         await db.execute(
             select(UnclassifiedFile)
             .where(
@@ -963,7 +1017,7 @@ async def handle_ai_result_query(
     if row is not None:
         document_id = row.id
         name = row.name or row.filepath.rsplit("/", 1)[-1]
-    else:
+    elif document_id is None:
         newest_at = None
         for kind in DOCUMENT_KINDS:
             model, _label = DOCUMENT_KINDS[kind]
