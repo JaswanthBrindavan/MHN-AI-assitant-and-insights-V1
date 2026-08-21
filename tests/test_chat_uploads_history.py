@@ -798,12 +798,12 @@ async def test_ai_result_this_means_the_previous_turns_document(
 @pytest.mark.parametrize(
     ("message", "nkinds"),
     [
-        ("list all my documents", 4),
+        ("list all my documents", 6),
         ("list my reports", 1),
         ("view my scans", 1),
         ("display my prescriptions", 1),
-        ("all my documents", 4),
-        ("what documents do I have", 4),
+        ("all my documents", 6),
+        ("what documents do I have", 6),
         ("do I have any vaccination records", 1),
     ],
 )
@@ -889,3 +889,111 @@ async def test_blood_sugar_falls_back_to_report_glucose(db_session):
     )
     assert out is not None and "96 mg/dL" in out["reply"]
     assert out["provenance"]["source"] == "report"
+
+
+# --------------------------------------------------------------------------- #
+# Dynamic report-parameter asks + section-detail asks
+# --------------------------------------------------------------------------- #
+def _cbc_report_content():
+    return {"ai": {"extraction": {"results": [
+        {"test_name": "Basophils - Absolute Count", "value": "0.03",
+         "value_numeric": 0.03, "unit": "10^3/uL", "abnormal_flag": ""},
+        {"test_name": "RDW", "value": "16.1", "value_numeric": 16.1,
+         "unit": "%", "abnormal_flag": "high"},
+    ]}}}
+
+
+@pytest.mark.asyncio
+async def test_dynamic_param_finds_basophils(db_session):
+    from app.chat.data_handlers import handle_report_param_ask
+    from app.models.coredata import Report
+
+    db_session.add(Report(user_id=USER, filepath="reports/cbc.pdf",
+                          content=_cbc_report_content(), private=False,
+                          created_at=utcnow()))
+    await db_session.flush()
+    out = await handle_report_param_ask(db_session, USER, "what is my basophils")
+    assert out is not None
+    assert "Basophils - Absolute Count" in out["reply"]
+    assert "0.03" in out["reply"]
+    assert out["provenance"]["path"] == "report_param"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_param_flags_abnormal(db_session):
+    from app.chat.data_handlers import handle_report_param_ask
+    from app.models.coredata import Report
+
+    db_session.add(Report(user_id=USER, filepath="reports/cbc.pdf",
+                          content=_cbc_report_content(), private=False,
+                          created_at=utcnow()))
+    await db_session.flush()
+    out = await handle_report_param_ask(db_session, USER, "show me my rdw")
+    assert out is not None and "flagged high" in out["reply"]
+    assert out["action"] == "discuss_with_clinician"
+
+
+@pytest.mark.asyncio
+async def test_dynamic_param_silent_when_absent(db_session):
+    from app.chat.data_handlers import handle_report_param_ask
+
+    out = await handle_report_param_ask(db_session, USER, "what is my basophils")
+    assert out is None  # falls through — never invents a value
+
+
+@pytest.mark.asyncio
+async def test_section_detail_insurance_fields(db_session):
+    from app.chat.data_handlers import handle_section_detail_query
+    from app.models.coredata import Insurance
+
+    db_session.add(Insurance(
+        user_id=USER, filepath="insurance/policy.pdf",
+        content={"ai": {
+            "classification": {"title": "Star Health Policy"},
+            "section_extraction": {
+                "section": "insurance",
+                "fields": {"policy_number": "SH-991", "provider": "Star Health",
+                           "valid_till": "2027-03-31"},
+                "flags": [],
+            },
+        }},
+        private=False, created_at=utcnow(),
+    ))
+    await db_session.flush()
+    out = await handle_section_detail_query(
+        db_session, USER, "what is my policy number"
+    )
+    assert out is not None
+    assert "policy number: SH-991" in out["reply"]
+    assert "Star Health Policy" in out["reply"]
+    assert out["provenance"]["path"] == "section_detail"
+
+
+@pytest.mark.asyncio
+async def test_section_detail_pending_document(db_session):
+    from app.chat.data_handlers import handle_section_detail_query
+    from app.models.coredata import Bill
+
+    db_session.add(Bill(
+        user_id=USER, filepath="bills/inv.pdf",
+        content={"ai": {"state": "classifying"}},
+        private=False, created_at=utcnow(),
+    ))
+    await db_session.flush()
+    out = await handle_section_detail_query(
+        db_session, USER, "how much was my last bill"
+    )
+    assert out is not None
+    assert "doesn't have extracted details yet" in out["reply"]
+    assert "classifying" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_plain_show_my_insurance_lists_documents(db_session):
+    """No detail word → the document LISTING answers, not the field view."""
+    from app.chat.data_handlers import handle_section_detail_query
+
+    out = await handle_section_detail_query(
+        db_session, USER, "show my insurance"
+    )
+    assert out is None

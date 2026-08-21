@@ -22,11 +22,14 @@ from app.chat.abilities import (
     StatedValue,
     SummaryQuery,
     TrackerAdd,
+    param_tokens,
     parse_ai_result_query,
     parse_doctor_consult_query,
     parse_document_query_fuzzy,
     parse_family_list_query,
     parse_metric_query,
+    parse_report_param_ask,
+    parse_section_detail_query,
     parse_stated_value,
     parse_suggestion_query,
     parse_summary_query,
@@ -1213,4 +1216,143 @@ async def handle_ai_result_query(
             "document_type": fetch.document_type,
             "source": "mhn_ai",
         },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Dynamic report-parameter asks ("what is my basophils")
+# --------------------------------------------------------------------------- #
+async def handle_report_param_ask(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """Answer ANY parameter present in the user's extracted reports — the
+    curated registry covers headline metrics; this covers the rest of the
+    THPs (basophils, RDW, GGT, …) by matching the asked term against the
+    test names actually on file. Only answers when a match exists."""
+    term = parse_report_param_ask(message)
+    if term is None:
+        return None
+    want = param_tokens(term)
+    if not want:
+        return None
+
+    rows = (
+        await db.execute(
+            select(Report)
+            .where(Report.user_id == user_id, Report.content.is_not(None))
+            .order_by(Report.created_at.desc().nulls_last(), Report.id.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    for r in rows:
+        ai = (r.content or {}).get("ai") or {}
+        results = ((ai.get("extraction") or {}).get("results")) or []
+        for item in results:
+            test_name = str(item.get("test_name") or "")
+            if not test_name:
+                continue
+            if not want <= param_tokens(test_name):
+                continue
+            value = item.get("value_numeric")
+            if not isinstance(value, (int, float)):
+                raw = item.get("value")
+                m = re.search(r"-?\d+(?:\.\d+)?", str(raw or ""))
+                if not m:
+                    continue
+                value = float(m.group())
+            unit = item.get("unit") or ""
+            flag = (item.get("abnormal_flag") or "").strip()
+            when = (
+                r.created_at.strftime("%d %b %Y") if r.created_at
+                else "date unknown"
+            )
+            flag_note = (
+                f" It is flagged {flag} against the printed reference range."
+                if flag
+                else ""
+            )
+            return {
+                "reply": (
+                    f"Your most recent {test_name} on record is "
+                    f"{value:g} {unit}".rstrip()
+                    + f" (from a report dated {when}).{flag_note} "
+                    f"{_NOT_MEDICAL_ADVICE}"
+                ),
+                "action": (
+                    "discuss_with_clinician" if flag
+                    else "review_with_clinician"
+                ),
+                "provenance": {"path": "report_param", "term": term,
+                               "matched": test_name},
+            }
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Section-detail asks — answered from section_extraction fields
+# --------------------------------------------------------------------------- #
+async def handle_section_detail_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    kind = parse_section_detail_query(message)
+    if kind is None or kind not in DOCUMENT_KINDS:
+        return None
+    model, label = DOCUMENT_KINDS[kind]
+    doc = (
+        await db.execute(
+            select(model)
+            .where(
+                model.user_id == user_id,  # type: ignore[attr-defined]
+                model.content.is_not(None),  # type: ignore[attr-defined]
+            )
+            .order_by(
+                model.created_at.desc().nulls_last(),  # type: ignore[attr-defined]
+                model.id.desc(),  # type: ignore[attr-defined]
+            )
+            .limit(1)
+        )
+    ).scalars().first()
+    if doc is None:
+        return {
+            "reply": (
+                f"I couldn't find any {label} with extracted details in your "
+                "records yet."
+            ),
+            "action": "none",
+            "provenance": {"path": "section_detail", "kind": kind, "found": 0},
+        }
+    ai = (doc.content or {}).get("ai") or {}
+    title = (
+        (ai.get("classification") or {}).get("title")
+        or (doc.filepath or "").rsplit("/", 1)[-1]
+        or label
+    )
+    fields = ((ai.get("section_extraction") or {}).get("fields")) or {}
+    if not fields:
+        state = ai.get("state") or "pending"
+        return {
+            "reply": (
+                f"\"{title}\" doesn't have extracted details yet "
+                f"(processing state: {state}). Ask me again once it's done."
+            ),
+            "action": "none",
+            "provenance": {"path": "section_detail", "kind": kind,
+                           "state": state},
+        }
+    lines = [f"Here's what was read from \"{title}\":"]
+    for key, value in list(fields.items())[:10]:
+        if value in (None, "", []):
+            continue
+        lines.append(f"• {str(key).replace('_', ' ')}: {value}")
+    flags = ((ai.get("section_extraction") or {}).get("flags")) or []
+    if flags:
+        lines.append(
+            "Note: "
+            + ", ".join(str(f).replace("_", " ") for f in flags[:3]) + "."
+        )
+    return {
+        "reply": "\n".join(lines),
+        "action": "none",
+        "provenance": {"path": "section_detail", "kind": kind,
+                       "document_id": doc.id},
     }
