@@ -331,7 +331,9 @@ def test_detect_language_scripts():
 
 
 def test_language_directive():
-    assert language_directive("en") == ""
+    # English is an explicit instruction too — a multilingual history must
+    # never decide the reply language; the latest message does.
+    assert "Reply in English" in language_directive("en")
     assert "Hindi" in language_directive("hi")
 
 

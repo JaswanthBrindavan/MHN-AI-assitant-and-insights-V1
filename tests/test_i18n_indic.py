@@ -45,8 +45,10 @@ def test_directive_romanized_keeps_latin_script():
     assert "Latin script" in language_directive("te-Latn")
 
 
-def test_directive_english_is_empty():
-    assert language_directive("en") == ""
+def test_directive_english_is_explicit():
+    d = language_directive("en")
+    assert "Reply in English" in d
+    assert "LATEST" in d
 
 
 def test_self_harm_reply_keeps_helpline_number():

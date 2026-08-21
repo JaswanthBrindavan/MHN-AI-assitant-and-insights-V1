@@ -67,11 +67,21 @@ def detect_language(message: str) -> str:
 
 
 def language_directive(lang: str) -> str:
-    """Reply-language instruction for the LLM — the fallback when the
-    translation sidecar is down or unconfigured (with it active, the model
-    answers in English and IndicTrans2 translates the reply)."""
+    """Reply-language instruction for the LLM.
+
+    Always derived from the LATEST message, never from the conversation:
+    a Telugu question followed by an English one gets an English answer,
+    even though the recent-turns context is full of Telugu. That is why
+    "en" returns an explicit instruction instead of nothing — without it
+    the model happily continues in whatever language the history is in.
+    """
     if lang == "en":
-        return ""
+        return (
+            "Reply in English — the language of the user's LATEST message. "
+            "Even if earlier turns of the conversation are in another "
+            "language, answer this message in English (unless the user "
+            "explicitly asks you to switch or translate)."
+        )
     name = LANGUAGE_NAMES.get(lang, lang)
     script_note = (
         " Write your reply in Latin script too, the way the user typed."
@@ -79,7 +89,8 @@ def language_directive(lang: str) -> str:
         else ""
     )
     return (
-        f"Reply in {name} — the user wrote in that language.{script_note} "
+        f"Reply in {name} — the language of the user's LATEST message, "
+        f"regardless of the language of earlier turns.{script_note} "
         "Keep medical terms clear; you may give key terms in both that "
         "language and English. You can translate between the two: if the "
         "user asks for English, asks you to translate, or pastes text to "
