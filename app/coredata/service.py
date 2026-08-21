@@ -79,6 +79,37 @@ def _owner_read_grant(fc: FamilyConnect, owner_is_requester: bool) -> bool:
     )
 
 
+# Asked-for term → the relation-name words it accepts. Production relation
+# rows use both gendered and generic names ("Father"/"Child",
+# "Grandparent"/"Grandchild"), so "my grandson" must find a "Grandchild" row
+# and "my son" a "Child" row. Matching is whole-word: "son" never matches
+# "Grandson", "mother" never matches "Grandmother".
+_RELATION_ACCEPTS: dict[str, frozenset[str]] = {
+    "father": frozenset({"father", "parent"}),
+    "mother": frozenset({"mother", "parent"}),
+    "son": frozenset({"son", "child"}),
+    "daughter": frozenset({"daughter", "child"}),
+    "husband": frozenset({"husband", "spouse"}),
+    "wife": frozenset({"wife", "spouse"}),
+    "brother": frozenset({"brother", "sibling"}),
+    "sister": frozenset({"sister", "sibling"}),
+    "grandfather": frozenset({"grandfather", "grandparent"}),
+    "grandmother": frozenset({"grandmother", "grandparent"}),
+    "grandson": frozenset({"grandson", "grandchild"}),
+    "granddaughter": frozenset({"granddaughter", "grandchild"}),
+    "grandchild": frozenset({"grandchild", "grandson", "granddaughter"}),
+}
+
+
+def _relation_matches(term: str, name: str | None) -> bool:
+    """Whole-word relation matching with gendered↔generic equivalence."""
+    if not name:
+        return False
+    accepts = _RELATION_ACCEPTS.get(term, frozenset({term}))
+    tokens = {t.strip(".,()'\"") for t in name.lower().split()}
+    return bool(tokens & accepts)
+
+
 async def resolve_family_member(
     db: AsyncSession, user_id: uuid.UUID, relation_term: str
 ) -> uuid.UUID | None:
@@ -113,8 +144,58 @@ async def resolve_family_member(
             other = fc.requester_id
             other_shares = _owner_read_grant(fc, owner_is_requester=True)
             name = rel.inverse
-        if other_shares and term in name.strip().lower():
+        if other_shares and _relation_matches(term, name):
             return other
+    return None
+
+
+async def resolve_family_member_by_name(
+    db: AsyncSession, user_id: uuid.UUID, name_term: str
+) -> uuid.UUID | None:
+    """Resolve "Bhargava's reports" — a connected member named by name.
+
+    Same consent gate as relation resolution: accepted link + the owner-side
+    read grant. The term matches a word of the member's display name or
+    their username, prefix-tolerant in both directions ("bhargav" finds
+    "Bhargava Ram" and vice versa). None when nobody qualifies — a stray
+    possessive then just falls through to the normal not-found reply.
+    """
+    term = name_term.strip().lower()
+    if len(term) < 3:
+        return None
+    rows = (
+        await db.execute(
+            select(FamilyConnect).where(
+                FamilyConnect.accepted.is_(True),
+                (FamilyConnect.requester_id == user_id)
+                | (FamilyConnect.acceptor_id == user_id),
+            )
+        )
+    ).scalars().all()
+    shared: list[uuid.UUID] = []
+    for fc in rows:
+        viewer_is_requester = fc.requester_id == user_id
+        other = fc.acceptor_id if viewer_is_requester else fc.requester_id
+        if _owner_read_grant(fc, owner_is_requester=not viewer_is_requester):
+            shared.append(other)
+    if not shared:
+        return None
+    try:
+        name_rows = (
+            await db.execute(
+                select(User.id, User.name, User.user_name).where(
+                    User.id.in_(shared)
+                )
+            )
+        ).all()
+    except Exception:  # noqa: BLE001 — user table may be absent standalone
+        return None
+    for uid, display, login in name_rows:
+        for word in f"{display or ''} {login or ''}".lower().split():
+            if len(word) >= 3 and (
+                word.startswith(term) or term.startswith(word)
+            ):
+                return uid
     return None
 
 

@@ -19,15 +19,20 @@ from dataclasses import dataclass
 # --------------------------------------------------------------------------- #
 # Shared vocab
 # --------------------------------------------------------------------------- #
+# Longer terms first so "my grandson" is never read as "my son".
 RELATION_TERMS = (
+    "grandfather", "grandmother", "grandpa", "grandma",
+    "granddaughter", "grandson", "grandchild", "grandkid",
     "father", "mother", "dad", "mom", "mum", "papa", "amma", "appa",
     "husband", "wife", "brother", "sister", "son", "daughter",
-    "grandfather", "grandmother", "grandpa", "grandma",
+    "uncle", "aunty", "auntie", "aunt", "cousin", "nephew", "niece",
 )
 _RELATION_CANON = {
     "dad": "father", "papa": "father", "appa": "father",
     "mom": "mother", "mum": "mother", "amma": "mother",
     "grandpa": "grandfather", "grandma": "grandmother",
+    "grandkid": "grandchild",
+    "aunty": "aunt", "auntie": "aunt",
 }
 
 _NUMBER_WORDS = {
@@ -64,6 +69,8 @@ class DocumentQuery:
     kinds: tuple[str, ...]
     relation: str | None = None
     wants_date: bool = False
+    # A connected member named directly ("show Bhargava's reports").
+    owner_name: str | None = None
 
 
 # Every kind term tolerates a plural — "pull my latest lab reports" is the
@@ -97,6 +104,17 @@ _DOC_INTENT_RE = re.compile(
 )
 _DOC_DATE_RE = re.compile(r"\bwhen\b|\bdate\b|\bhow long ago\b", re.IGNORECASE)
 
+# "<name>'s reports" — a single word before 's that is not a relation term
+# or an everyday possessive; the handler matches it against connected
+# members' names (consent-gated), so a wrong guess just resolves to nobody.
+_POSSESSIVE_NAME_RE = re.compile(r"\b([a-z]{3,})'s\b")
+_POSSESSIVE_STOP = frozenset(
+    set(RELATION_TERMS)
+    | {"today", "yesterday", "tomorrow", "doctor", "week", "month", "year",
+       "one", "body", "who", "there", "let", "that", "child", "children",
+       "family", "everyone", "anyone"}
+)
+
 
 def parse_document_query(message: str) -> DocumentQuery | None:
     low = message.lower()
@@ -113,17 +131,26 @@ def parse_document_query(message: str) -> DocumentQuery | None:
         kinds = [k for k in kinds if k != "any"]
     if not kinds:
         return None
-    # "my report" (self), "my father's report" (relative), or the
-    # self-implying "do I have …" phrasing.
+    # "my report" (self), "my father's report" (relative), a connected
+    # member named by name ("Bhargava's reports"), or the self-implying
+    # "do I have …" phrasing.
     relation = find_relation(message)
-    if relation is None and not re.search(
-        r"\bmy\b|\bour\b|\bdo i have\b", low
+    owner_name = None
+    if relation is None:
+        m = _POSSESSIVE_NAME_RE.search(low)
+        if m and m.group(1) not in _POSSESSIVE_STOP:
+            owner_name = m.group(1)
+    if (
+        relation is None
+        and owner_name is None
+        and not re.search(r"\bmy\b|\bour\b|\bdo i have\b", low)
     ):
         return None
     return DocumentQuery(
         kinds=tuple(kinds),
         relation=relation,
         wants_date=bool(_DOC_DATE_RE.search(low)),
+        owner_name=owner_name,
     )
 
 

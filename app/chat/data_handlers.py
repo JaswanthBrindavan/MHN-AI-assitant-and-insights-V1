@@ -47,6 +47,7 @@ from app.coredata.service import (
     list_family_connections,
     recent_doctor_consults,
     resolve_family_member,
+    resolve_family_member_by_name,
     vital_series,
     window_start,
 )
@@ -315,21 +316,29 @@ async def handle_document_query(
         return None
 
     owner_id, owner_label, include_private = user_id, "you", True
-    if query.relation:
-        member = await resolve_family_member(db, user_id, query.relation)
+    if query.relation or query.owner_name:
+        if query.relation:
+            member = await resolve_family_member(db, user_id, query.relation)
+            asked, label = query.relation, f"your {query.relation}"
+        else:
+            member = await resolve_family_member_by_name(
+                db, user_id, query.owner_name or ""
+            )
+            asked = query.owner_name or ""
+            label = asked.title()
         if member is None:
             return {
                 "reply": (
                     f"I couldn't find a connected family member matching "
-                    f"'{query.relation}' with document sharing enabled. They "
-                    "may need to accept the family connection or turn on file "
-                    "sharing in the app."
+                    f"'{asked}' with document sharing enabled. They may need "
+                    "to accept the family connection or turn on file sharing "
+                    "in the app."
                 ),
                 "action": "none",
-                "provenance": {"path": "document_query", "relation": query.relation,
+                "provenance": {"path": "document_query", "asked": asked,
                                "resolved": False},
             }
-        owner_id, owner_label, include_private = member, f"your {query.relation}", False
+        owner_id, owner_label, include_private = member, label, False
 
     hits = await latest_documents(
         db, owner_id, list(query.kinds),
@@ -341,7 +350,7 @@ async def handle_document_query(
     # files them — without this they are invisible to "show my documents"
     # exactly in the window right after uploading.
     pending: list = []
-    if query.relation is None:
+    if query.relation is None and query.owner_name is None:
         pending = list((
             await db.execute(
                 select(UnclassifiedFile)
