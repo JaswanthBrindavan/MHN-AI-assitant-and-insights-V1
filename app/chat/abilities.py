@@ -78,13 +78,15 @@ _DOC_KIND_TERMS: tuple[tuple[str, str], ...] = (
     (r"scans?|x-?rays?|mri|ct|ultrasounds?|imaging", "scan"),
     (r"prescriptions?", "prescription"),
     (r"vaccinations?|vaccines?|immuni[sz]ations?", "vaccination"),
+    (r"insurances?|\bpolic(?:y|ies)\b", "insurance"),
+    (r"\bbills?\b|invoices?", "bill"),
     (r"\btests?\b|check-?ups?|checkups?", "report"),
     # Generic words meaning "whatever I have" — expands to every kind below.
     (r"\bdocuments?\b|\bdocs?\b|\bfiles?\b|\brecords?\b|\buploads?\b", "any"),
 )
 
 ALL_DOCUMENT_KINDS: tuple[str, ...] = (
-    "report", "scan", "prescription", "vaccination",
+    "report", "scan", "prescription", "vaccination", "insurance", "bill",
 )
 
 _DOC_INTENT_RE = re.compile(
@@ -641,3 +643,76 @@ _AI_RESULT_RE = re.compile(
 
 def parse_ai_result_query(message: str) -> bool:
     return bool(_AI_RESULT_RE.search(message))
+
+
+# --------------------------------------------------------------------------- #
+# Dynamic report-parameter asks ("what is my basophils")
+# --------------------------------------------------------------------------- #
+# The curated METRIC_REGISTRY covers the headline metrics; everything ELSE a
+# lab report can carry (basophils, RDW, GGT, …) is answered dynamically: the
+# asked-for term is matched against the test names actually present in the
+# user's extracted reports. The handler only answers when a matching test
+# exists, so ordinary questions fall through untouched.
+_PARAM_ASK_RE = re.compile(
+    r"\b(?:what(?:'s| is| was| are)?|show(?: me)?|check)\s+(?:my|the)\s+"
+    r"(?:latest\s+|last\s+|recent\s+|current\s+)?"
+    r"([a-z][a-z0-9 /().%-]{2,40}?)"
+    r"(?:\s+(?:level|value|count|reading|number)s?)?\s*\??$",
+    re.IGNORECASE,
+)
+
+
+def parse_report_param_ask(message: str) -> str | None:
+    """The parameter name the user asked about, or None."""
+    m = _PARAM_ASK_RE.search(message.strip())
+    if not m:
+        return None
+    term = m.group(1).strip()
+    if len(term) < 3:
+        return None
+    return term
+
+
+def param_tokens(text: str) -> set[str]:
+    """Lowercased alphanumeric tokens with a plural-tolerant singular form."""
+    tokens = set()
+    for t in re.split(r"[^a-z0-9]+", text.lower()):
+        if not t:
+            continue
+        tokens.add(t[:-1] if len(t) > 3 and t.endswith("s") else t)
+    return tokens
+
+
+# --------------------------------------------------------------------------- #
+# Section-detail asks ("what's my policy number", "when does my insurance
+# expire", "how much was my last bill")
+# --------------------------------------------------------------------------- #
+# Answered from the section_extraction fields mhn-ai wrote into the document's
+# envelope. A DETAIL word is required so plain "show my insurance" stays a
+# document listing.
+_SECTION_ASK_KINDS: tuple[tuple[str, str], ...] = (
+    (r"insurances?|\bpolic(?:y|ies)\b", "insurance"),
+    (r"\bbills?\b|invoices?", "bill"),
+    (r"vaccinations?|vaccines?|immuni[sz]ations?", "vaccination"),
+    (r"scans?|x-?rays?|mri|ultrasounds?", "scan"),
+    (r"prescriptions?", "prescription"),
+)
+_SECTION_DETAIL_RE = re.compile(
+    r"\b(?:details?|info(?:rmation)?|numbers?|amounts?|due|expir\w*|"
+    r"valid\w*|dates?|doses?|provider|company|coverage|premium|"
+    r"say|says|contain\w*|how much|when)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_section_detail_query(message: str) -> str | None:
+    """The section kind a detail question is about, or None."""
+    low = message.lower()
+    if not re.search(r"\bmy\b|\bour\b|\bdo i have\b", low):
+        return None
+    if not _SECTION_DETAIL_RE.search(low):
+        return None
+    for pattern, kind in _SECTION_ASK_KINDS:
+        if re.search(rf"\b(?:{pattern})\b", low):
+            return kind
+    return None

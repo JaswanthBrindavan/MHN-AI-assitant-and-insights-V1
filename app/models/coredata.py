@@ -35,6 +35,8 @@ def _pg_enum(name: str, *values: str):
 # EXTERNAL_TABLES in app.models.core).
 COREDATA_TABLES = {
     "unclassified_files",
+    "insurance",
+    "bills",
     "doctor",
     "doctor_connect",
     "doctor_specialization",
@@ -325,6 +327,32 @@ class DoctorConnect(Base):
     user_acceptance: Mapped[bool | None] = mapped_column(
         sa.Boolean, nullable=True
     )
+    created_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+
+
+class Insurance(Base):
+    __tablename__ = "insurance"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    filepath: Mapped[str | None] = mapped_column(sa.String(500), nullable=True)
+    content: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
+    private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+
+
+class Bill(Base):
+    __tablename__ = "bills"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    filepath: Mapped[str] = mapped_column(sa.String(500), nullable=False)
+    content: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
+    private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
         sa.DateTime(timezone=True), nullable=True
     )

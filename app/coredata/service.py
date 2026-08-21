@@ -17,8 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.common import utcnow
 from app.models.coredata import (
+    Bill,
     BodyMeasurement,
     FamilyConnect,
+    Insurance,
     LifestyleLog,
     ManualTracking,
     MedicineTracking,
@@ -36,6 +38,8 @@ DOCUMENT_KINDS: dict[str, tuple[type, str]] = {
     "scan": (ScanImaging, "scan / imaging"),
     "prescription": (Prescription, "prescription"),
     "vaccination": (Vaccination, "vaccination record"),
+    "insurance": (Insurance, "insurance document"),
+    "bill": (Bill, "bill"),
 }
 
 
@@ -118,6 +122,8 @@ _RESOURCE_TYPE = {
     "scan": "scans_imaging",
     "prescription": "prescriptions",
     "vaccination": "vaccinations",
+    "insurance": "insurance",
+    "bill": "bills",
 }
 
 
@@ -238,7 +244,7 @@ async def latest_documents(
                 DocumentHit(
                     kind=kind,
                     doc_id=r.id,
-                    filepath=r.filepath,
+                    filepath=r.filepath or "",
                     created_at=r.created_at,
                     owner_label=owner_label,
                     title=_ai_title(getattr(r, "content", None)),

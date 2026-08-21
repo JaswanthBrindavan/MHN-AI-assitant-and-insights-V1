@@ -35,6 +35,8 @@ from app.chat.data_handlers import (
     handle_document_query,
     handle_family_list_query,
     handle_metric_query,
+    handle_report_param_ask,
+    handle_section_detail_query,
     handle_suggestion_query,
     handle_summary_query,
     handle_tracker_add,
@@ -306,6 +308,12 @@ async def _dispatch(
                         db, user_id, message, session_id
                     )
                 if ability is None:
+                    # Detail questions about a section ("policy number",
+                    # "bill amount") outrank the LISTING of that section.
+                    ability = await handle_section_detail_query(
+                        db, user_id, message
+                    )
+                if ability is None:
                     ability = await handle_document_query(db, user_id, message)
                 if ability is None:
                     ability = await handle_family_list_query(db, user_id, message)
@@ -315,6 +323,12 @@ async def _dispatch(
                     )
                 if ability is None:
                     ability = await handle_metric_query(db, user_id, message)
+                if ability is None:
+                    # Anything else a lab report carries (basophils, RDW, …)
+                    # — answered only when the test exists on file.
+                    ability = await handle_report_param_ask(
+                        db, user_id, message
+                    )
                 if ability is None:
                     ability = await handle_summary_query(db, user_id, message)
                 if ability is None:
