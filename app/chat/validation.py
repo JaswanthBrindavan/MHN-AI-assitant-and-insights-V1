@@ -113,7 +113,7 @@ def _diagnostic_pattern(condition_alternation: str) -> str:
 _DIAGNOSTIC_RE = re.compile(_diagnostic_pattern(_COND_RE), re.IGNORECASE)
 
 # Cache of dynamic diagnostic regexes built from registry condition names.
-_dynamic_cache: dict[int, re.Pattern[str]] = {}
+_dynamic_cache: dict[tuple[str, ...], re.Pattern[str]] = {}
 
 
 def _dynamic_diagnostic_re(extra_conditions: tuple[str, ...]) -> re.Pattern[str] | None:
@@ -133,13 +133,12 @@ def _dynamic_diagnostic_re(extra_conditions: tuple[str, ...]) -> re.Pattern[str]
     )
     if not names:
         return None
-    key = hash(names)
-    cached = _dynamic_cache.get(key)
+    cached = _dynamic_cache.get(names)
     if cached is not None:
         return cached
     alternation = "|".join(re.escape(n) for n in names)
     pattern = re.compile(_diagnostic_pattern(alternation), re.IGNORECASE)
-    _dynamic_cache[key] = pattern
+    _dynamic_cache[names] = pattern
     return pattern
 
 # Numeric disease probability, e.g. "80% chance you have ...".

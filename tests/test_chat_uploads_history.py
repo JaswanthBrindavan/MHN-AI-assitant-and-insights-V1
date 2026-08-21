@@ -198,9 +198,8 @@ async def test_submit_document_failed_trigger_job(db_session):
 # --------------------------------------------------------------------------- #
 # Reply copy
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("triggered", [True, False])
-def test_upload_reply_validator_safe(triggered: bool):
-    reply = build_upload_reply("cbc_report.pdf", triggered)
+def test_upload_reply_validator_safe():
+    reply = build_upload_reply("cbc_report.pdf")
     assert "cbc_report.pdf" in reply
     assert validate_reply(reply, "none").ok
 
@@ -666,11 +665,11 @@ async def test_ai_result_handler_follows_filed_document(db_session, monkeypatch)
 
 def test_upload_reply_never_alarms():
     # Spring submits every upload itself — a failed redundant trigger must
-    # not read as "classification is not running".
-    for triggered in (True, False):
-        reply = build_upload_reply("x.pdf", triggered)
-        assert "could not be started" not in reply
-        assert "queued for automatic processing" in reply
+    # not read as "classification is not running" (the reply no longer even
+    # takes the trigger outcome).
+    reply = build_upload_reply("x.pdf")
+    assert "could not be started" not in reply
+    assert "queued for automatic processing" in reply
 
 
 # --------------------------------------------------------------------------- #

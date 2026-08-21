@@ -400,6 +400,3 @@ class ThpAgeRange(Base):
     high_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
     high_danger: Mapped[float] = mapped_column(sa.Float, nullable=False)
     max: Mapped[float] = mapped_column(sa.Float, nullable=False)
-
-
-_ = date  # (kept for future date-typed columns)

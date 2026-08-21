@@ -95,7 +95,12 @@ app/
   chat/abilities.py    PURE parsers: document/tracker/metric/summary/suggestion
   chat/data_handlers.py deterministic ability handlers (run in SAVEPOINTs)
   charts/svg.py        deterministic SVG line/bar charts (visual payload)
-  i18n/                language detection + localized safety replies (DRAFT)
+  i18n/language.py     script-range detection + LLM reply-language directive
+                       (the no-sidecar fallback; NO word lists or templates)
+  translate/service.py English-pivot via the translator sidecar: detect →
+                       to English → pipeline → back, digit-checked, fail-open
+translator/            self-hosted sidecar (own Dockerfile, second Railway
+                       service): IndicTrans2 + IndicXlit + IndicLID (all MIT)
   documents/service.py chat uploads: Davi touches NO document bytes/rows —
                        Spring's flow owns S3 + unclassified_files; this only
                        submits the mhn-ai processing run (verified contract:

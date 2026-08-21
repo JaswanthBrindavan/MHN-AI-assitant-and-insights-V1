@@ -66,13 +66,7 @@ def is_boundary(assistant_text: str) -> bool:
 
 
 def _dedup(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for it in items:
-        if it not in seen:
-            seen.add(it)
-            out.append(it)
-    return out
+    return list(dict.fromkeys(items))
 
 
 def empty_summary() -> dict:

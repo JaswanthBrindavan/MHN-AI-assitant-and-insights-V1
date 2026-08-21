@@ -45,7 +45,10 @@ from app.chat.data_handlers import (
 from app.chat.long_term import recall, record_topics
 from app.chat.replies import (
     GREETING_REPLY,
+    HIGH_ESCALATION,
     IDENTITY_REPLY,
+    SCOPE_DECLINE,
+    SELF_HARM_REPLY,
     safe_reply,
 )
 from app.chat.router import (
@@ -66,12 +69,10 @@ from app.drugs.service import (
     find_drug,
 )
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
-from app.i18n.language import detect_language, language_directive
-from app.i18n.replies import (
-    localized_emergency,
-    localized_high_escalation,
-    localized_scope_decline,
-    localized_self_harm,
+from app.i18n.language import (
+    LANGUAGE_NAMES,
+    detect_language,
+    language_directive,
 )
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
@@ -79,7 +80,20 @@ from app.models.chat import RagTurnReceipt
 from app.rag.extractive import build_extractive_answer
 from app.rag.prompt import build_correction_directive, build_system_prompt
 from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
-from app.triage.red_flags import EMERGENCY, HIGH, NONE, triage
+from app.translate.service import (
+    InboundPivot,
+    SidecarTranslator,
+    get_translator,
+    pivot_inbound,
+    pivot_outbound,
+)
+from app.triage.red_flags import (
+    EMERGENCY,
+    EMERGENCY_DIRECTIVE,
+    HIGH,
+    NONE,
+    triage,
+)
 
 logger = logging.getLogger("davi.chat")
 
@@ -115,10 +129,10 @@ async def _write_receipt(
     session_id: uuid.UUID | None,
     message: str,
     model_name: str,
-    retrieved: list[dict] | None,
-    grounding: dict | None,
-    grounding_status: str,
-    used_rag: bool,
+    retrieved: list[dict] | None = None,
+    grounding: dict | None = None,
+    grounding_status: str = "n/a",
+    used_rag: bool = False,
 ) -> None:
     """Write an auditable receipt (hashes only, never raw text). Fail-open."""
     settings = get_settings()
@@ -202,12 +216,15 @@ async def _dispatch(
     message: str,
     provider: LLMProvider,
     session_id: uuid.UUID,
+    pivot: InboundPivot | None = None,
 ) -> ChatResult:
     tr = triage(message)
     risk = tr.level
-    lang = detect_language(message)
+    # Every reply composes in English; when the pivot is active the sidecar
+    # translates the final text into the user's language and script. lang is
+    # only reported to the client and drives the no-sidecar LLM directive.
+    lang = pivot.display_language if pivot is not None else detect_language(message)
 
-    from app.i18n.language import LANGUAGE_NAMES
     trace: list[dict] = []
 
     def t(step: str, detail: str) -> None:
@@ -225,11 +242,10 @@ async def _dispatch(
         t("Scope guard", "not a health question — declining politely")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
-            response_message=localized_scope_decline(lang),
+            response_message=SCOPE_DECLINE,
             risk_level=NONE,
             recommended_action="out_of_scope",
             provenance={"path": "scope_declined"},
@@ -250,13 +266,11 @@ async def _dispatch(
               "deterministic directive — the LLM is never the arbiter of emergencies")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
             response_message=(
-                localized_self_harm(lang) if tr.self_harm
-                else localized_emergency(lang)
+                SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
             ),
             risk_level=EMERGENCY,
             recommended_action="call_emergency_services",
@@ -271,8 +285,7 @@ async def _dispatch(
         reply = IDENTITY_REPLY if is_identity_question(message) else GREETING_REPLY
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
             response_message=reply,
@@ -354,9 +367,8 @@ async def _dispatch(
                 else:
                     t("Output validation", "passed all safety checks")
                 await _write_receipt(
-                    db, user_id=user_id, session_id=session_id, message=message,
-                    model_name=provider.model_name, retrieved=None,
-                    grounding=None, grounding_status="n/a", used_rag=False,
+                    db, user_id=user_id, session_id=session_id,
+                    message=message, model_name=provider.model_name,
                 )
                 return ChatResult(
                     response_message=ability["reply"],
@@ -381,8 +393,7 @@ async def _dispatch(
         reply = await _data_query_reply(db, user_id)
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
             response_message=reply,
@@ -425,8 +436,6 @@ async def _dispatch(
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
-                        retrieved=None, grounding=None,
-                        grounding_status="n/a", used_rag=False,
                     )
                     return ChatResult(
                         response_message=build_interaction_reply(*names),
@@ -460,8 +469,6 @@ async def _dispatch(
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
-                        retrieved=None, grounding=None,
-                        grounding_status="n/a", used_rag=False,
                     )
                     return ChatResult(
                         response_message=reply,
@@ -566,7 +573,7 @@ async def _dispatch(
               "directly (extractive mode)")
             display = extractive
             if risk == HIGH:
-                display = f"{localized_high_escalation(lang)} {display}"
+                display = f"{HIGH_ESCALATION} {display}"
             verdict = validate_reply(display, risk)
             if not verdict.ok:
                 t("Output validation",
@@ -623,7 +630,9 @@ async def _dispatch(
     system = build_system_prompt(
         chunks, patient_text, compacted_json, recent_turns=prior_turns[-6:]
     )
-    directive = language_directive(lang)
+    # With an active pivot the model answers in English (the reply is
+    # machine-translated back); the directive is the no-sidecar fallback.
+    directive = "" if (pivot is not None and pivot.active) else language_directive(lang)
     if directive:
         system = system + "\n\n" + directive
 
@@ -674,7 +683,7 @@ async def _dispatch(
         else:
             display = strip_markers(grounded_answer)
             if risk == HIGH:
-                display = f"{localized_high_escalation(lang)} {display}"
+                display = f"{HIGH_ESCALATION} {display}"
             # Extend the diagnostic-assertion lexicon with the clinically-
             # validated registry names + aliases (paren-cleaned), fail-open.
             extra: tuple[str, ...] | None = None
@@ -786,18 +795,40 @@ async def handle_chat(
     message: str,
     provider: LLMProvider,
     session_id: uuid.UUID | None = None,
+    translator: SidecarTranslator | None = None,
 ) -> ChatResult:
     """Persist the turn, dispatch, then run deterministic compaction.
 
-    Compaction fires after the assistant message and never raises.
+    Compaction fires after the assistant message and never raises. When the
+    translation sidecar is configured, non-English messages are pivoted
+    through English (history keeps the user's original words; triage and the
+    whole pipeline see English) and the reply is translated back.
     """
     message = _sanitize_message(message)
+    if translator is None:
+        translator = get_translator()
+    pivot = await pivot_inbound(message, translator)
+    work = pivot.english_text if pivot.active else message
     session_id = await ensure_session(db, user_id, session_id)
     await add_message(
         db, session_id, "user", message,
-        extracted_intent={"risk": triage(message).level},
+        extracted_intent={"risk": triage(work).level},
     )
-    result = await _dispatch(db, user_id, message, provider, session_id)
+    result = await _dispatch(db, user_id, work, provider, session_id, pivot=pivot)
+    if pivot.active and result.response_message:
+        translated = await pivot_outbound(
+            result.response_message, pivot, translator
+        )
+        if translated is not None:
+            result.response_message = translated
+            result.provenance["translation"] = {
+                "language": pivot.display_language, "status": "translated",
+            }
+        else:
+            # Fail open: the English reply is always safe to show.
+            result.provenance["translation"] = {
+                "language": pivot.display_language, "status": "fallback_english",
+            }
     # Persist the reply's structured extras alongside the text so a restored
     # conversation keeps its document cards (and action line) after a reload —
     # the extracted_intent JSON column already exists for exactly this kind of

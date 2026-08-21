@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     pipeline_version: int = 1
     app_env: str = "dev"
 
+    # Self-hosted translation sidecar (translator/ in this repo — AI4Bharat
+    # IndicTrans2 + IndicXlit + IndicLID). Empty base URL = English-pivot
+    # translation disabled; non-English messages then fall back to the
+    # reply-language directive on the LLM. PHI only ever goes to OUR sidecar.
+    translate_base_url: str = ""
+    translate_token: str = ""
+    translate_timeout_seconds: float = 8.0
+
     # mhn-ai pipeline trigger for chat uploads (Davi handles no document
     # bytes or rows — files reach S3 + unclassified_files via Spring):
     # POST {base}/v1/document-processing-runs with this bearer token — the
