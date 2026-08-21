@@ -33,7 +33,6 @@ from app.models.coredata import (
     DoctorConnect,
     DoctorSpecialization,
     FamilyConnect,
-    FamilyFileAccess,
     Insurance,
     LifestyleLog,
     ManualTracking,
@@ -87,6 +86,5 @@ __all__ = [
     "ManualTracking",
     "FamilyConnect",
     "Relation",
-    "FamilyFileAccess",
     "TraditionalHealthParameter",
 ]

@@ -14,7 +14,7 @@ No LLM, no DB — the handlers do the I/O.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # --------------------------------------------------------------------------- #
 # Shared vocab
@@ -509,13 +509,6 @@ def parse_summary_query(message: str) -> SummaryQuery | None:
 # --------------------------------------------------------------------------- #
 # MCP suggestion requests
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class SuggestionQuery:
-    # Conditions are resolved by the caller via the registry index.
-    explicit: bool = True
-    raw_message: str = field(default="")
-
-
 _SUGGESTION_RE = re.compile(
     r"\bsuggestions?\b|\bsuggest\b|\btips\b|\badvice\b|"
     r"\bwhat (?:should|can) i do\b|"
@@ -525,10 +518,8 @@ _SUGGESTION_RE = re.compile(
 )
 
 
-def parse_suggestion_query(message: str) -> SuggestionQuery | None:
-    if _SUGGESTION_RE.search(message):
-        return SuggestionQuery(raw_message=message)
-    return None
+def parse_suggestion_query(message: str) -> bool:
+    return bool(_SUGGESTION_RE.search(message))
 
 
 # --------------------------------------------------------------------------- #

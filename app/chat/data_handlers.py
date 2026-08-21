@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.charts.svg import chart_payload
 from app.chat.abilities import (
+    METRIC_REGISTRY,
     DocumentQuery,
     MetricQuery,
     StatedValue,
@@ -49,12 +50,16 @@ from app.coredata.service import (
     vital_series,
     window_start,
 )
+
+# Module import (not the bare function): tests monkeypatch
+# app.documents.service.fetch_ai_result, so the call must resolve late.
+from app.documents import service as documents_service
 from app.health import ranges as health_ranges
 from app.health import reference as health_reference
 from app.knowledge.registry import load_condition_index
-from app.models.chat import McpChunk
+from app.models.chat import ConversationMessage, McpChunk
 from app.models.common import utcnow
-from app.models.coredata import Report
+from app.models.coredata import Report, UnclassifiedFile
 from app.rag.retrieval import resolve_scope
 
 _NOT_MEDICAL_ADVICE = (
@@ -192,7 +197,6 @@ async def _recent_user_messages(
 ) -> list[str]:
     if session_id is None:
         return []
-    from app.models.chat import ConversationMessage
     rows = (
         await db.execute(
             select(ConversationMessage.message)
@@ -338,8 +342,6 @@ async def handle_document_query(
     # exactly in the window right after uploading.
     pending: list = []
     if query.relation is None:
-        from app.models.coredata import UnclassifiedFile
-
         pending = list((
             await db.execute(
                 select(UnclassifiedFile)
@@ -563,8 +565,6 @@ async def _latest_report_param(
 async def handle_metric_query(
     db: AsyncSession, user_id: uuid.UUID, message: str
 ) -> dict | None:
-    from app.chat.abilities import METRIC_REGISTRY
-
     query: MetricQuery | None = parse_metric_query(message)
     if query is None:
         return None
@@ -809,7 +809,7 @@ def format_suggestions(rows_content: list[str], display_names: list[str]) -> str
 async def handle_suggestion_query(
     db: AsyncSession, user_id: uuid.UUID, message: str, user_codes: set[str]
 ) -> dict | None:
-    if parse_suggestion_query(message) is None:
+    if not parse_suggestion_query(message):
         return None
     codes = await resolve_scope(db, message, user_codes)
     index = await load_condition_index(db)
@@ -979,9 +979,6 @@ async def handle_ai_result_query(
     invents analysis of a document it cannot see."""
     if not parse_ai_result_query(message):
         return None
-    from app.documents.service import fetch_ai_result
-    from app.models.coredata import UnclassifiedFile
-
     # Resolve "this report" to a pipeline document id, in order:
     #   0. the document the CONVERSATION is about — the last reply in this
     #      session that carried document cards (persisted in message meta);
@@ -994,8 +991,6 @@ async def handle_ai_result_query(
     name = "your document"
 
     if session_id is not None:
-        from app.models.chat import ConversationMessage
-
         recent = (
             await db.execute(
                 select(ConversationMessage)
@@ -1092,7 +1087,7 @@ async def handle_ai_result_query(
             "provenance": {"path": "ai_result", "found": 0},
         }
 
-    fetch = await fetch_ai_result(document_id)
+    fetch = await documents_service.fetch_ai_result(document_id)
     if not fetch.ok:
         return {
             "reply": (

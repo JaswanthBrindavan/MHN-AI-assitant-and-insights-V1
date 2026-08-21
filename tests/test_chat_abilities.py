@@ -96,9 +96,9 @@ def test_parse_summary_and_suggestions():
     assert s is not None and s.period == "year"
     assert parse_summary_query("summarize this article") is None
 
-    assert parse_suggestion_query("any tips for my diabetes?") is not None
-    assert parse_suggestion_query("how can I manage my blood pressure?") is not None
-    assert parse_suggestion_query("what is diabetes?") is None
+    assert parse_suggestion_query("any tips for my diabetes?")
+    assert parse_suggestion_query("how can I manage my blood pressure?")
+    assert not parse_suggestion_query("what is diabetes?")
 
 
 # --------------------------------------------------------------------------- #

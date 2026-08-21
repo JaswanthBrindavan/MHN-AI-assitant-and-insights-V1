@@ -69,7 +69,11 @@ from app.drugs.service import (
     find_drug,
 )
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
-from app.i18n.language import detect_language, language_directive
+from app.i18n.language import (
+    LANGUAGE_NAMES,
+    detect_language,
+    language_directive,
+)
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
 from app.models.chat import RagTurnReceipt
@@ -125,10 +129,10 @@ async def _write_receipt(
     session_id: uuid.UUID | None,
     message: str,
     model_name: str,
-    retrieved: list[dict] | None,
-    grounding: dict | None,
-    grounding_status: str,
-    used_rag: bool,
+    retrieved: list[dict] | None = None,
+    grounding: dict | None = None,
+    grounding_status: str = "n/a",
+    used_rag: bool = False,
 ) -> None:
     """Write an auditable receipt (hashes only, never raw text). Fail-open."""
     settings = get_settings()
@@ -221,7 +225,6 @@ async def _dispatch(
     # only reported to the client and drives the no-sidecar LLM directive.
     lang = pivot.display_language if pivot is not None else detect_language(message)
 
-    from app.i18n.language import LANGUAGE_NAMES
     trace: list[dict] = []
 
     def t(step: str, detail: str) -> None:
@@ -239,8 +242,7 @@ async def _dispatch(
         t("Scope guard", "not a health question — declining politely")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
             response_message=SCOPE_DECLINE,
@@ -264,12 +266,11 @@ async def _dispatch(
               "deterministic directive — the LLM is never the arbiter of emergencies")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
             response_message=(
-SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
+                SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
             ),
             risk_level=EMERGENCY,
             recommended_action="call_emergency_services",
@@ -284,8 +285,7 @@ SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
         reply = IDENTITY_REPLY if is_identity_question(message) else GREETING_REPLY
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
             response_message=reply,
@@ -367,9 +367,8 @@ SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
                 else:
                     t("Output validation", "passed all safety checks")
                 await _write_receipt(
-                    db, user_id=user_id, session_id=session_id, message=message,
-                    model_name=provider.model_name, retrieved=None,
-                    grounding=None, grounding_status="n/a", used_rag=False,
+                    db, user_id=user_id, session_id=session_id,
+                    message=message, model_name=provider.model_name,
                 )
                 return ChatResult(
                     response_message=ability["reply"],
@@ -394,8 +393,7 @@ SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
         reply = await _data_query_reply(db, user_id)
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
-            model_name=provider.model_name, retrieved=None, grounding=None,
-            grounding_status="n/a", used_rag=False,
+            model_name=provider.model_name,
         )
         return ChatResult(
             response_message=reply,
@@ -438,8 +436,6 @@ SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
-                        retrieved=None, grounding=None,
-                        grounding_status="n/a", used_rag=False,
                     )
                     return ChatResult(
                         response_message=build_interaction_reply(*names),
@@ -473,8 +469,6 @@ SELF_HARM_REPLY if tr.self_harm else EMERGENCY_DIRECTIVE
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
-                        retrieved=None, grounding=None,
-                        grounding_status="n/a", used_rag=False,
                     )
                     return ChatResult(
                         response_message=reply,

@@ -96,7 +96,7 @@ async def chat_upload(
     filename = row.name or row.filepath.rsplit("/", 1)[-1]
 
     result = await submit_document(db, current_user, row.id)
-    reply = build_upload_reply(filename, result.accepted)
+    reply = build_upload_reply(filename)
 
     # The upload is a conversation turn: both sides land in history so
     # follow-ups ("what was in that report?") have context.

@@ -254,13 +254,9 @@ def _resolve_template(fired: list[Rule]) -> tuple[str | None, str | None]:
     naming = [r for r in fired if r.template_key]
     if not naming:
         return None, None
-    best = max(naming, key=lambda r: (TIER_INDEX[r.tier], _neg_key(r.rule_key)))
+    # Highest tier wins; ties break to the lexically-first rule_key.
+    best = min(naming, key=lambda r: (-TIER_INDEX[r.tier], r.rule_key))
     return best.template_key, best.rule_key
-
-
-def _neg_key(rule_key: str) -> tuple[int, ...]:
-    """Invert a string for max()-with-tie-break so the lexically first wins."""
-    return tuple(-ord(c) for c in rule_key)
 
 
 def aggregate(fired: list[Rule], facts: ConditionFacts) -> Outcome:

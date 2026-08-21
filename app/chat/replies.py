@@ -7,13 +7,10 @@ emergency variants always carry the escalation directive.
 
 from __future__ import annotations
 
+from app.insights.constants import MEDICATION_NOTE
 from app.triage.red_flags import EMERGENCY, EMERGENCY_DIRECTIVE, HIGH
 
-# Standard medication safety line (used whenever a reply touches medication).
-MEDICATION_NOTE = (
-    "Please do not stop or change any medication or dose on your own — discuss "
-    "it with the prescriber first."
-)
+__all__ = ["MEDICATION_NOTE"]  # single source: app/insights/constants.py
 
 # One-line decline for out-of-scope prompts (code, math, trivia, etc.).
 SCOPE_DECLINE = (

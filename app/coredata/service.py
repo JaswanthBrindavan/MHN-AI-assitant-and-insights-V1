@@ -16,10 +16,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.common import utcnow
+from app.models.core import User
 from app.models.coredata import (
     Bill,
     BodyMeasurement,
+    Doctor,
+    DoctorConnect,
+    DoctorSpecialization,
     FamilyConnect,
+    FileAccessExclusion,
     Insurance,
     LifestyleLog,
     ManualTracking,
@@ -145,8 +150,6 @@ async def _viewer_exclusions(
 ) -> dict[str, set[int]]:
     """resource_type → excluded resource ids for this viewer. Fail-open to {}
     (older/standalone databases without the table)."""
-    from app.models.coredata import FileAccessExclusion
-
     try:
         rows = (
             await db.execute(
@@ -625,8 +628,6 @@ async def list_family_connections(
     names: dict[uuid.UUID, str] = {}
     if other_ids:
         try:
-            from app.models.core import User
-
             for uid, uname in (
                 await db.execute(
                     select(User.id, User.name).where(User.id.in_(other_ids))
@@ -668,8 +669,6 @@ async def recent_doctor_consults(
     db: AsyncSession, user_id: uuid.UUID, limit: int = 5
 ) -> list[ConsultInfo]:
     """The user's doctor connections through the app, newest first."""
-    from app.models.coredata import Doctor, DoctorConnect, DoctorSpecialization
-
     rows = (
         await db.execute(
             select(DoctorConnect, Doctor, DoctorSpecialization)
@@ -690,8 +689,6 @@ async def recent_doctor_consults(
     names: dict[uuid.UUID, str] = {}
     if doctor_user_ids:
         try:
-            from app.models.core import User
-
             for uid, uname in (
                 await db.execute(
                     select(User.id, User.name).where(User.id.in_(doctor_user_ids))

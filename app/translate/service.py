@@ -137,11 +137,6 @@ def get_translator() -> SidecarTranslator | None:
     )
 
 
-def _split_local(code: str) -> tuple[str, str]:
-    """Local detect_language() code → (base language, script)."""
-    return ("en", "latin") if code == "en" else (code, "native")
-
-
 async def pivot_inbound(
     message: str, translator: SidecarTranslator | None
 ) -> InboundPivot:
@@ -153,7 +148,7 @@ async def pivot_inbound(
     Latin-script text is treated as English.
     """
     local = detect_language(message)
-    base, script = _split_local(local)
+    base, script = ("en", "latin") if local == "en" else (local, "native")
 
     if translator is None or len(message.strip()) < 3:
         return InboundPivot(base, script, message, active=False)

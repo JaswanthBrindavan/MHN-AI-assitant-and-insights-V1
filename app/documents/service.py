@@ -171,16 +171,15 @@ async def submit_document(
     return result
 
 
-def build_upload_reply(filename: str, triggered: bool) -> str:
+def build_upload_reply(filename: str) -> str:
     """Deterministic, validator-safe confirmation for the chat transcript.
 
-    The wording never alarms on a failed trigger: Spring submits every
-    confirmed upload to the pipeline itself (AiSubmissionListener), so Davi's
-    own submission is a redundant belt-and-braces call — its failure does not
-    mean processing isn't running. The reason still lands in job_runs and the
-    response's trigger_reason for diagnostics.
+    Trigger outcome deliberately does not change the wording: Spring submits
+    every confirmed upload to the pipeline itself (AiSubmissionListener), so
+    Davi's own submission is a redundant belt-and-braces call — its failure
+    does not mean processing isn't running. The reason still lands in
+    job_runs and the response's trigger_reason for diagnostics.
     """
-    del triggered  # copy is deliberately identical either way — see docstring
     return (
         f"Got your file '{filename}' — it's queued for automatic "
         "processing. The extracted details will appear in your records "
@@ -221,17 +220,13 @@ async def fetch_ai_result(
     if settings.mhn_ai_token:
         headers["Authorization"] = f"Bearer {settings.mhn_ai_token}"
 
-    async def _get(c: httpx.AsyncClient, path: str) -> httpx.Response:
-        return await c.get(base + path, headers=headers)
-
+    own_client = client is None
+    if own_client:
+        client = httpx.AsyncClient(timeout=settings.mhn_ai_timeout_seconds)
     try:
-        if client is not None:
-            status_resp = await _get(client, f"/v1/documents/{document_id}/status")
-        else:
-            async with httpx.AsyncClient(
-                timeout=settings.mhn_ai_timeout_seconds
-            ) as c:
-                status_resp = await _get(c, f"/v1/documents/{document_id}/status")
+        status_resp = await client.get(
+            f"{base}/v1/documents/{document_id}/status", headers=headers
+        )
         if status_resp.status_code != 200:
             return AiResultFetch(
                 ok=False, reason=f"status_http_{status_resp.status_code}"
@@ -243,14 +238,10 @@ async def fetch_ai_result(
             # Not classified yet (or a type with no addressable result).
             return AiResultFetch(ok=True, status=lifecycle, document_type=None)
 
-        path = f"/v1/documents/{doc_type}/{document_id}/ai-result"
-        if client is not None:
-            result_resp = await _get(client, path)
-        else:
-            async with httpx.AsyncClient(
-                timeout=settings.mhn_ai_timeout_seconds
-            ) as c:
-                result_resp = await _get(c, path)
+        result_resp = await client.get(
+            f"{base}/v1/documents/{doc_type}/{document_id}/ai-result",
+            headers=headers,
+        )
         if result_resp.status_code != 200:
             return AiResultFetch(
                 ok=False, status=lifecycle, document_type=doc_type,
@@ -268,3 +259,6 @@ async def fetch_ai_result(
         return AiResultFetch(
             ok=False, reason=f"{type(exc).__name__}: {str(exc)[:120]}"
         )
+    finally:
+        if own_client:
+            await client.aclose()
