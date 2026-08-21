@@ -302,7 +302,9 @@ async def _dispatch(
                     # AI-result requests outrank the document LISTING — "get
                     # insights for this report" must fetch the pipeline's
                     # result, not list files.
-                    ability = await handle_ai_result_query(db, user_id, message)
+                    ability = await handle_ai_result_query(
+                        db, user_id, message, session_id
+                    )
                 if ability is None:
                     ability = await handle_document_query(db, user_id, message)
                 if ability is None:

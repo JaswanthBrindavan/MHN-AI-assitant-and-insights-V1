@@ -929,7 +929,10 @@ async def handle_doctor_consult_query(
 # Document AI results — pulled from mhn-ai, never generated here
 # --------------------------------------------------------------------------- #
 async def handle_ai_result_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    session_id: uuid.UUID | None = None,
 ) -> dict | None:
     """"Get insights for this report" → mhn-ai's ai-result for the user's
     most recent upload. Insights for reports; section extraction for other
@@ -940,16 +943,65 @@ async def handle_ai_result_query(
     from app.documents.service import fetch_ai_result
     from app.models.coredata import UnclassifiedFile
 
-    # Resolve "this report" to a pipeline document id. Two places to look:
+    # Resolve "this report" to a pipeline document id, in order:
+    #   0. the document the CONVERSATION is about — the last reply in this
+    #      session that carried document cards (persisted in message meta);
     #   1. a still-unclassified upload (processing not finished — the row is
     #      deleted when mhn-ai files the document);
     #   2. otherwise the newest FILED document, whose content.ai envelope
     #      carries the ORIGINAL document_id the ai-result endpoint is
     #      addressed by (verified: mhn-ai assembly.py writes it).
     document_id: int | None = None
-    envelope_ai: dict | None = None
     name = "your document"
-    row = (
+
+    if session_id is not None:
+        from app.models.chat import ConversationMessage
+
+        recent = (
+            await db.execute(
+                select(ConversationMessage)
+                .where(
+                    ConversationMessage.session_id == session_id,
+                    ConversationMessage.role == "assistant",
+                )
+                .order_by(
+                    ConversationMessage.created_at.desc(),
+                    ConversationMessage.id.desc(),
+                )
+                .limit(10)
+            )
+        ).scalars().all()
+        _CARD_MODELS = {model.__tablename__: model
+                        for model, _lbl in DOCUMENT_KINDS.values()}
+        for m in recent:
+            cards = ((m.extracted_intent or {}).get("documents")) or []
+            if not cards:
+                continue
+            card = cards[0]
+            card_id = card.get("id")
+            rtype = card.get("resource_type")
+            if not isinstance(card_id, int):
+                break
+            if rtype == "unclassified":
+                # A pending upload's card id IS the pipeline document id.
+                document_id = card_id
+                name = str(card.get("title") or name)
+            else:
+                model = _CARD_MODELS.get(str(rtype))
+                if model is not None:
+                    doc = (
+                        await db.execute(
+                            select(model).where(model.id == card_id)  # type: ignore[attr-defined]
+                        )
+                    ).scalars().first()
+                    if doc is not None and doc.user_id == user_id:
+                        ai = (getattr(doc, "content", None) or {}).get("ai") or {}
+                        if isinstance(ai.get("document_id"), int):
+                            document_id = ai["document_id"]
+                            name = str(card.get("title") or name)
+            break  # only the most recent card-bearing reply counts as "this"
+
+    row = None if document_id is not None else (
         await db.execute(
             select(UnclassifiedFile)
             .where(
@@ -963,7 +1015,7 @@ async def handle_ai_result_query(
     if row is not None:
         document_id = row.id
         name = row.name or row.filepath.rsplit("/", 1)[-1]
-    else:
+    elif document_id is None:
         newest_at = None
         for kind in DOCUMENT_KINDS:
             model, _label = DOCUMENT_KINDS[kind]
@@ -988,7 +1040,6 @@ async def handle_ai_result_query(
             if newest_at is None or (at is not None and at > newest_at):
                 newest_at = at
                 document_id = doc_id
-                envelope_ai = ai
                 title = (ai.get("classification") or {}).get("title")
                 name = str(title) if title else doc.filepath.rsplit("/", 1)[-1]
     if document_id is None:
@@ -1003,39 +1054,20 @@ async def handle_ai_result_query(
         }
 
     fetch = await fetch_ai_result(document_id)
-
-    # The filed row's content.ai envelope is mhn-ai's OWN persisted output
-    # (assembly.py writes classification + extraction + insights there) — when
-    # the live endpoint is unreachable, render that instead of nothing.
-    def _envelope_payload() -> dict | None:
-        if envelope_ai is None:
-            return None
-        if not (
-            envelope_ai.get("insights")
-            or envelope_ai.get("extraction")
-            or envelope_ai.get("section_extraction")
-        ):
-            return None
-        return envelope_ai
-
+    if not fetch.ok:
+        return {
+            "reply": (
+                f"I couldn't reach the document-processing service for "
+                f"'{name}' just now. The document is safe — please try again "
+                "shortly."
+            ),
+            "action": "none",
+            "provenance": {"path": "ai_result", "document_id": document_id,
+                           "error": fetch.reason},
+        }
     result: dict | None = None
-    source = "mhn_ai"
-    if fetch.ok and fetch.result is not None and fetch.status == "completed":
+    if fetch.result is not None and fetch.status == "completed":
         result = fetch.result
-    elif not fetch.ok:
-        result = _envelope_payload()
-        source = "content_envelope"
-        if result is None:
-            return {
-                "reply": (
-                    f"I couldn't reach the document-processing service for "
-                    f"'{name}' just now. The document is safe — please try "
-                    "again shortly."
-                ),
-                "action": "none",
-                "provenance": {"path": "ai_result", "document_id": document_id,
-                               "error": fetch.reason},
-            }
     if result is None:
         state = fetch.status or "queued"
         if state == "failed":
@@ -1143,6 +1175,6 @@ async def handle_ai_result_query(
             "path": "ai_result",
             "document_id": document_id,
             "document_type": fetch.document_type,
-            "source": source,
+            "source": "mhn_ai",
         },
     }
