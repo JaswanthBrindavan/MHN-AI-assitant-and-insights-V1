@@ -329,7 +329,27 @@ async def handle_document_query(
         owner_label=owner_label, include_private=include_private,
         viewer_id=user_id,
     )
-    if not hits:
+
+    # Chat-uploaded documents live in unclassified_files until the pipeline
+    # files them — without this they are invisible to "show my documents"
+    # exactly in the window right after uploading.
+    pending: list = []
+    if query.relation is None:
+        from app.models.coredata import UnclassifiedFile
+
+        pending = list((
+            await db.execute(
+                select(UnclassifiedFile)
+                .where(
+                    (UnclassifiedFile.user_id == user_id)
+                    | (UnclassifiedFile.created_by == user_id)
+                )
+                .order_by(UnclassifiedFile.id.desc())
+                .limit(3)
+            )
+        ).scalars().all())
+
+    if not hits and not pending:
         kinds = ", ".join(query.kinds)
         return {
             "reply": (
@@ -348,11 +368,21 @@ async def handle_document_query(
         # column); fall back to the file's basename.
         name = h.title or h.filepath.rsplit("/", 1)[-1]
         lines.append(f"• {h.kind} — {name} ({when})")
-    lead = (
-        f"Here {'is' if len(hits) == 1 else 'are'} the most recent "
-        f"{'document' if len(hits) == 1 else 'documents'} for {owner_label}:"
-    )
-    if query.wants_date and hits[0].created_at:
+    for p_row in pending:
+        pname = p_row.name or p_row.filepath.rsplit("/", 1)[-1]
+        lines.append(f"• document — {pname} (still being processed)")
+    if hits:
+        lead = (
+            f"Here {'is' if len(hits) == 1 else 'are'} the most recent "
+            f"{'document' if len(hits) == 1 else 'documents'} for {owner_label}:"
+        )
+    else:
+        lead = (
+            "Your recently uploaded "
+            f"{'document is' if len(pending) == 1 else 'documents are'} "
+            "still being processed:"
+        )
+    if query.wants_date and hits and hits[0].created_at:
         lead = (
             f"The most recent {hits[0].kind} for {owner_label} is from "
             f"{hits[0].created_at.strftime('%d %b %Y')}."
@@ -379,6 +409,18 @@ async def handle_document_query(
         }
         for h in hits
     ]
+    cards.extend(
+        {
+            "kind": "document",
+            "resource_type": "unclassified",
+            "id": p_row.id,
+            "title": p_row.name or p_row.filepath.rsplit("/", 1)[-1],
+            "date": p_row.created_at.isoformat() if p_row.created_at else None,
+            "owner": "you",
+            "pending": True,
+        }
+        for p_row in pending
+    )
     return {
         "reply": lead + "\n" + "\n".join(lines),
         "action": "open_documents",

@@ -671,3 +671,50 @@ def test_upload_reply_never_alarms():
         reply = build_upload_reply("x.pdf", triggered)
         assert "could not be started" not in reply
         assert "queued for automatic processing" in reply
+
+
+# --------------------------------------------------------------------------- #
+# Generic document words + pending uploads visible in listings
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "message",
+    ["fetch my documents", "show me my docs", "pull my files",
+     "show me my records"],
+)
+def test_parse_document_query_generic_words(message):
+    from app.chat.abilities import ALL_DOCUMENT_KINDS, parse_document_query
+
+    q = parse_document_query(message)
+    assert q is not None and tuple(q.kinds) == ALL_DOCUMENT_KINDS
+
+
+@pytest.mark.asyncio
+async def test_document_listing_includes_pending_upload(db_session):
+    from app.chat.data_handlers import handle_document_query
+
+    db_session.add(_row(name="LR_W_fresh_upload.pdf"))
+    await db_session.flush()
+    out = await handle_document_query(db_session, USER, "show me my documents")
+    assert out is not None
+    assert out["provenance"]["path"] == "document_query"
+    assert "LR_W_fresh_upload.pdf (still being processed)" in out["reply"]
+    pending_cards = [c for c in out["documents"] if c.get("pending")]
+    assert pending_cards and pending_cards[0]["resource_type"] == "unclassified"
+
+
+@pytest.mark.asyncio
+async def test_document_listing_pending_plus_filed(db_session):
+    from app.chat.data_handlers import handle_document_query
+    from app.models.coredata import Report
+
+    db_session.add(Report(
+        user_id=USER, filepath="reports/filed-uuid.pdf",
+        content={"ai": {"classification": {"title": "CBC Report"}}},
+        private=False, created_at=utcnow(),
+    ))
+    db_session.add(_row(name="new_upload.pdf"))
+    await db_session.flush()
+    out = await handle_document_query(db_session, USER, "pull my files")
+    assert out is not None
+    assert "CBC Report" in out["reply"]
+    assert "new_upload.pdf (still being processed)" in out["reply"]
