@@ -40,6 +40,22 @@ UPLOAD_RESOURCE_TYPE = "unclassified_files"
 _RUNS_PATH = "/v1/document-processing-runs"
 
 
+def _mhn_ai_base() -> str | None:
+    """The configured mhn-ai base URL, normalized. None = not configured.
+
+    Found live: the env var was set without a scheme
+    ("mhn-ai.railway.internal:8000"), which httpx rejects with
+    UnsupportedProtocol — silently breaking every trigger and result fetch.
+    A missing scheme now defaults to http:// (Railway private networking).
+    """
+    raw = get_settings().mhn_ai_base_url.strip()
+    if not raw:
+        return None
+    if not raw.startswith(("http://", "https://")):
+        raw = "http://" + raw
+    return raw.rstrip("/")
+
+
 @dataclass(frozen=True)
 class TriggerResult:
     accepted: bool
@@ -79,9 +95,10 @@ async def trigger_mhn_ai(
     chat turn must succeed regardless.
     """
     settings = get_settings()
-    if not settings.mhn_ai_base_url:
+    base = _mhn_ai_base()
+    if base is None:
         return TriggerResult(accepted=False, reason="not_configured")
-    url = settings.mhn_ai_base_url.rstrip("/") + _RUNS_PATH
+    url = base + _RUNS_PATH
     headers = {"X-Request-Id": uuid.uuid4().hex}
     if settings.mhn_ai_token:
         headers["Authorization"] = f"Bearer {settings.mhn_ai_token}"
@@ -197,9 +214,9 @@ async def fetch_ai_result(
     returns it — insights for reports, section extraction for other types.
     """
     settings = get_settings()
-    if not settings.mhn_ai_base_url:
+    base = _mhn_ai_base()
+    if base is None:
         return AiResultFetch(ok=False, reason="not_configured")
-    base = settings.mhn_ai_base_url.rstrip("/")
     headers = {"X-Request-Id": uuid.uuid4().hex}
     if settings.mhn_ai_token:
         headers["Authorization"] = f"Bearer {settings.mhn_ai_token}"
