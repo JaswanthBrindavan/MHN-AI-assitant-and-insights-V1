@@ -286,3 +286,28 @@ async def test_chat_sidecar_down_degrades_to_directive_path(db_session):
     assert "Reply in Telugu" in provider.calls[0][0]
     assert r.language == "te"
     assert "translation" not in r.provenance
+
+
+async def test_english_followup_after_telugu_stays_english(db_session):
+    """A Telugu turn must not make later ENGLISH questions come back in
+    Telugu: the reply language follows each message, never the history."""
+    fake = FakeTranslator(to_english={TELUGU: TELUGU_EN})
+    provider = FakeProvider()
+    user = uuid.uuid4()
+
+    r1 = await handle_chat(db_session, user, TELUGU, provider, translator=fake)
+    # Pivot active → the model is explicitly told to answer in English
+    # (the sidecar translates the reply back to Telugu).
+    assert "Reply in English" in provider.calls[0][0]
+    assert r1.response_message.startswith("[te/native]")
+
+    r2 = await handle_chat(
+        db_session, user, "what exercises help with knee pain",
+        provider, session_id=r1.session_id, translator=fake,
+    )
+    # English message → no pivot, no translation, and the directive pins
+    # English even though the recent-turns context contains Telugu.
+    assert r2.language == "en"
+    assert "translation" not in r2.provenance
+    assert "Reply in English" in provider.calls[1][0]
+    assert not r2.response_message.startswith("[te/")

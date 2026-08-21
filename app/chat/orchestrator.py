@@ -630,11 +630,16 @@ async def _dispatch(
     system = build_system_prompt(
         chunks, patient_text, compacted_json, recent_turns=prior_turns[-6:]
     )
-    # With an active pivot the model answers in English (the reply is
-    # machine-translated back); the directive is the no-sidecar fallback.
-    directive = "" if (pivot is not None and pivot.active) else language_directive(lang)
-    if directive:
-        system = system + "\n\n" + directive
+    # The reply language always follows the LATEST message. With an active
+    # pivot the model must answer in English (the sidecar translates it
+    # back); otherwise the directive names the detected language — and an
+    # explicit "reply in English" matters just as much, so a Telugu history
+    # in the recent-turns context never drags an English question's answer
+    # back into Telugu.
+    directive = language_directive(
+        "en" if (pivot is not None and pivot.active) else lang
+    )
+    system = system + "\n\n" + directive
 
     # A provider outage must degrade to the deterministic safe reply, never
     # crash a patient-facing endpoint.
