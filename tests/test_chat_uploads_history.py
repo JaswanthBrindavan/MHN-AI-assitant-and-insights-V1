@@ -740,39 +740,6 @@ async def test_trigger_normalizes_schemeless_base_url(monkeypatch):
     assert seen["url"].startswith("http://mhn-ai.railway.internal:8000/")
 
 
-@pytest.mark.asyncio
-async def test_ai_result_falls_back_to_envelope_when_unreachable(
-    db_session, monkeypatch
-):
-    from app.models.coredata import Report
-
-    db_session.add(Report(
-        user_id=USER, filepath="reports/filed.pdf",
-        content={"ai": {
-            "document_id": 42,
-            "classification": {"title": "Lipid Profile"},
-            "insights": {
-                "summary": "Cholesterol values are borderline.",
-                "insights": [],
-                "disclaimer": "Informational only.",
-            },
-        }},
-        private=False, created_at=utcnow(),
-    ))
-    await db_session.flush()
-
-    async def _down(document_id, client=None):
-        return AiResultFetch(ok=False, reason="UnsupportedProtocol: …")
-
-    monkeypatch.setattr("app.documents.service.fetch_ai_result", _down)
-    out = await handle_ai_result_query(
-        db_session, USER, "get insights for this report"
-    )
-    assert out is not None
-    # Insights still display — served from mhn-ai's persisted envelope.
-    assert "Cholesterol values are borderline." in out["reply"]
-    assert out["provenance"]["source"] == "content_envelope"
-    assert out["action"] == "discuss_with_clinician"
 
 
 @pytest.mark.asyncio

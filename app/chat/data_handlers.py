@@ -952,7 +952,6 @@ async def handle_ai_result_query(
     #      carries the ORIGINAL document_id the ai-result endpoint is
     #      addressed by (verified: mhn-ai assembly.py writes it).
     document_id: int | None = None
-    envelope_ai: dict | None = None
     name = "your document"
 
     if session_id is not None:
@@ -999,7 +998,6 @@ async def handle_ai_result_query(
                         ai = (getattr(doc, "content", None) or {}).get("ai") or {}
                         if isinstance(ai.get("document_id"), int):
                             document_id = ai["document_id"]
-                            envelope_ai = ai
                             name = str(card.get("title") or name)
             break  # only the most recent card-bearing reply counts as "this"
 
@@ -1042,7 +1040,6 @@ async def handle_ai_result_query(
             if newest_at is None or (at is not None and at > newest_at):
                 newest_at = at
                 document_id = doc_id
-                envelope_ai = ai
                 title = (ai.get("classification") or {}).get("title")
                 name = str(title) if title else doc.filepath.rsplit("/", 1)[-1]
     if document_id is None:
@@ -1057,39 +1054,20 @@ async def handle_ai_result_query(
         }
 
     fetch = await fetch_ai_result(document_id)
-
-    # The filed row's content.ai envelope is mhn-ai's OWN persisted output
-    # (assembly.py writes classification + extraction + insights there) — when
-    # the live endpoint is unreachable, render that instead of nothing.
-    def _envelope_payload() -> dict | None:
-        if envelope_ai is None:
-            return None
-        if not (
-            envelope_ai.get("insights")
-            or envelope_ai.get("extraction")
-            or envelope_ai.get("section_extraction")
-        ):
-            return None
-        return envelope_ai
-
+    if not fetch.ok:
+        return {
+            "reply": (
+                f"I couldn't reach the document-processing service for "
+                f"'{name}' just now. The document is safe — please try again "
+                "shortly."
+            ),
+            "action": "none",
+            "provenance": {"path": "ai_result", "document_id": document_id,
+                           "error": fetch.reason},
+        }
     result: dict | None = None
-    source = "mhn_ai"
-    if fetch.ok and fetch.result is not None and fetch.status == "completed":
+    if fetch.result is not None and fetch.status == "completed":
         result = fetch.result
-    elif not fetch.ok:
-        result = _envelope_payload()
-        source = "content_envelope"
-        if result is None:
-            return {
-                "reply": (
-                    f"I couldn't reach the document-processing service for "
-                    f"'{name}' just now. The document is safe — please try "
-                    "again shortly."
-                ),
-                "action": "none",
-                "provenance": {"path": "ai_result", "document_id": document_id,
-                               "error": fetch.reason},
-            }
     if result is None:
         state = fetch.status or "queued"
         if state == "failed":
@@ -1197,6 +1175,6 @@ async def handle_ai_result_query(
             "path": "ai_result",
             "document_id": document_id,
             "document_type": fetch.document_type,
-            "source": source,
+            "source": "mhn_ai",
         },
     }
