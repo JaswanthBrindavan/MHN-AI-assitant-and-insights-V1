@@ -793,3 +793,29 @@ async def test_ai_result_this_means_the_previous_turns_document(
     assert out is not None
     assert seen["id"] == 42  # the LISTED report, not the newer DEXA (99)
     assert "Values look stable." in out["reply"]
+
+
+@pytest.mark.parametrize(
+    ("message", "nkinds"),
+    [
+        ("list all my documents", 4),
+        ("list my reports", 1),
+        ("view my scans", 1),
+        ("display my prescriptions", 1),
+        ("all my documents", 4),
+        ("what documents do I have", 4),
+        ("do I have any vaccination records", 1),
+    ],
+)
+def test_parse_document_query_list_view_phrasings(message, nkinds):
+    from app.chat.abilities import parse_document_query
+
+    q = parse_document_query(message)
+    assert q is not None and len(q.kinds) == nkinds
+
+
+def test_parse_document_query_everyday_lists_stay_unparsed():
+    from app.chat.abilities import parse_document_query_fuzzy
+
+    assert parse_document_query_fuzzy("I have a shopping list") is None
+    assert parse_document_query_fuzzy("my wish list for diwali") is None
