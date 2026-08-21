@@ -320,10 +320,11 @@ def test_chart_payload_shape():
 # --------------------------------------------------------------------------- #
 # i18n
 # --------------------------------------------------------------------------- #
-def test_detect_language_scripts_and_hinglish():
+def test_detect_language_scripts():
     assert detect_language("what helps blood pressure") == "en"
     assert detect_language("मुझे सिर दर्द है और बुखार भी") == "hi"
-    assert detect_language("mujhe bahut dard hai bukhar bhi hai") == "hi-Latn"
+    # Romanized text is the sidecar's call (IndicLID) — locally it is "en".
+    assert detect_language("mujhe bahut dard hai bukhar bhi hai") == "en"
     assert detect_language("எனக்கு தலைவலி இருக்கிறது") == "ta"
     # A stray Devanagari char or two must not flip the language.
     assert detect_language("my BP is ठीक today") == "en"
@@ -342,13 +343,15 @@ def test_hindi_triage_phrases_fire():
 
 
 @pytest.mark.asyncio
-async def test_emergency_reply_localized(db_session):
+async def test_emergency_reply_hinglish_triage(db_session):
+    # The romanized triage phrases still fire without any sidecar; the reply
+    # is the English directive (translation needs the sidecar).
     result = await handle_chat(
         db_session, USER, "saans nahi aa rahi, madad karo", FakeProvider()
     )
     assert result.risk_level == "emergency"
-    assert result.language == "hi-Latn"
-    assert "emergency" in result.response_message.lower()  # bilingual tail
+    assert result.language == "en"
+    assert "emergency" in result.response_message.lower()
 
 
 # --------------------------------------------------------------------------- #

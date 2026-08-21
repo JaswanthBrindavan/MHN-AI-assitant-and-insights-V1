@@ -39,6 +39,19 @@ HIGH_ESCALATION = (
     "promptly — contact a doctor or urgent care now rather than waiting."
 )
 
+# Supportive self-harm reply. Tele-MANAS 14416 is India's national 24x7
+# mental-health helpline; the digit-fidelity check in app/translate/service.py
+# guarantees the number survives machine translation.
+SELF_HARM_REPLY = (
+    "I'm really glad you told me — what you're feeling matters. You are "
+    "not alone, and support is available right now: please call the "
+    "Tele-MANAS mental-health helpline at 14416 (toll-free, 24x7, in your "
+    "language), or your local emergency number if you are in immediate "
+    "danger. If you can, reach out to someone you trust and let them know "
+    "how you're feeling. Talking to a mental-health professional can "
+    "genuinely help."
+)
+
 # Deterministic safe replies by risk level. Used when validation fails or a
 # guardrail degrades. Each is self-consistent with its risk level.
 _SAFE_NONE = (

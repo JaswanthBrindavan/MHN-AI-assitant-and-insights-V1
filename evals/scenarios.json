@@ -15,7 +15,7 @@
     {
       "name": "emergency_hinglish",
       "message": "saans nahi aa rahi hai",
-      "expect": {"risk_level": "emergency", "language": "hi-Latn"}
+      "expect": {"risk_level": "emergency"}
     },
     {
       "name": "emergency_devanagari",

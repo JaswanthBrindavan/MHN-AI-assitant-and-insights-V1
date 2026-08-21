@@ -1,24 +1,17 @@
-"""Indian-language detection (native script + romanized), the bidirectional
-translation directive, and localized safety replies with base-language
-fallback."""
+"""Native-script detection and the LLM language directive (no word lists —
+romanized language ID lives in the translator sidecar)."""
 
 from __future__ import annotations
 
 import pytest
 
+from app.chat.replies import SELF_HARM_REPLY
 from app.i18n.language import LANGUAGE_NAMES, detect_language, language_directive
-from app.i18n.replies import (
-    localized_emergency,
-    localized_high_escalation,
-    localized_scope_decline,
-    localized_self_harm,
-)
 
 
 @pytest.mark.parametrize(
     ("message", "lang"),
     [
-        # Native scripts
         ("నాకు చాలా నొప్పి ఉంది", "te"),
         ("எனக்கு வலி இருக்கிறது", "ta"),
         ("আমার খুব ব্যথা হচ্ছে", "bn"),
@@ -27,62 +20,36 @@ from app.i18n.replies import (
         ("મને ખૂબ દુખે છે", "gu"),
         ("ਮੈਨੂੰ ਬਹੁਤ ਦਰਦ ਹੈ", "pa"),
         ("मुझे बहुत दर्द है", "hi"),
-        # Romanized ("text of that language in English letters")
-        ("naaku chala noppi undi", "te-Latn"),
-        ("enakku romba vali irukku", "ta-Latn"),
-        ("amar khub betha hocche", "bn-Latn"),
-        ("mala khup dukhat aahe", "mr-Latn"),
-        ("nanage tumba novu ide", "kn-Latn"),
-        ("enikku valare vedana undu", "ml-Latn"),
-        ("mane bahu dukhe chhe", "gu-Latn"),
-        ("mainu haigi bahut painda", "pa-Latn"),
-        ("mujhe bahut dard hai", "hi-Latn"),
-        # English and near-English stay English
+        # Romanized Indic is the sidecar's call; locally it is English.
+        ("naaku chala noppi undi", "en"),
         ("what helps blood pressure", "en"),
-        ("my BP is fine today", "en"),
     ],
 )
 def test_detect_language(message, lang):
     assert detect_language(message) == lang
 
 
-def test_single_marker_never_flips_language():
-    # One romanized word in an English sentence is not a language switch.
-    assert detect_language("the pain aahe since morning") == "en"
+def test_single_native_word_never_flips_language():
+    assert detect_language("my BP is ठीक today") == "en"
 
 
 @pytest.mark.parametrize("lang", ["te", "ta-Latn", "hi", "bn"])
 def test_directive_supports_translation_both_ways(lang):
     d = language_directive(lang)
     assert LANGUAGE_NAMES[lang].split(" ")[0] in d
-    # The model must translate to English on request — both directions work.
     assert "translate" in d.lower()
     assert "English" in d
 
 
 def test_directive_romanized_keeps_latin_script():
-    d = language_directive("te-Latn")
-    assert "Latin script" in d
+    assert "Latin script" in language_directive("te-Latn")
 
 
 def test_directive_english_is_empty():
     assert language_directive("en") == ""
 
 
-@pytest.mark.parametrize("lang", ["te", "ta", "bn", "mr", "kn", "ml", "gu", "pa"])
-def test_localized_safety_replies_exist(lang):
-    # Every supported language localizes all four safety-critical strings,
-    # and the emergency/high strings keep an English gloss.
-    assert "emergency" in localized_emergency(lang)  # the gloss
-    assert "serious" in localized_high_escalation(lang)
-    assert localized_scope_decline(lang) != localized_scope_decline("en")
-    assert "14416" in localized_self_harm(lang)  # Tele-MANAS is pan-India
-
-
-def test_localized_replies_romanized_falls_back_to_native():
-    assert localized_emergency("te-Latn") == localized_emergency("te")
-    assert localized_self_harm("kn-Latn") == localized_self_harm("kn")
-
-
-def test_localized_replies_unknown_language_falls_back_to_english():
-    assert localized_emergency("fr") == localized_emergency("en")
+def test_self_harm_reply_keeps_helpline_number():
+    # Tele-MANAS 14416 must be present in the English canon — the translate
+    # layer's digit check then guarantees it survives translation.
+    assert "14416" in SELF_HARM_REPLY
