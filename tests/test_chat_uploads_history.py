@@ -819,3 +819,73 @@ def test_parse_document_query_everyday_lists_stay_unparsed():
 
     assert parse_document_query_fuzzy("I have a shopping list") is None
     assert parse_document_query_fuzzy("my wish list for diwali") is None
+# --------------------------------------------------------------------------- #
+# Metric matching against real-world extraction names
+# --------------------------------------------------------------------------- #
+def _lab_report_content():
+    """Extraction shaped like the live report that exposed these bugs —
+    note "Hemoglobin A1c" sits BEFORE "Hemoglobin", and HDL/LDL rows exist."""
+    return {"ai": {"extraction": {"results": [
+        {"test_name": "Glucose - Fasting", "value": "96",
+         "value_numeric": 96.0, "unit": "mg/dL"},
+        {"test_name": "Hemoglobin A1c", "value": "5.8",
+         "value_numeric": 5.8, "unit": "%"},
+        {"test_name": "Cholesterol - HDL", "value": "44",
+         "value_numeric": 44.0, "unit": "mg/dL"},
+        {"test_name": "Cholesterol - Total", "value": "182",
+         "value_numeric": 182.0, "unit": "mg/dL"},
+        {"test_name": "Hemoglobin", "value": "14.1",
+         "value_numeric": 14.1, "unit": "g/dL"},
+    ]}}}
+
+
+async def _seed_lab_report(db):
+    from app.models.coredata import Report
+
+    db.add(Report(user_id=USER, filepath="reports/lab.pdf",
+                  content=_lab_report_content(), private=False,
+                  created_at=utcnow()))
+    await db.flush()
+
+
+@pytest.mark.asyncio
+async def test_hba1c_matches_hemoglobin_a1c_name(db_session):
+    from app.chat.data_handlers import handle_metric_query
+
+    await _seed_lab_report(db_session)
+    out = await handle_metric_query(db_session, USER, "what is my latest hba1c")
+    assert out is not None and "5.8 %" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_hemoglobin_skips_the_a1c_row(db_session):
+    from app.chat.data_handlers import handle_metric_query
+
+    await _seed_lab_report(db_session)
+    out = await handle_metric_query(
+        db_session, USER, "what was my last hemoglobin value?"
+    )
+    assert out is not None and "14.1 g/dL" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_total_cholesterol_skips_hdl_row(db_session):
+    from app.chat.data_handlers import handle_metric_query
+
+    await _seed_lab_report(db_session)
+    out = await handle_metric_query(
+        db_session, USER, "what's my most recent cholesterol level?"
+    )
+    assert out is not None and "182 mg/dL" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_blood_sugar_falls_back_to_report_glucose(db_session):
+    from app.chat.data_handlers import handle_metric_query
+
+    await _seed_lab_report(db_session)  # no logged vitals at all
+    out = await handle_metric_query(
+        db_session, USER, "show me my latest fasting blood sugar"
+    )
+    assert out is not None and "96 mg/dL" in out["reply"]
+    assert out["provenance"]["source"] == "report"
