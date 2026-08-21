@@ -79,6 +79,12 @@ _DOC_KIND_TERMS: tuple[tuple[str, str], ...] = (
     (r"prescriptions?", "prescription"),
     (r"vaccinations?|vaccines?|immuni[sz]ations?", "vaccination"),
     (r"\btests?\b|check-?ups?|checkups?", "report"),
+    # Generic words meaning "whatever I have" — expands to every kind below.
+    (r"\bdocuments?\b|\bdocs?\b|\bfiles?\b|\brecords?\b|\buploads?\b", "any"),
+)
+
+ALL_DOCUMENT_KINDS: tuple[str, ...] = (
+    "report", "scan", "prescription", "vaccination",
 )
 
 _DOC_INTENT_RE = re.compile(
@@ -97,6 +103,11 @@ def parse_document_query(message: str) -> DocumentQuery | None:
     for pattern, kind in _DOC_KIND_TERMS:
         if re.search(rf"\b(?:{pattern})\b", low) and kind not in kinds:
             kinds.append(kind)
+    if kinds == ["any"]:
+        # "show my documents/files/records" — every kind qualifies.
+        kinds = list(ALL_DOCUMENT_KINDS)
+    else:
+        kinds = [k for k in kinds if k != "any"]
     if not kinds:
         return None
     # "my report" (self) or "my father's report" (relative).
