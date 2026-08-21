@@ -997,3 +997,49 @@ async def test_plain_show_my_insurance_lists_documents(db_session):
         db_session, USER, "show my insurance"
     )
     assert out is None
+
+
+@pytest.mark.asyncio
+async def test_dynamic_param_bare_latest_phrasing(db_session):
+    from app.chat.data_handlers import handle_report_param_ask
+    from app.models.coredata import Report
+
+    db_session.add(Report(user_id=USER, filepath="reports/cbc.pdf",
+        content={"ai": {"extraction": {"results": [
+            {"test_name": "RBC COUNT", "value": "5.26", "value_numeric": 5.26,
+             "unit": "Millions/cumm", "abnormal_flag": "normal"},
+        ]}}}, private=False, created_at=utcnow()))
+    await db_session.flush()
+    out = await handle_report_param_ask(db_session, USER, "latest rbc count")
+    assert out is not None
+    assert "5.26" in out["reply"]
+    # "normal" is a value mhn-ai writes explicitly — never worded as a
+    # deviation, and never escalated.
+    assert "flagged" not in out["reply"]
+    assert "within the printed reference range" in out["reply"]
+    assert out["action"] == "review_with_clinician"
+
+
+@pytest.mark.asyncio
+async def test_ai_result_normal_flags_not_counted_abnormal(
+    db_session, monkeypatch
+):
+    await _seed_upload(db_session)
+
+    async def _done(document_id, client=None):
+        return AiResultFetch(ok=True, status="completed",
+            document_type="reports", result={
+                "classification": {"title": "CBC"},
+                "extraction": {"results": [
+                    {"test_name": "RBC", "value": "5.2",
+                     "abnormal_flag": "normal"},
+                    {"test_name": "RDW", "value": "16.1",
+                     "abnormal_flag": "high"},
+                ]},
+            })
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _done)
+    out = await handle_ai_result_query(db_session, USER, "analyze this report")
+    assert out is not None
+    assert "1 value is" in out["reply"]  # only RDW counts, not RBC "normal"
+    assert "RBC: 5.2\n" in out["reply"] or "RBC: 5.2" in out["reply"]
