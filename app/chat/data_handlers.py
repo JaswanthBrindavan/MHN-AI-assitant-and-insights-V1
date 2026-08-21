@@ -1164,10 +1164,12 @@ async def handle_ai_result_query(
         lines.append(f"Here's what was read from \"{title}\":")
         abnormal = 0
         for r in results[:8]:
-            flag = (r.get("abnormal_flag") or "").strip()
-            if flag:
+            flag = (r.get("abnormal_flag") or "").strip().lower()
+            if _is_abnormal_flag(flag):
                 abnormal += 1
-            flag_note = f" — {flag}" if flag else ""
+                flag_note = f" — {flag}"
+            else:
+                flag_note = ""
             unit = f" {r.get('unit')}" if r.get("unit") else ""
             lines.append(
                 f"• {r.get('test_name', 'value')}: {r.get('value', '?')}"
@@ -1219,6 +1221,17 @@ async def handle_ai_result_query(
     }
 
 
+# mhn-ai writes the flag explicitly for every row — "normal" is a value, not
+# an omission, and must never be reported as a deviation.
+_NON_ABNORMAL_FLAGS = frozenset(
+    {"", "normal", "n", "na", "n/a", "none", "within range", "-"}
+)
+
+
+def _is_abnormal_flag(flag: str) -> bool:
+    return flag.strip().lower() not in _NON_ABNORMAL_FLAGS
+
+
 # --------------------------------------------------------------------------- #
 # Dynamic report-parameter asks ("what is my basophils")
 # --------------------------------------------------------------------------- #
@@ -1261,16 +1274,21 @@ async def handle_report_param_ask(
                     continue
                 value = float(m.group())
             unit = item.get("unit") or ""
-            flag = (item.get("abnormal_flag") or "").strip()
+            flag = (item.get("abnormal_flag") or "").strip().lower()
+            abnormal = _is_abnormal_flag(flag)
             when = (
                 r.created_at.strftime("%d %b %Y") if r.created_at
                 else "date unknown"
             )
-            flag_note = (
-                f" It is flagged {flag} against the printed reference range."
-                if flag
-                else ""
-            )
+            if abnormal:
+                flag_note = (
+                    f" It is flagged {flag} against the printed reference "
+                    "range."
+                )
+            elif flag:
+                flag_note = " It is within the printed reference range."
+            else:
+                flag_note = ""
             return {
                 "reply": (
                     f"Your most recent {test_name} on record is "
@@ -1279,7 +1297,7 @@ async def handle_report_param_ask(
                     f"{_NOT_MEDICAL_ADVICE}"
                 ),
                 "action": (
-                    "discuss_with_clinician" if flag
+                    "discuss_with_clinician" if abnormal
                     else "review_with_clinician"
                 ),
                 "provenance": {"path": "report_param", "term": term,

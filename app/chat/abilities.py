@@ -654,7 +654,8 @@ def parse_ai_result_query(message: str) -> bool:
 # user's extracted reports. The handler only answers when a matching test
 # exists, so ordinary questions fall through untouched.
 _PARAM_ASK_RE = re.compile(
-    r"\b(?:what(?:'s| is| was| are)?|show(?: me)?|check)\s+(?:my|the)\s+"
+    r"(?:\b(?:what(?:'s| is| was| are)?|show(?: me)?|check)\s+(?:my|the)\s+"
+    r"|^(?:my\s+)?(?=latest|last|recent|current))"
     r"(?:latest\s+|last\s+|recent\s+|current\s+)?"
     r"([a-z][a-z0-9 /().%-]{2,40}?)"
     r"(?:\s+(?:level|value|count|reading|number)s?)?\s*\??$",
