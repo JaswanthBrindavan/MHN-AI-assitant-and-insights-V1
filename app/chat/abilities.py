@@ -253,6 +253,10 @@ METRIC_REGISTRY: dict[str, dict] = {
     "blood_sugar": {
         "source": "vital", "vital_type": "blood_sugar",
         "display": "blood sugar", "unit": "mg/dL",
+        # No logged vital? Extracted reports carry it too ("Glucose -
+        # Fasting") — used as a fallback, never over a fresher vital.
+        "param_terms": ("glucose", "blood sugar"),
+        "param_exclude": ("urine",),
     },
     "blood_pressure": {
         "source": "vital", "vital_type": "blood_pressure",
@@ -269,8 +273,12 @@ METRIC_REGISTRY: dict[str, dict] = {
     "weight": {"source": "body", "body_type": "weight", "display": "weight", "unit": "kg"},
     "bmi": {"source": "body", "body_type": "bmi", "display": "BMI", "unit": "kg/m²"},
     "hba1c": {
-        "source": "report_param", "param_terms": ("hba1c", "glycated hemoglobin",
-                                                  "glycated haemoglobin"),
+        # "a1c" as a substring covers the real-world spellings seen in
+        # extracted reports: "HbA1c", "Hemoglobin A1c", "Glycosylated
+        # Hemoglobin (HbA1c)".
+        "source": "report_param",
+        "param_terms": ("a1c", "glycated hemoglobin", "glycated haemoglobin",
+                        "glycosylated hemoglobin", "glycosylated haemoglobin"),
         "display": "HbA1c", "unit": "%",
     },
     # Common lab parameters pulled from extracted reports (same report_param
@@ -279,6 +287,8 @@ METRIC_REGISTRY: dict[str, dict] = {
     "total_cholesterol": {
         "source": "report_param",
         "param_terms": ("total cholesterol", "cholesterol"),
+        # "cholesterol" alone must never pick up the HDL/LDL rows.
+        "param_exclude": ("hdl", "ldl", "vldl"),
         "display": "total cholesterol", "unit": "mg/dL",
     },
     "ldl": {
@@ -334,6 +344,9 @@ METRIC_REGISTRY: dict[str, dict] = {
     "hemoglobin": {
         "source": "report_param",
         "param_terms": ("hemoglobin", "haemoglobin"),
+        # "Hemoglobin A1c" sits FIRST in real extractions — plain hemoglobin
+        # must never return the A1c percentage.
+        "param_exclude": ("a1c", "glycated", "glycosylated"),
         "display": "hemoglobin", "unit": "g/dL",
     },
 }

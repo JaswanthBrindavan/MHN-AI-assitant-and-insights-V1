@@ -493,7 +493,9 @@ async def handle_tracker_add(
 # --------------------------------------------------------------------------- #
 # Metric pulls
 # --------------------------------------------------------------------------- #
-def _search_content_for_param(content, terms: tuple[str, ...]):
+def _search_content_for_param(
+    content, terms: tuple[str, ...], exclude: tuple[str, ...] = ()
+):
     """Recursively search a report's extracted JSON for a named parameter.
 
     Handles both the legacy demo shape ({"tests": [{"name","value","unit"}]})
@@ -506,7 +508,11 @@ def _search_content_for_param(content, terms: tuple[str, ...]):
             content.get("name") or content.get("parameter") or content.get("test")
             or content.get("test_name") or ""
         ).lower()
-        if name and any(t in name for t in terms):
+        if (
+            name
+            and any(t in name for t in terms)
+            and not any(x in name for x in exclude)
+        ):
             # Production pre-computes the numeric value — trust it first.
             vn = content.get("value_numeric")
             if isinstance(vn, (int, float)):
@@ -518,19 +524,22 @@ def _search_content_for_param(content, terms: tuple[str, ...]):
                     if m:
                         return float(m.group()), content.get("unit")
         for v in content.values():
-            found = _search_content_for_param(v, terms)
+            found = _search_content_for_param(v, terms, exclude)
             if found:
                 return found
     elif isinstance(content, list):
         for item in content:
-            found = _search_content_for_param(item, terms)
+            found = _search_content_for_param(item, terms, exclude)
             if found:
                 return found
     return None
 
 
 async def _latest_report_param(
-    db: AsyncSession, user_id: uuid.UUID, terms: tuple[str, ...]
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    terms: tuple[str, ...],
+    exclude: tuple[str, ...] = (),
 ):
     rows = (
         await db.execute(
@@ -541,7 +550,7 @@ async def _latest_report_param(
         )
     ).scalars().all()
     for r in rows:
-        found = _search_content_for_param(r.content, terms)
+        found = _search_content_for_param(r.content, terms, exclude)
         if found:
             value, unit = found
             return value, unit, r.created_at
@@ -563,6 +572,31 @@ async def handle_metric_query(
     if spec["source"] == "vital":
         point = await latest_vital(db, user_id, spec["vital_type"])
         if point is None:
+            # No logged vital — fall back to extracted reports when the spec
+            # names report terms ("Glucose - Fasting" lives there).
+            if spec.get("param_terms"):
+                found = await _latest_report_param(
+                    db, user_id, spec["param_terms"],
+                    spec.get("param_exclude", ()),
+                )
+                if found is not None:
+                    value, found_unit, created = found
+                    value_text = f"{value:g} {found_unit or unit}"
+                    when = (
+                        created.strftime("%d %b %Y") if created
+                        else "date unknown"
+                    )
+                    return {
+                        "reply": (
+                            f"Your most recent {display} on record is "
+                            f"{value_text} (from a report dated {when}). "
+                            f"{_NOT_MEDICAL_ADVICE}"
+                        ),
+                        "action": "review_with_clinician",
+                        "provenance": {"path": "metric_query",
+                                       "metric": query.metric,
+                                       "source": "report"},
+                    }
             return _metric_not_found(display)
         if point.secondary is not None:
             value_text = f"{point.value:g}/{point.secondary:g} {point.unit or unit}"
@@ -588,7 +622,9 @@ async def handle_metric_query(
         value_text = f"{point.value:g} {unit}"
         when = point.at.strftime("%d %b %Y")
     else:  # report_param (e.g. HbA1c from extracted lab reports)
-        found = await _latest_report_param(db, user_id, spec["param_terms"])
+        found = await _latest_report_param(
+            db, user_id, spec["param_terms"], spec.get("param_exclude", ())
+        )
         if found is None:
             return _metric_not_found(display)
         value, found_unit, created = found
