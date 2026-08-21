@@ -89,7 +89,8 @@ ALL_DOCUMENT_KINDS: tuple[str, ...] = (
 
 _DOC_INTENT_RE = re.compile(
     r"\b(?:find|show|get|pull( up)?|fetch|where is|when was|what was|see|open|"
-    r"do i have|latest|last|recent|most recent)\b",
+    r"list|view|display|do i have|what .{0,20}do i have|"
+    r"latest|last|recent|most recent|all)\b",
     re.IGNORECASE,
 )
 _DOC_DATE_RE = re.compile(r"\bwhen\b|\bdate\b|\bhow long ago\b", re.IGNORECASE)
@@ -110,9 +111,12 @@ def parse_document_query(message: str) -> DocumentQuery | None:
         kinds = [k for k in kinds if k != "any"]
     if not kinds:
         return None
-    # "my report" (self) or "my father's report" (relative).
+    # "my report" (self), "my father's report" (relative), or the
+    # self-implying "do I have …" phrasing.
     relation = find_relation(message)
-    if relation is None and not re.search(r"\bmy\b|\bour\b", low):
+    if relation is None and not re.search(
+        r"\bmy\b|\bour\b|\bdo i have\b", low
+    ):
         return None
     return DocumentQuery(
         kinds=tuple(kinds),
@@ -560,6 +564,7 @@ _DOC_VOCAB: tuple[str, ...] = (
     "prescription", "prescriptions", "vaccination", "vaccinations",
     "vaccine", "vaccines", "immunization", "immunisation", "checkup",
     "checkups", "latest", "last", "recent", "find", "show", "fetch", "pull",
+    "list", "view", "display", "documents", "files", "records",
 )
 _DOC_VOCAB_SET = frozenset(_DOC_VOCAB)
 
