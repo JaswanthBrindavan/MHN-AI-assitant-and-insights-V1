@@ -1042,3 +1042,58 @@ async def test_ai_result_normal_flags_not_counted_abnormal(
     assert out is not None
     assert "1 value is" in out["reply"]  # only RDW counts, not RBC "normal"
     assert "RBC: 5.2\n" in out["reply"] or "RBC: 5.2" in out["reply"]
+
+
+# --------------------------------------------------------------------------- #
+# Name-check (mhn-ai V10 / name-verification feature)
+# --------------------------------------------------------------------------- #
+async def test_fetch_ai_result_carries_name_check(monkeypatch):
+    monkeypatch.setenv("MHN_AI_BASE_URL", "http://mhn-ai.internal:8000")
+    get_settings.cache_clear()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/documents/7/status"
+        return httpx.Response(200, json={
+            "document_id": 7, "status": "failed",
+            "document_type": "reports",
+            "last_error_code": "name_mismatch",
+            "name_check": {"verdict": "mismatch",
+                           "document_name": "Ramesh Kumar",
+                           "confirmed": False},
+        })
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    ) as client:
+        fetch = await fetch_ai_result(7, client=client)
+    # A mismatch never asks the typed result route (it would 409).
+    assert fetch.ok and fetch.result is None
+    assert fetch.error_code == "name_mismatch"
+    assert fetch.name_check["document_name"] == "Ramesh Kumar"
+    get_settings.cache_clear()
+
+
+async def test_ai_result_name_mismatch_explains_not_retry(
+    db_session, monkeypatch
+):
+    async def _mismatch(document_id, client=None):
+        return AiResultFetch(
+            ok=True, status="failed", document_type="reports",
+            error_code="name_mismatch",
+            name_check={"verdict": "mismatch",
+                        "document_name": "Ramesh Kumar", "confirmed": False},
+        )
+
+    monkeypatch.setattr(
+        "app.documents.service.fetch_ai_result", _mismatch
+    )
+    uid = uuid.uuid4()
+    db_session.add(_row(user_id=uid, name="cbc.pdf"))
+    await db_session.flush()
+
+    r = await handle_ai_result_query(db_session, uid, "get insights for this report")
+    assert r is not None
+    assert "doesn't match this account" in r["reply"]
+    assert "Ramesh Kumar" in r["reply"]
+    assert "retried" not in r["reply"]  # retry is the WRONG guidance here
+    assert r["provenance"]["name_check"] == "mismatch"

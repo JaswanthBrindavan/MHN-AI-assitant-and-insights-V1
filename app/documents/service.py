@@ -200,6 +200,12 @@ class AiResultFetch:
     #: The full DocumentAiResult JSON, when the typed result call succeeded.
     result: dict | None = None
     reason: str | None = None
+    #: The item's last_error_code ("name_mismatch", "publish_failed", …).
+    error_code: str | None = None
+    #: The status endpoint's name_check payload ({verdict, document_name,
+    #: confirmed}) — a MISMATCHED document is never filed, and this is the
+    #: only place chat can learn why it appears stuck.
+    name_check: dict | None = None
 
 
 async def fetch_ai_result(
@@ -234,9 +240,18 @@ async def fetch_ai_result(
         status_body = status_resp.json()
         lifecycle = status_body.get("status")
         doc_type = status_body.get("document_type")
-        if not doc_type:
-            # Not classified yet (or a type with no addressable result).
-            return AiResultFetch(ok=True, status=lifecycle, document_type=None)
+        error_code = status_body.get("last_error_code")
+        name_check = status_body.get("name_check")
+        if not isinstance(name_check, dict):
+            name_check = None
+        if not doc_type or error_code == "name_mismatch":
+            # Not classified yet, a type with no addressable result, or held
+            # on a name mismatch (the typed result route refuses those with
+            # 409 — do not even ask).
+            return AiResultFetch(
+                ok=True, status=lifecycle, document_type=doc_type,
+                error_code=error_code, name_check=name_check,
+            )
 
         result_resp = await client.get(
             f"{base}/v1/documents/{doc_type}/{document_id}/ai-result",
@@ -246,10 +261,12 @@ async def fetch_ai_result(
             return AiResultFetch(
                 ok=False, status=lifecycle, document_type=doc_type,
                 reason=f"result_http_{result_resp.status_code}",
+                error_code=error_code, name_check=name_check,
             )
         return AiResultFetch(
             ok=True, status=lifecycle, document_type=doc_type,
             result=result_resp.json(),
+            error_code=error_code, name_check=name_check,
         )
     except Exception as exc:  # noqa: BLE001 — the chat turn must succeed regardless
         logger.warning(
