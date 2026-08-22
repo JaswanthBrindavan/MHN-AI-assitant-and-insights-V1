@@ -19,9 +19,18 @@ Everything is decision support, never diagnosis — enforced in code.
 This backend shares the **MHN production database**. The production stack is
 three repos (see `docs/production_integration.md` for verified contracts):
 `mhn-spring` (Java API, **Flyway owns ALL schema** — including the `ai_*`
-tables since V4), `mhn-ai` (per-document AI: classify → file → extract →
-insights; writes `content.ai` envelopes into `reports.content` etc.; its
-Alembic chain is frozen, `ai_alembic_version`), and `mhn-react` (BFF frontend).
+tables since V4; our `V6__davi_ai_tables.sql` is ADOPTED, and teammates have
+added V7–V10 after it — V10 is the ai name-check columns), `mhn-ai`
+(per-document AI: classify → file → extract → insights; writes `content.ai`
+envelopes into `reports.content` etc.; its Alembic chain is frozen,
+`ai_alembic_version`; since its PR #4 it also runs a NAME CHECK — a document
+whose printed patient name doesn't match the wallet owner is NEVER filed:
+item status `failed` + `last_error_code="name_mismatch"`, the status
+endpoint carries `name_check {verdict, document_name, confirmed}` +
+`filed_section`/`section_row_id`, and the typed ai-result route answers 409
+for mismatches — `fetch_ai_result` reads all of this and the chat explains
+the mismatch instead of suggesting a retry), and `mhn-react` (BFF frontend;
+our chat PRs are merged on main, plus the team's name-mismatch dialog).
 
 Rules we follow (do not break these):
 
