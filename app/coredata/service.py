@@ -110,6 +110,82 @@ def _relation_matches(term: str, name: str | None) -> bool:
     return bool(tokens & accepts)
 
 
+# The gender a term implies ("grandfather" is male) — used to pick the right
+# person when the relation row is generic: two "Grandparent" connections are
+# told apart by the member's own gender from the user table.
+_TERM_GENDER: dict[str, str] = {
+    "father": "male", "son": "male", "brother": "male", "husband": "male",
+    "grandfather": "male", "grandson": "male", "uncle": "male",
+    "nephew": "male",
+    "mother": "female", "daughter": "female", "sister": "female",
+    "wife": "female", "grandmother": "female", "granddaughter": "female",
+    "aunt": "female", "niece": "female",
+}
+
+# Generic relation word + member gender → the gendered word for display
+# ("Grandchild" + male → "Grandson").
+_GENDERED_FORMS: dict[tuple[str, str], str] = {
+    ("grandparent", "male"): "grandfather",
+    ("grandparent", "female"): "grandmother",
+    ("grandchild", "male"): "grandson",
+    ("grandchild", "female"): "granddaughter",
+    ("parent", "male"): "father",
+    ("parent", "female"): "mother",
+    ("child", "male"): "son",
+    ("child", "female"): "daughter",
+    ("sibling", "male"): "brother",
+    ("sibling", "female"): "sister",
+    ("spouse", "male"): "husband",
+    ("spouse", "female"): "wife",
+}
+
+
+def _norm_gender(value: str | None) -> str | None:
+    """"Male"/"M"/"male" → "male"; anything else/unset → None (unknown)."""
+    if not value:
+        return None
+    v = value.strip().lower()
+    if v in ("male", "m"):
+        return "male"
+    if v in ("female", "f"):
+        return "female"
+    return None
+
+
+def gendered_relation(relation: str | None, gender: str | None) -> str | None:
+    """Display form of a relation, gendered when the row is generic.
+
+    "Grandchild" + male → "Grandson"; unknown gender or an already-gendered
+    name passes through unchanged.
+    """
+    if not relation:
+        return relation
+    g = _norm_gender(gender)
+    if g is None:
+        return relation
+    swapped = _GENDERED_FORMS.get((relation.strip().lower(), g))
+    if swapped is None:
+        return relation
+    return swapped.capitalize() if relation[:1].isupper() else swapped
+
+
+async def _genders_of(
+    db: AsyncSession, ids: list[uuid.UUID]
+) -> dict[uuid.UUID, str | None]:
+    """user id → normalized gender; {} when the user table is unavailable."""
+    if not ids:
+        return {}
+    try:
+        rows = (
+            await db.execute(
+                select(User.id, User.gender).where(User.id.in_(ids))
+            )
+        ).all()
+    except Exception:  # noqa: BLE001 — user table may be absent standalone
+        return {}
+    return {uid: _norm_gender(g) for uid, g in rows}
+
+
 async def resolve_family_member(
     db: AsyncSession, user_id: uuid.UUID, relation_term: str
 ) -> uuid.UUID | None:
@@ -129,8 +205,10 @@ async def resolve_family_member(
                 (FamilyConnect.requester_id == user_id)
                 | (FamilyConnect.acceptor_id == user_id),
             )
+            .order_by(FamilyConnect.id)
         )
     ).all()
+    candidates: list[uuid.UUID] = []
     for fc, rel in rows:
         if rel is None:
             continue
@@ -145,8 +223,20 @@ async def resolve_family_member(
             other_shares = _owner_read_grant(fc, owner_is_requester=True)
             name = rel.inverse
         if other_shares and _relation_matches(term, name):
-            return other
-    return None
+            candidates.append(other)
+    if not candidates:
+        return None
+    # A gendered ask ("grandmother") against generic relation rows
+    # ("Grandparent") is settled by the member's own gender: contradicting
+    # candidates are excluded, unknown gender passes (fail-open).
+    want = _TERM_GENDER.get(term)
+    if want is not None and len({*candidates}) >= 1:
+        genders = await _genders_of(db, candidates)
+        candidates = [
+            c for c in candidates
+            if genders.get(c) is None or genders.get(c) == want
+        ]
+    return candidates[0] if candidates else None
 
 
 async def resolve_family_member_by_name(
@@ -707,14 +797,18 @@ async def list_family_connections(
         for fc, _rel in rows
     ]
     names: dict[uuid.UUID, str] = {}
+    genders: dict[uuid.UUID, str | None] = {}
     if other_ids:
         try:
-            for uid, uname in (
+            for uid, uname, ugender in (
                 await db.execute(
-                    select(User.id, User.name).where(User.id.in_(other_ids))
+                    select(User.id, User.name, User.gender).where(
+                        User.id.in_(other_ids)
+                    )
                 )
             ).all():
                 names[uid] = uname
+                genders[uid] = ugender
         except Exception:  # noqa: BLE001 — user table may be absent standalone
             names = {}
     out: list[FamilyMemberInfo] = []
@@ -724,6 +818,9 @@ async def list_family_connections(
         relation = None
         if rel is not None:
             relation = rel.name if viewer_is_requester else rel.inverse
+            # Generic rows read gendered when the member's gender is known:
+            # "Grandchild" + male → "Grandson".
+            relation = gendered_relation(relation, genders.get(other))
         shares = _owner_read_grant(
             fc, owner_is_requester=not viewer_is_requester
         )
