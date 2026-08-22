@@ -77,7 +77,7 @@ from app.i18n.language import (
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
 from app.models.chat import RagTurnReceipt
-from app.rag.extractive import build_extractive_answer
+from app.rag.extractive import build_extractive_answer, is_definitional_ask
 from app.rag.prompt import build_correction_directive, build_system_prompt
 from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
 from app.translate.service import (
@@ -562,15 +562,29 @@ async def _dispatch(
     else:
         t("Retrieval", "nothing retrieved — answering with general guidance only")
 
-    # Extractive mode: with no live model configured (LLM_PROVIDER=fake),
-    # serve the retrieved validated content directly — different question,
-    # different content — instead of one canned line for everything.
-    if get_settings().llm_provider == "fake" and chunks:
+    # Extractive answers — no LLM — in two cases:
+    #   * no live model configured (LLM_PROVIDER=fake): serve retrieved
+    #     validated content for everything rather than one canned line;
+    #   * a definitional ask that names a condition ("what is X", "symptoms
+    #     of X", "does X run in families"): the clinician-reviewed profile
+    #     section IS the answer, so serving it verbatim is both cheaper and
+    #     better-grounded than generation. Personal framings and follow-ups
+    #     (no condition named in THIS message) stay with the model.
+    serve_extractive = bool(chunks) and (
+        get_settings().llm_provider == "fake"
+        or (
+            risk == NONE
+            and message_named_condition
+            and is_definitional_ask(message)
+            and not is_personal_health_query(message)
+        )
+    )
+    if serve_extractive:
         extractive = build_extractive_answer(chunks)
         if extractive is not None:
             t("Generate",
-              "no live model configured — serving validated profile content "
-              "directly (extractive mode)")
+              "answered directly from the clinically validated profile "
+              "content (no model call)")
             display = extractive
             if risk == HIGH:
                 display = f"{HIGH_ESCALATION} {display}"
