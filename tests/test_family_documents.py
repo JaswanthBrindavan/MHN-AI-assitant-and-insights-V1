@@ -180,3 +180,105 @@ async def test_unshared_relation_gets_honest_not_found(db_session):
     assert r is not None
     assert "couldn't find a connected family member" in r["reply"]
     assert r["provenance"]["resolved"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Gendered asks against generic relation rows (Grandparent/Grandchild)
+# --------------------------------------------------------------------------- #
+GRANDPA = uuid.UUID("cccccccc-cccc-cccc-cccc-ccccccccccc1")
+GRANDMA = uuid.UUID("dddddddd-dddd-dddd-dddd-ddddddddddd1")
+
+
+def _user_g(uid, name, login, gender):
+    u = _user(uid, name, login)
+    u.gender = gender
+    return u
+
+
+async def _grandparent_link(db, other: uuid.UUID):
+    rel = Relation(name="Grandparent", inverse="Grandchild")
+    db.add(rel)
+    await db.flush()
+    db.add(FamilyConnect(
+        requester_id=VIEWER, acceptor_id=other, accepted=True,
+        relation_id=rel.id, acc_read=True, req_read=True,
+    ))
+    await db.flush()
+
+
+async def test_gendered_ask_picks_the_right_grandparent(db_session):
+    # BOTH grandparents connected under the same generic "Grandparent" row.
+    await _grandparent_link(db_session, GRANDPA)
+    await _grandparent_link(db_session, GRANDMA)
+    db_session.add(_user_g(GRANDPA, "Rama Rao", "ramarao", "Male"))
+    db_session.add(_user_g(GRANDMA, "Sita Devi", "sitadevi", "Female"))
+    await db_session.flush()
+
+    assert await resolve_family_member(db_session, VIEWER, "grandfather") == GRANDPA
+    assert await resolve_family_member(db_session, VIEWER, "grandmother") == GRANDMA
+    # The neutral ask keeps first-connection order.
+    assert await resolve_family_member(db_session, VIEWER, "grandparent") == GRANDPA
+
+
+async def test_gendered_ask_never_returns_the_wrong_person(db_session):
+    # Only a MALE grandparent connected — "grandmother" must be an honest
+    # not-found, not the grandfather's documents.
+    await _grandparent_link(db_session, GRANDPA)
+    db_session.add(_user_g(GRANDPA, "Rama Rao", "ramarao", "Male"))
+    await db_session.flush()
+    assert await resolve_family_member(db_session, VIEWER, "grandfather") == GRANDPA
+    assert await resolve_family_member(db_session, VIEWER, "grandmother") is None
+
+
+async def test_unknown_gender_fails_open(db_session):
+    # No user row / no gender recorded → the gendered ask still resolves
+    # (better to show the shared documents than to refuse on missing data).
+    await _grandparent_link(db_session, GRANDPA)
+    assert await resolve_family_member(db_session, VIEWER, "grandmother") == GRANDPA
+
+
+async def test_grandchild_gendered_ask(db_session):
+    await _link(db_session, name="Grandchild", inverse="Grandparent")
+    db_session.add(_user_g(OWNER, "Bhargava Ram", "bhargav", "Male"))
+    await db_session.flush()
+    assert await resolve_family_member(db_session, VIEWER, "grandson") == OWNER
+    assert await resolve_family_member(db_session, VIEWER, "granddaughter") is None
+    assert await resolve_family_member(db_session, VIEWER, "grandchild") == OWNER
+
+
+async def test_family_list_shows_gendered_relation(db_session):
+    from app.coredata.service import list_family_connections
+
+    await _link(db_session, name="Grandchild", inverse="Grandparent")
+    db_session.add(_user_g(OWNER, "Bhargava Ram", "bhargav", "Male"))
+    await db_session.flush()
+    members = await list_family_connections(db_session, VIEWER)
+    assert [m.relation for m in members] == ["Grandson"]
+    # And the reverse perspective genders the generic "Grandparent" too —
+    # unknown gender for VIEWER keeps it generic.
+    members = await list_family_connections(db_session, OWNER)
+    assert [m.relation for m in members] == ["Grandparent"]
+
+
+async def test_gendered_document_fetch_end_to_end(db_session):
+    await _grandparent_link(db_session, GRANDPA)
+    await _grandparent_link(db_session, GRANDMA)
+    db_session.add(_user_g(GRANDPA, "Rama Rao", "ramarao", "Male"))
+    db_session.add(_user_g(GRANDMA, "Sita Devi", "sitadevi", "Female"))
+    db_session.add(Report(
+        user_id=GRANDMA, filepath="reports/gm.pdf", private=False,
+        created_at=utcnow(),
+    ))
+    db_session.add(Report(
+        user_id=GRANDPA, filepath="reports/gp.pdf", private=False,
+        created_at=utcnow(),
+    ))
+    await db_session.flush()
+
+    r = await handle_document_query(
+        db_session, VIEWER, "show my grandmother's reports"
+    )
+    assert r is not None
+    assert "your grandmother" in r["reply"]
+    assert {d["slug"] for d in r["documents"]} == {"gm.pdf"}
+    assert all(d["owner_slug"] == "sitadevi" for d in r["documents"])
