@@ -122,6 +122,7 @@ async def test_resolve_by_name_requires_read_grant(db_session):
 # --------------------------------------------------------------------------- #
 async def test_grandchild_documents_fetched_not_own(db_session):
     await _link(db_session, name="Grandchild", inverse="Grandparent")
+    db_session.add(_user(OWNER, "Bhargava Ram", "bhargav"))
     now = utcnow()
     db_session.add(Report(
         user_id=OWNER, filepath="reports/gc.pdf", private=False, created_at=now,
@@ -138,6 +139,9 @@ async def test_grandchild_documents_fetched_not_own(db_session):
     assert "your grandchild" in r["reply"]
     paths = {d["slug"] for d in r["documents"]}
     assert paths == {"gc.pdf"}  # the grandchild's report, never the viewer's
+    # The member's username rides along so the client can open the in-app
+    # family view instead of the raw file.
+    assert all(d["owner_slug"] == "bhargav" for d in r["documents"])
 
 
 async def test_documents_by_name_end_to_end(db_session):
@@ -155,6 +159,18 @@ async def test_documents_by_name_end_to_end(db_session):
     assert r is not None
     assert "Bhargava" in r["reply"]
     assert {d["slug"] for d in r["documents"]} == {"gc2.pdf"}
+    assert all(d["owner_slug"] == "bhargav" for d in r["documents"])
+
+
+async def test_own_documents_carry_no_owner_slug(db_session):
+    db_session.add(Report(
+        user_id=VIEWER, filepath="reports/mine2.pdf", private=False,
+        created_at=utcnow(),
+    ))
+    await db_session.flush()
+    r = await handle_document_query(db_session, VIEWER, "show my reports")
+    assert r is not None
+    assert all("owner_slug" not in d for d in r["documents"])
 
 
 async def test_unshared_relation_gets_honest_not_found(db_session):

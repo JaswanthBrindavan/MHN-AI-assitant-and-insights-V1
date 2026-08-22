@@ -316,6 +316,7 @@ async def handle_document_query(
         return None
 
     owner_id, owner_label, include_private = user_id, "you", True
+    owner_slug = None  # family member's username — the /family/{slug} route key
     if query.relation or query.owner_name:
         if query.relation:
             member = await resolve_family_member(db, user_id, query.relation)
@@ -339,6 +340,16 @@ async def handle_document_query(
                                "resolved": False},
             }
         owner_id, owner_label, include_private = member, label, False
+        try:
+            from app.models.core import User
+
+            owner_slug = (
+                await db.execute(
+                    select(User.user_name).where(User.id == member)
+                )
+            ).scalar_one_or_none()
+        except Exception:  # noqa: BLE001 — user table may be absent standalone
+            owner_slug = None
 
     hits = await latest_documents(
         db, owner_id, list(query.kinds),
@@ -420,6 +431,10 @@ async def handle_document_query(
             "title": h.title or h.filepath.rsplit("/", 1)[-1],
             "date": h.created_at.isoformat() if h.created_at else None,
             "owner": h.owner_label,
+            # For family documents: the member's username, so the client can
+            # open the in-app family view (/family/{slug}/{section}/{file})
+            # instead of the raw file.
+            **({"owner_slug": owner_slug} if owner_slug else {}),
         }
         for h in hits
     ]
