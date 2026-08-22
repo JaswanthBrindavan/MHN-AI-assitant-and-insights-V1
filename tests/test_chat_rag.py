@@ -156,3 +156,79 @@ async def test_control_characters_do_not_crash(db_session):
         db_session, USER, "\x00\x01\x02what is diabetes?\x00", provider
     )
     assert result.response_message.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Definitional asks skip the LLM even with a live provider configured
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_definitional_ask_is_extractive_no_llm(db_session, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    get_settings.cache_clear()
+    try:
+        # MCP-shaped chunks ("Display — section:" header + body lines), as
+        # the real corpus parser emits them — the extractive composer needs
+        # that shape (the 3-file synthetic corpus doesn't have it).
+        db_session.add(McpChunk(
+            condition_code="T2DM", chunk_type="symptoms",
+            content=(
+                "Type 2 Diabetes — symptoms:\n"
+                "Increased thirst and frequent urination are common early "
+                "signs.\n"
+                "Fatigue and blurred vision can develop gradually over time."
+            ),
+        ))
+        await db_session.flush()
+        provider = FakeProvider()
+        result = await handle_chat(
+            db_session, USER, "what are the symptoms of diabetes", provider
+        )
+        # The validated profile answered — the model was never called.
+        assert provider.calls == []
+        assert result.provenance["mode"] == "extractive"
+        assert result.provenance["used_rag"] is True
+        assert "thirst" in result.response_message.lower()
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_compositional_question_still_uses_llm(db_session, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    get_settings.cache_clear()
+    try:
+        await _ingest(db_session)
+        provider = FakeProvider(responses=[CLEAN])
+        result = await handle_chat(
+            db_session, USER,
+            "How does diabetes affect daily life over the years?", provider,
+        )
+        # Not a section-shaped ask — composition belongs to the model.
+        assert provider.calls
+        assert result.provenance.get("mode") != "extractive"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_personal_framing_stays_with_llm(db_session, monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    get_settings.cache_clear()
+    try:
+        await _ingest(db_session)
+        provider = FakeProvider(responses=[CLEAN])
+        result = await handle_chat(
+            db_session, USER,
+            "why are my symptoms of diabetes worse at night", provider,
+        )
+        # Personal correlation needs the model (and the [P] machinery).
+        assert provider.calls
+        assert result.provenance.get("mode") != "extractive"
+    finally:
+        get_settings.cache_clear()

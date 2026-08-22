@@ -12,6 +12,31 @@ import re
 
 from app.rag.retrieval import RetrievedChunk
 
+# Question shapes whose answer IS a corpus section (definition, symptoms,
+# diagnosis, causes/heredity, complications, prevalence, types, prevention).
+# These are served extractively from the validated profiles — no LLM — when
+# the message names a condition. Anything needing composition ("how does X
+# affect daily life", "is X curable") deliberately stays with the model.
+_DEFINITIONAL_RES = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\bwhat (?:is|are)\b|\bdefine\b|\bmeaning of\b|\btell me about\b"
+    r"|\bexplain\b",
+    r"\bsymptoms?\b|\bsigns?\b|\bhow do i know if\b"
+    r"|\bhow to (?:identify|recogni[sz]e)\b",
+    r"\bdiagnos|\btests? (?:for|to)\b|\bscreening\b|\bdetect",
+    r"\brun in famil|\bhereditary\b|\bgenetic\b|\binherit"
+    r"|\bfamily history of\b|\bcauses?\b|\bwhy do people get\b"
+    r"|\brisk factors?\b",
+    r"\bcomplications?\b|\bwhat happens if\b|\bleft untreated\b",
+    r"\bhow common\b|\bprevalence\b|\bhow many people\b",
+    r"\btypes? of\b|\bstages? of\b|\bkinds? of\b",
+    r"\bprevent|\bavoid\b|\breduce (?:the )?risk\b",
+))
+
+
+def is_definitional_ask(message: str) -> bool:
+    """True when the question's answer is a profile section verbatim."""
+    return any(p.search(message) for p in _DEFINITIONAL_RES)
+
 _MAX_CHUNKS = 3
 _MAX_LINES_PER_CHUNK = 5
 _MAX_LINE_CHARS = 260

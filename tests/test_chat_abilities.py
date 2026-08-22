@@ -330,6 +330,15 @@ def test_detect_language_scripts():
     assert detect_language("my BP is ठीक today") == "en"
 
 
+def test_pleasantry_tails_stay_conversational():
+    # "thank you so much" etc. must not burn an LLM call.
+    from app.chat.router import route
+
+    for msg in ("thank you so much", "thanks a lot!", "good night davi",
+                "take care", "ok thanks again"):
+        assert route(msg, False) == "conversational", msg
+
+
 def test_language_directive():
     # English is an explicit instruction too — a multilingual history must
     # never decide the reply language; the latest message does.
