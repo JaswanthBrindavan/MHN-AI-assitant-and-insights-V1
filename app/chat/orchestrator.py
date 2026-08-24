@@ -533,13 +533,18 @@ async def _dispatch(
     compacted_summary, recent = await assemble_context(db, session_id)
     prior_turns = recent[:-1] if recent else []
 
-    codes = await resolve_scope(db, message, user_codes)
+    # Message-only scope FIRST, then union the pedigree codes in. The old
+    # shape called resolve_scope twice with the same message — a duplicate
+    # registry match and an extra round trip — because it needed both answers.
+    # Deriving one from the other gives both for one call.
+    message_codes = await resolve_scope(db, message, set())
+    codes = message_codes | await resolve_scope(db, "", user_codes)
     # Scope carry-forward: a follow-up like "is it serious?" names no condition
     # of its own, so inherit the topic from the reader's OWN recent questions.
-    # Keying on "did THIS message name a condition" (message-only scope) rather
-    # than on `codes` — which is never empty for users with a pedigree — so the
-    # topic carries for everyone. Union with `codes` keeps pedigree context.
-    message_named_condition = bool(await resolve_scope(db, message, set()))
+    # Keying on "did THIS message name a condition" rather than on `codes` —
+    # which is never empty for users with a pedigree — so the topic carries
+    # for everyone. Union with `codes` keeps pedigree context.
+    message_named_condition = bool(message_codes)
     if not message_named_condition and prior_turns:
         recent_user_text = " ".join(
             m["message"] for m in prior_turns[-6:] if m.get("role") == "user"

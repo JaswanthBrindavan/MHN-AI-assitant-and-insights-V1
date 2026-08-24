@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from time import monotonic as _now
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -222,20 +223,27 @@ class ConditionIndex:
 
 
 # Process-level cache. Reset with reset_index_cache() (tests, post-ingest).
+#
+# The TTL matters operationally: without it, a running API process keeps
+# serving a stale index after an ingest until someone restarts it, and
+# nothing surfaces that it is stale.
+CACHE_TTL_SECONDS = 300.0
 _index_cache: ConditionIndex | None = None
 _cache_loaded = False
+_cache_loaded_at: float = 0.0
 
 
 def reset_index_cache() -> None:
-    global _index_cache, _cache_loaded
+    global _index_cache, _cache_loaded, _cache_loaded_at
     _index_cache = None
     _cache_loaded = False
+    _cache_loaded_at = 0.0
 
 
 async def load_condition_index(db: AsyncSession) -> ConditionIndex | None:
     """Return the cached index, loading once. None → registry empty/unavailable."""
-    global _index_cache, _cache_loaded
-    if _cache_loaded:
+    global _index_cache, _cache_loaded, _cache_loaded_at
+    if _cache_loaded and (_now() - _cache_loaded_at) < CACHE_TTL_SECONDS:
         return _index_cache
     try:
         rows = (
@@ -257,6 +265,7 @@ async def load_condition_index(db: AsyncSession) -> ConditionIndex | None:
         else:
             _index_cache = None
         _cache_loaded = True
+        _cache_loaded_at = _now()
     except Exception:  # noqa: BLE001 — registry must never break a reply
         logger.warning("condition registry load failed; static fallback", exc_info=True)
         _index_cache = None
