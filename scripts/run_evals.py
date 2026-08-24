@@ -80,7 +80,7 @@ def _check(expect: dict, result) -> list[str]:
 
 
 async def run(path: Path) -> int:
-    spec = json.loads(path.read_text())
+    spec = json.loads(path.read_text(encoding="utf-8"))
     scenarios = spec["scenarios"]
     failed = 0
 

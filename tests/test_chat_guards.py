@@ -121,7 +121,7 @@ def test_guard_modules_have_no_llm_imports():
         root / "chat" / "replies.py",
     ]
     for f in files:
-        src = f.read_text().lower()
+        src = f.read_text(encoding="utf-8").lower()
         # Only IMPORT lines matter: brand names may appear as DATA (the
         # identity router matches "are you chatgpt/openai" etc.), but no
         # guard module may import an LLM client or the app.llm package.

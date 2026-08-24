@@ -30,8 +30,12 @@ SPEC = ToolSpec(
 
 
 def test_tool_types_are_frozen():
+    # Construct locally: mutating the module-level SPEC would leak a corrupted
+    # name into every later test if frozen ever regressed, and the resulting
+    # failure would point at the fake's call log instead of at this bug.
+    spec = ToolSpec(name="t", description="d", input_schema={})
     with pytest.raises(dataclasses.FrozenInstanceError):
-        SPEC.name = "other"  # type: ignore[misc]
+        spec.name = "other"  # type: ignore[misc]
 
 
 def test_tool_result_defaults_to_success():
@@ -47,7 +51,7 @@ def test_tool_result_message_holds_all_results_together():
             ToolResult(call_id="c2", content="{}"),
         )
     )
-    assert len(msg.results) == 2
+    assert tuple(r.call_id for r in msg.results) == ("c1", "c2")
 
 
 def test_wants_tools_needs_both_the_stop_reason_and_the_calls():
@@ -56,6 +60,11 @@ def test_wants_tools_needs_both_the_stop_reason_and_the_calls():
     assert not LLMTurn(text="hi").wants_tools
     # A truncated tool turn with no calls must NOT loop.
     assert not LLMTurn(stop_reason="tool_use").wants_tools
+    # ...and calls present with a non-tool_use stop_reason must NOT loop
+    # either. Without these two, `return bool(self.tool_calls)` passes — and
+    # this is the sole loop condition for the agent in Task 6.
+    assert not LLMTurn(tool_calls=(call,), stop_reason="max_tokens").wants_tools
+    assert not LLMTurn(tool_calls=(call,), stop_reason="refusal").wants_tools
 
 
 async def test_fake_provider_scripts_a_tool_call_then_an_answer():
@@ -143,3 +152,20 @@ async def test_raises_records_the_call_before_failing():
         await provider.generate_turn(system="s", messages=[UserMessage("u")])
 
     assert len(provider.calls) == 2
+
+
+async def test_the_logged_messages_are_a_snapshot_not_an_alias():
+    """`list(messages)` in generate_turn is load-bearing, not a redundant copy.
+
+    The agent loop grows ONE list across rounds; without the copy every logged
+    entry would alias the final state and the call log would be useless for
+    reconstructing what the model actually saw on each round.
+    """
+    provider = FakeProvider()
+    history = [UserMessage("first")]
+
+    await provider.generate_turn(system="s", messages=history)
+    history.append(UserMessage("second"))
+    await provider.generate_turn(system="s", messages=history)
+
+    assert [len(c["messages"]) for c in provider.calls] == [1, 2]

@@ -153,7 +153,7 @@ async def test_golden_artifacts_snapshot(db_session):
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
         GOLDEN.write_text(actual_json + "\n")
 
-    expected_json = GOLDEN.read_text().rstrip("\n")
+    expected_json = GOLDEN.read_text(encoding="utf-8").rstrip("\n")
     assert actual_json == expected_json
 
 

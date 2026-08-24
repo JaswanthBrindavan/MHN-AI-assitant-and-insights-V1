@@ -29,7 +29,7 @@ from app.models.chat import McpChunk
 def _load_specs(folder: Path) -> list[dict]:
     specs: list[dict] = []
     for path in sorted(folder.glob("*.json")):
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         items = data if isinstance(data, list) else [data]
         for item in items:
             specs.append(

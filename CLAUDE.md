@@ -31,8 +31,9 @@ When performing an independent review of implemented changes, read:
 Follow those instructions for requirement coverage, bug detection, security, performance, testing, and review findings.
 
 ### Task Plans
-Current implementation plans and task-specific documents may be stored in:
-`docs/`
+Current implementation plans and task-specific documents are stored in:
+`project_docs/` (architecture.md, drawbacks.md, implementation-plan.md).
+`docs/` holds the verified production contracts, not plans.
 
 Treat the current task's implementation plan as the source of truth for what should be implemented.
 
@@ -119,7 +120,9 @@ app/
                        code map T2DM→MC001 / HTN→MC051 / CAD→MC052, fail-open
   drugs/service.py     drug-info intent extraction + lookup over drug_reference
                        (250K medicines); deterministic validator-safe replies
-  llm/                 LLMProvider protocol, FakeProvider, agnostic providers
+  llm/                 LLMProvider + ToolCallingProvider protocols, tools.py
+                       (provider-neutral tool vocabulary), FakeProvider,
+                       agnostic providers
                        (OpenAI-compatible + Anthropic, pure httpx, env-selected)
   coredata/service.py  reads over Flyway core tables (documents w/ family
                        consent, vitals, lifestyle) + lifestyle_log tracker WRITE

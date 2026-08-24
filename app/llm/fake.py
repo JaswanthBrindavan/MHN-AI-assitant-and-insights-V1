@@ -48,10 +48,15 @@ class FakeProvider:
         # Record BEFORE raising: `provider.calls == []` must keep meaning
         # "the model was never reached", so an outage still records that it was.
         self.calls.append({"system": system, "user": user})
-        if self._raises is not None:
-            raise self._raises
+        # Script FIRST, then raise: that makes responses= and raises= compose
+        # into "answer N times, then the provider dies", which is what a
+        # mid-conversation outage actually looks like. Checking raises= first
+        # would make the two kwargs mutually exclusive and force every such
+        # test to hand-roll a subclass.
         if self._responses:
             return self._responses.pop(0)
+        if self._raises is not None:
+            raise self._raises
         return self.DEFAULT
 
     async def generate_turn(
@@ -68,8 +73,8 @@ class FakeProvider:
                 "tools": [t.name for t in tools],
             }
         )
-        if self._raises is not None:
-            raise self._raises
         if self._turns:
             return self._turns.pop(0)
+        if self._raises is not None:
+            raise self._raises
         return LLMTurn(text=self.DEFAULT, stop_reason="end_turn")

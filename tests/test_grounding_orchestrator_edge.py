@@ -32,16 +32,6 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-class ScriptThenRaiseProvider(FakeProvider):
-    """Returns scripted responses, then raises once the script is exhausted."""
-
-    async def generate(self, *, system: str, user: str) -> str:
-        if not self._responses:
-            self.calls.append({"system": system, "user": user})
-            raise RuntimeError("provider down mid-conversation")
-        return await super().generate(system=system, user=user)
-
-
 # --------------------------------------------------------------------------- #
 # analyze_grounding — marker validity
 # --------------------------------------------------------------------------- #
@@ -433,7 +423,12 @@ async def test_provider_error_on_enforce_retry_degrades_not_crashes(
     set_grounding_mode("enforce")
     # First answer carries an invalid marker (no chunks exist), forcing the
     # enforce-mode corrective retry — which raises.
-    provider = ScriptThenRaiseProvider(responses=["The dose is 5 mg [1]."])
+    # responses= then raises= composes into "answer once, then the provider
+    # dies" — the grounding retry is what trips the outage.
+    provider = FakeProvider(
+        responses=["The dose is 5 mg [1]."],
+        raises=RuntimeError("provider down mid-conversation"),
+    )
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
