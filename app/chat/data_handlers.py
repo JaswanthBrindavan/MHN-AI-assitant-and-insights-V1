@@ -316,6 +316,7 @@ async def handle_document_query(
         return None
 
     owner_id, owner_label, include_private = user_id, "you", True
+    owner_slug = None  # family member's username — the /family/{slug} route key
     if query.relation or query.owner_name:
         if query.relation:
             member = await resolve_family_member(db, user_id, query.relation)
@@ -339,6 +340,16 @@ async def handle_document_query(
                                "resolved": False},
             }
         owner_id, owner_label, include_private = member, label, False
+        try:
+            from app.models.core import User
+
+            owner_slug = (
+                await db.execute(
+                    select(User.user_name).where(User.id == member)
+                )
+            ).scalar_one_or_none()
+        except Exception:  # noqa: BLE001 — user table may be absent standalone
+            owner_slug = None
 
     hits = await latest_documents(
         db, owner_id, list(query.kinds),
@@ -420,6 +431,10 @@ async def handle_document_query(
             "title": h.title or h.filepath.rsplit("/", 1)[-1],
             "date": h.created_at.isoformat() if h.created_at else None,
             "owner": h.owner_label,
+            # For family documents: the member's username, so the client can
+            # open the in-app family view (/family/{slug}/{section}/{file})
+            # instead of the raw file.
+            **({"owner_slug": owner_slug} if owner_slug else {}),
         }
         for h in hits
     ]
@@ -1113,6 +1128,28 @@ async def handle_ai_result_query(
         result = fetch.result
     if result is None:
         state = fetch.status or "queued"
+        verdict = (fetch.name_check or {}).get("verdict")
+        if fetch.error_code == "name_mismatch" or (
+            verdict == "mismatch"
+            and not (fetch.name_check or {}).get("confirmed")
+        ):
+            printed = (fetch.name_check or {}).get("document_name")
+            printed_note = f" ('{printed}')" if printed else ""
+            reply = (
+                f"'{name}' wasn't filed automatically: the patient name "
+                f"printed on it{printed_note} doesn't match this account. "
+                "If it is yours, you can confirm that from the document's "
+                "card in the app; if it belongs to a family member, you can "
+                "move it to them there."
+            )
+            return {
+                "reply": reply,
+                "action": "none",
+                "provenance": {"path": "ai_result",
+                               "document_id": document_id,
+                               "status": state,
+                               "name_check": "mismatch"},
+            }
         if state == "failed":
             reply = (
                 f"Automatic processing of '{name}' didn't complete. It can "
