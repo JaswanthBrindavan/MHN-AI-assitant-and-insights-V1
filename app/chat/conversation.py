@@ -150,3 +150,28 @@ async def assemble_context(
         {"role": m.role, "message": m.message} for m in messages[-KEEP_VERBATIM:]
     ]
     return (summary_row.summary if summary_row else None), last
+
+
+async def questions_asked(db: AsyncSession, session_id: uuid.UUID) -> int:
+    """How many clarifying questions the assistant has already asked.
+
+    A clarifying question is just a reply that ends in a question mark — no
+    state machine, no slot filling. The only thing that needs machinery is
+    stopping a loop, and that is one COUNT.
+
+    Never raises: a counting failure must not cost the reader an answer, so it
+    degrades to "already asked plenty", which suppresses further questions.
+    """
+    try:
+        rows = (
+            await db.execute(
+                select(ConversationMessage.message).where(
+                    ConversationMessage.session_id == session_id,
+                    ConversationMessage.role == "assistant",
+                )
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001 — never break a reply over a counter
+        logger.warning("clarifying-question count failed", exc_info=True)
+        return 999
+    return sum(1 for m in rows if (m or "").rstrip().endswith("?"))

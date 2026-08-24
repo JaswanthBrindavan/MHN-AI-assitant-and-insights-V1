@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.agent import run_agent
 from app.chat.context import (
     build_health_snapshot,
     build_patient_context,
@@ -28,6 +29,7 @@ from app.chat.conversation import (
     assemble_context,
     ensure_session,
     maybe_compact,
+    questions_asked,
 )
 from app.chat.data_handlers import (
     handle_ai_result_query,
@@ -58,6 +60,8 @@ from app.chat.router import (
     route,
 )
 from app.chat.scope import is_off_topic
+from app.chat.tools.definitions import TOOL_SPECS
+from app.chat.tools.registry import execute_tool
 from app.chat.validation import validate_reply
 from app.config import get_settings
 from app.drugs.service import (
@@ -69,6 +73,7 @@ from app.drugs.service import (
     find_drug,
 )
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
+from app.grounding.fidelity import unit_values, values_traceable
 from app.i18n.language import (
     LANGUAGE_NAMES,
     detect_language,
@@ -76,9 +81,14 @@ from app.i18n.language import (
 )
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
+from app.llm.tools import UserMessage
 from app.models.chat import RagTurnReceipt
 from app.rag.extractive import build_extractive_answer, is_definitional_ask
-from app.rag.prompt import build_correction_directive, build_system_prompt
+from app.rag.prompt import (
+    build_agentic_system_prompt,
+    build_correction_directive,
+    build_system_prompt,
+)
 from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
 from app.translate.service import (
     InboundPivot,
@@ -294,6 +304,16 @@ async def _dispatch(
             provenance={"path": "conversational"},
             language=lang,
             trace=trace,
+        )
+
+    # 3.5) Engine selection. Everything above — the triage floor, the scope
+    #      guard, the emergency directive and the canned conversational
+    #      replies — is SHARED and has already run, so the agentic engine can
+    #      never see an emergency and the model is never the arbiter of one.
+    if get_settings().chat_engine == "agentic":
+        t("Engine", "agentic — the assistant can look things up for itself")
+        return await _dispatch_agentic(
+            db, user_id, message, provider, session_id, tr, risk, lang, trace, t
         )
 
     # 4) Deterministic data abilities — documents, tracker adds, metric
@@ -866,3 +886,165 @@ async def handle_chat(
     await maybe_compact(db, session_id)
     result.session_id = session_id
     return result
+
+
+async def _dispatch_agentic(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider,
+    session_id: uuid.UUID,
+    tr,
+    risk: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult:
+    """The tool-driven path.
+
+    Callers guarantee the triage floor, the scope guard, the emergency path and
+    the conversational path have ALREADY run — this is never reached for an
+    emergency, and the model is never the arbiter of one.
+    """
+    settings = get_settings()
+
+    patient_text, user_codes = await build_patient_context(db, user_id)
+    if is_personal_health_query(message):
+        try:
+            snapshot = await build_health_snapshot(db, user_id)
+            if snapshot:
+                patient_text = (
+                    f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
+                )
+        except Exception:  # noqa: BLE001 — enrichment must never break a reply
+            logger.warning("health snapshot failed; continuing", exc_info=True)
+
+    compacted, recent = await assemble_context(db, session_id)
+    prior_turns = recent[:-1] if recent else []
+
+    codes = await resolve_scope(db, message, user_codes)
+    chunks = await retrieve_chunks(db, codes, message)
+
+    asked = await questions_asked(db, session_id)
+    allow_questions = asked < settings.chat_max_clarifying_questions
+
+    stable, volatile = build_agentic_system_prompt(
+        patient_text,
+        json.dumps(compacted) if compacted else None,
+        recent_turns=prior_turns[-6:],
+        chunks=chunks,
+        allow_questions=allow_questions,
+    )
+    directive = language_directive("en" if lang != "en" else lang)
+    system = "\n\n".join(p for p in (stable, volatile, directive) if p)
+
+    async def _executor(call):
+        return await execute_tool(db, user_id, call, session_id)
+
+    # Tools are offered only at NONE risk. A red flag stays on the safe path so
+    # nothing can delay or dilute an escalation.
+    offered = TOOL_SPECS if risk == NONE else ()
+
+    t("Generate", "asking the assistant, with access to your records")
+    try:
+        outcome = await run_agent(
+            provider, system, [UserMessage(message)], offered, _executor,
+            max_rounds=settings.llm_max_tool_rounds,
+        )
+    except Exception:  # noqa: BLE001 — fail open, never crash the endpoint
+        logger.warning("agent loop failed; safe reply", exc_info=True)
+        t("Generate", "provider failed — degrading to the deterministic safe reply")
+        await _write_receipt(
+            db, user_id=user_id, session_id=session_id, message=message,
+            model_name=provider.model_name, grounding_status="provider_error",
+        )
+        return ChatResult(
+            response_message=safe_reply(risk),
+            risk_level=risk,
+            recommended_action=(
+                "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+            ),
+            provenance={"path": "agentic", "degraded": "provider_error"},
+            language=lang, trace=trace,
+        )
+
+    if outcome.tool_names:
+        t("Records", "looked up: " + ", ".join(
+            sorted({n.replace("_", " ") for n in outcome.tool_names})))
+
+    display = strip_markers(outcome.text)
+    if risk == HIGH:
+        display = f"{HIGH_ESCALATION} {display}"
+
+    degraded: str | None = None
+
+    # Fidelity FIRST: a drifted lab value is worse than a blocked reply, and it
+    # is the failure mode the validator cannot see.
+    sources = [*outcome.source_texts, *(c.content for c in chunks)]
+    if patient_text:
+        sources.append(patient_text)
+    ok, stray = values_traceable(display, sources)
+    if not ok:
+        logger.warning("numeric fidelity failure: %s", stray)
+        t("Value check",
+          "a stated value did not match your records — replaced with the "
+          "safe reply")
+        display, degraded = safe_reply(risk), "fidelity"
+    elif not sources and unit_values(display):
+        # Nothing was retrieved and no tool ran, yet the reply states a
+        # clinical value or a dose. There is nothing behind it — the model
+        # made it up. This is the case values_traceable deliberately cannot
+        # judge (no sources to compare against), so the policy lives here.
+        logger.warning(
+            "ungrounded clinical value with no sources: %s", unit_values(display)
+        )
+        t("Value check",
+          "a dose or measurement was stated with nothing to support it — "
+          "replaced with the safe reply")
+        display, degraded = safe_reply(risk), "ungrounded_value"
+    elif sources:
+        t("Value check", "every value matches your records")
+
+    if degraded is None:
+        try:
+            index = await load_condition_index(db)
+            extra = index.diagnostic_terms() if index is not None else None
+        except Exception:  # noqa: BLE001
+            extra = None
+        verdict = validate_reply(display, risk, extra)
+        if not verdict.ok:
+            t("Output validation",
+              f"blocked ({verdict.reason}) — replaced with the safe reply")
+            display, degraded = safe_reply(risk), "validation"
+        else:
+            t("Output validation", "passed all safety checks")
+
+    await _write_receipt(
+        db, user_id=user_id, session_id=session_id, message=message,
+        model_name=provider.model_name,
+        retrieved=[c.to_dict() for c in chunks] if chunks else None,
+        grounding_status="agentic", used_rag=bool(chunks),
+    )
+
+    provenance: dict = {
+        "path": "agentic",
+        "tools": outcome.tool_names,
+        "rounds": outcome.rounds,
+        "conditions": sorted(codes),
+        "usage": outcome.usage,
+    }
+    if outcome.forced:
+        provenance["forced_answer"] = True
+    if degraded:
+        provenance["degraded"] = degraded
+
+    return ChatResult(
+        response_message=display,
+        risk_level=risk,
+        recommended_action=(
+            "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+        ),
+        provenance=provenance,
+        language=lang,
+        trace=trace,
+    )
