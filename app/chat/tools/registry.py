@@ -69,21 +69,27 @@ async def execute_tool(
         # SAVEPOINT: a failure rolls back only this tool's writes.
         async with db.begin_nested():
             payload = await fn(db, user_id, call.arguments, session_id)
+
+        if payload is None:
+            # Not an error — "nothing on file" is a real, useful answer.
+            return ToolResult(
+                call_id=call.id,
+                content=json.dumps(
+                    {
+                        "found": False,
+                        "note": "Nothing on file for that. Say so plainly; "
+                        "do not estimate a value.",
+                    }
+                ),
+            )
+        # Serialization is INSIDE the boundary on purpose. default=str covers
+        # dates and UUIDs but not, say, a non-str dict key, and a TypeError
+        # escaping here would propagate out of asyncio.gather and orphan the
+        # sibling tool calls mid-flight.
+        content = json.dumps(payload, default=str)
     except Exception:  # noqa: BLE001 — a tool must never break the loop
         # Deliberately no arguments in the log line: they can carry PHI.
         logger.warning("tool %s failed", call.name, exc_info=True)
         return _error(call.id, "That lookup could not be completed.")
 
-    if payload is None:
-        # Not an error — "nothing on file" is a real, useful answer.
-        return ToolResult(
-            call_id=call.id,
-            content=json.dumps(
-                {
-                    "found": False,
-                    "note": "Nothing on file for that. Say so plainly; "
-                    "do not estimate a value.",
-                }
-            ),
-        )
-    return ToolResult(call_id=call.id, content=json.dumps(payload, default=str))
+    return ToolResult(call_id=call.id, content=content)

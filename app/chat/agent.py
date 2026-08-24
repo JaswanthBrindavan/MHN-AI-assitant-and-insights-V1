@@ -71,6 +71,24 @@ def _accumulate_usage(total: dict, turn: LLMTurn) -> None:
     total["calls"] = total.get("calls", 0) + 1
 
 
+def _as_result(call: ToolCall, outcome) -> ToolResult:
+    """Normalise a gather outcome into a ToolResult.
+
+    An executor is contracted never to raise; if one does anyway, the model is
+    told the call failed rather than the whole turn dying.
+    """
+    if isinstance(outcome, BaseException):
+        logger.warning(
+            "tool executor raised for %s: %s", call.name, type(outcome).__name__
+        )
+        return ToolResult(
+            call_id=call.id,
+            content='{"error": "That lookup could not be completed."}',
+            is_error=True,
+        )
+    return outcome
+
+
 async def run_agent(
     provider,
     system: str,
@@ -105,9 +123,20 @@ async def run_agent(
         )
         # Concurrent execution, then ALL results in one message — splitting
         # them teaches the model to stop calling tools in parallel.
-        results = await asyncio.gather(
-            *(executor(call) for call in turn.tool_calls)
+        #
+        # return_exceptions=True is a safety property, not tidiness: without
+        # it, one executor raising propagates immediately and leaves its
+        # siblings running unawaited, still holding the DB session the
+        # orchestrator has already moved on from. The registry is meant never
+        # to raise; this is the belt to that braces.
+        raw = await asyncio.gather(
+            *(executor(call) for call in turn.tool_calls),
+            return_exceptions=True,
         )
+        results = [
+            _as_result(call, settled)
+            for call, settled in zip(turn.tool_calls, raw, strict=True)
+        ]
         history.append(ToolResultMessage(results=tuple(results)))
         outcome.tool_names.extend(call.name for call in turn.tool_calls)
         outcome.source_texts.extend(r.content for r in results)

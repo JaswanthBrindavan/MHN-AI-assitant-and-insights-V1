@@ -236,3 +236,54 @@ async def test_assistant_preamble_text_is_preserved_in_history():
     out = await run_agent(provider, "sys", [UserMessage("x")], [SPEC], _echo)
     assistant = [m for m in out.messages if isinstance(m, AssistantMessage)][0]
     assert assistant.content == "let me check"
+
+
+# --------------------------------------------------------------------------- #
+# Sibling isolation (regression: gather without return_exceptions orphaned them)
+# --------------------------------------------------------------------------- #
+async def test_one_raising_executor_does_not_orphan_its_siblings():
+    """Without return_exceptions=True, gather propagates the first exception
+    immediately and leaves siblings running unawaited — still holding the DB
+    session the orchestrator has already moved on from."""
+    finished: list[str] = []
+
+    async def _one_explodes(call: ToolCall) -> ToolResult:
+        if call.id == "boom":
+            raise TypeError("keys must be str")
+        await asyncio.sleep(0.02)
+        finished.append(call.id)
+        return ToolResult(call_id=call.id, content="{}")
+
+    provider = FakeProvider(
+        turns=[_tool_turn("boom", "sibling"), LLMTurn(text="handled")]
+    )
+    out = await run_agent(
+        provider, "sys", [UserMessage("x")], [SPEC], _one_explodes
+    )
+
+    # The turn completed rather than dying...
+    assert out.text == "handled"
+    # ...the sibling ran to completion inside the awaited gather...
+    assert finished == ["sibling"]
+    # ...and the model was told the failing call failed.
+    results = [m for m in out.messages if isinstance(m, ToolResultMessage)][0]
+    by_id = {r.call_id: r for r in results.results}
+    assert by_id["boom"].is_error
+    assert not by_id["sibling"].is_error
+
+
+async def test_results_line_up_with_their_calls_when_one_fails():
+    async def _second_explodes(call: ToolCall) -> ToolResult:
+        if call.id == "c2":
+            raise RuntimeError("nope")
+        return ToolResult(call_id=call.id, content='{"ok": true}')
+
+    provider = FakeProvider(
+        turns=[_tool_turn("c1", "c2", "c3"), LLMTurn(text="ok")]
+    )
+    out = await run_agent(
+        provider, "sys", [UserMessage("x")], [SPEC], _second_explodes
+    )
+    results = [m for m in out.messages if isinstance(m, ToolResultMessage)][0]
+    assert [r.call_id for r in results.results] == ["c1", "c2", "c3"]
+    assert [r.is_error for r in results.results] == [False, True, False]
