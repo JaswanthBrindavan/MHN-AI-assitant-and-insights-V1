@@ -13,7 +13,11 @@ import uuid
 from sqlalchemy import select
 
 from app.chat.orchestrator import handle_chat
-from app.chat.replies import HIGH_ESCALATION, SCOPE_DECLINE, safe_reply
+from app.chat.replies import (
+    _SAFE_NONES,
+    HIGH_ESCALATION,
+    SCOPE_DECLINES,
+)
 from app.grounding.claims import analyze_grounding, is_factual, strip_markers
 from app.llm.fake import FakeProvider
 from app.models.chat import (
@@ -386,7 +390,7 @@ async def test_provider_error_degrades_to_safe_reply(db_session, set_grounding_m
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert result.risk_level == NONE
     assert result.recommended_action == "discuss_with_clinician"
     assert result.provenance == {"path": "symptom_rag", "degraded": "provider_error"}
@@ -433,7 +437,7 @@ async def test_provider_error_on_enforce_retry_degrades_not_crashes(
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
     assert len(provider.calls) == 2
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert result.provenance["path"] == "symptom_rag"
     assert "degraded" not in result.provenance
     assert result.grounding is None
@@ -473,7 +477,7 @@ async def test_validator_failure_substitutes_safe_reply(db_session, set_groundin
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert "probably" not in result.response_message
     assert "[1]" not in result.response_message
     # In log mode the (invalid-marker) answer was kept by grounding; it was the
@@ -495,7 +499,7 @@ async def test_validator_failure_even_when_grounding_clean(
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert result.grounding is not None
     assert result.grounding["status"] == "grounded"
 
@@ -569,7 +573,7 @@ async def test_session_id_returned_on_emergency_and_scope_decline(db_session):
     decline = await handle_chat(
         db_session, USER, "what is the capital of france", provider
     )
-    assert decline.response_message == SCOPE_DECLINE
+    assert decline.response_message in SCOPE_DECLINES
     assert decline.risk_level == NONE
     assert decline.session_id is not None
     assert decline.session_id != emergency.session_id

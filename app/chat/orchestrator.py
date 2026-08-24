@@ -46,11 +46,12 @@ from app.chat.data_handlers import (
 )
 from app.chat.long_term import recall, record_topics
 from app.chat.replies import (
-    GREETING_REPLY,
+    GREETING_REPLIES,
     HIGH_ESCALATION,
-    IDENTITY_REPLY,
-    SCOPE_DECLINE,
+    IDENTITY_REPLIES,
+    SCOPE_DECLINES,
     SELF_HARM_REPLY,
+    pick,
     safe_reply,
 )
 from app.chat.router import (
@@ -255,7 +256,7 @@ async def _dispatch(
             model_name=provider.model_name,
         )
         return ChatResult(
-            response_message=SCOPE_DECLINE,
+            response_message=pick(SCOPE_DECLINES, session_id),
             risk_level=NONE,
             recommended_action="out_of_scope",
             provenance={"path": "scope_declined"},
@@ -292,7 +293,11 @@ async def _dispatch(
     # 3) Conversational (greeting / identity).
     if intent == CONVERSATIONAL:
         t("Intent", "greeting / identity — canned reply")
-        reply = IDENTITY_REPLY if is_identity_question(message) else GREETING_REPLY
+        reply = (
+            pick(IDENTITY_REPLIES, session_id)
+            if is_identity_question(message)
+            else pick(GREETING_REPLIES, session_id)
+        )
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
             model_name=provider.model_name,
@@ -379,7 +384,7 @@ async def _dispatch(
                     t("Output validation",
                       f"blocked ({verdict.reason}) — replaced with safe reply")
                     ability = {
-                        "reply": safe_reply(risk),
+                        "reply": safe_reply(risk, session_id),
                         "action": ability["action"],
                         "provenance": {**ability["provenance"],
                                        "degraded": "validation"},
@@ -612,7 +617,7 @@ async def _dispatch(
             if not verdict.ok:
                 t("Output validation",
                   f"blocked ({verdict.reason}) — replaced with the safe reply")
-                display = safe_reply(risk)
+                display = safe_reply(risk, session_id)
             else:
                 t("Output validation", "passed all safety checks")
             try:
@@ -693,7 +698,7 @@ async def _dispatch(
         )
         action = "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
         return ChatResult(
-            response_message=safe_reply(risk),
+            response_message=safe_reply(risk, session_id),
             risk_level=risk,
             recommended_action=action,
             provenance={"path": "symptom_rag", "degraded": "provider_error"},
@@ -718,7 +723,7 @@ async def _dispatch(
                   f"({get_settings().grounding_mode} mode)")
         if grounded_answer is None:
             t("Safety net", "grounding could not be repaired — safe reply instead")
-            display = safe_reply(risk)
+            display = safe_reply(risk, session_id)
         else:
             display = strip_markers(grounded_answer)
             if risk == HIGH:
@@ -736,12 +741,12 @@ async def _dispatch(
             if not verdict.ok:
                 t("Output validation",
                   f"blocked ({verdict.reason}) — replaced with the safe reply")
-                display = safe_reply(risk)
+                display = safe_reply(risk, session_id)
             else:
                 t("Output validation", "passed all safety checks")
     except Exception:  # noqa: BLE001 — safety layers fail open
         logger.warning("grounding/validation failed; safe reply", exc_info=True)
-        display = safe_reply(risk)
+        display = safe_reply(risk, session_id)
         grounding_status = "error"
 
     await _write_receipt(
@@ -959,7 +964,7 @@ async def _dispatch_agentic(
             model_name=provider.model_name, grounding_status="provider_error",
         )
         return ChatResult(
-            response_message=safe_reply(risk),
+            response_message=safe_reply(risk, session_id),
             risk_level=risk,
             recommended_action=(
                 "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
@@ -989,7 +994,7 @@ async def _dispatch_agentic(
         t("Value check",
           "a stated value did not match your records — replaced with the "
           "safe reply")
-        display, degraded = safe_reply(risk), "fidelity"
+        display, degraded = safe_reply(risk, session_id), "fidelity"
     elif not sources and unit_values(display):
         # Nothing was retrieved and no tool ran, yet the reply states a
         # clinical value or a dose. There is nothing behind it — the model
@@ -1001,7 +1006,7 @@ async def _dispatch_agentic(
         t("Value check",
           "a dose or measurement was stated with nothing to support it — "
           "replaced with the safe reply")
-        display, degraded = safe_reply(risk), "ungrounded_value"
+        display, degraded = safe_reply(risk, session_id), "ungrounded_value"
     elif sources:
         t("Value check", "every value matches your records")
 
@@ -1015,7 +1020,7 @@ async def _dispatch_agentic(
         if not verdict.ok:
             t("Output validation",
               f"blocked ({verdict.reason}) — replaced with the safe reply")
-            display, degraded = safe_reply(risk), "validation"
+            display, degraded = safe_reply(risk, session_id), "validation"
         else:
             t("Output validation", "passed all safety checks")
 

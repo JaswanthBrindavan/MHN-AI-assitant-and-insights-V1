@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from app.chat.orchestrator import handle_chat
-from app.chat.replies import SCOPE_DECLINE
+from app.chat.replies import SCOPE_DECLINES
 from app.llm.fake import FakeProvider
 from app.translate.fake import FakeTranslator
 from app.translate.service import (
@@ -257,7 +257,9 @@ async def test_chat_scope_decline_translated(db_session):
         db_session, uuid.uuid4(), TELUGU, FakeProvider(), translator=fake
     )
     assert r.provenance["path"] == "scope_declined"
-    assert r.response_message == f"[te/native] {SCOPE_DECLINE}"
+    # The decline text varies by session; the pivot wrapper must be exact.
+    assert r.response_message.startswith("[te/native] ")
+    assert r.response_message.removeprefix("[te/native] ") in SCOPE_DECLINES
 
 
 async def test_chat_digit_corruption_falls_back_to_english(db_session):
