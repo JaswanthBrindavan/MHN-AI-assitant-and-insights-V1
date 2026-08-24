@@ -14,6 +14,30 @@ A healthtech backend with two independent halves that share a database and auth:
 
 Everything is decision support, never diagnosis — enforced in code.
 
+## Development Workflows
+
+Reusable workflow instructions are stored in `.claude/`.
+
+### Implementation
+When executing an existing implementation plan, read:
+`.claude/execution-rules.md`
+
+Follow those instructions for implementation, verification, testing, and final diff review.
+
+### Code Review
+When performing an independent review of implemented changes, read:
+`.claude/review-rules.md`
+
+Follow those instructions for requirement coverage, bug detection, security, performance, testing, and review findings.
+
+### Task Plans
+Current implementation plans and task-specific documents may be stored in:
+`docs/`
+
+Treat the current task's implementation plan as the source of truth for what should be implemented.
+
+Do not assume these workflow files apply automatically to every task. Read the relevant workflow file when the task matches its purpose.
+
 ## Database coexistence (important)
 
 This backend shares the **MHN production database**. The production stack is
@@ -163,3 +187,17 @@ against a Homebrew Postgres 16 with a source-built pgvector — see the
 - Adding a model column? Autogenerate against a sqlite scratch DB, then hand-fix
   (imports, the embedding false-diff), and re-run the coexistence check.
 - `sqlite` needs `PRAGMA foreign_keys=ON` for cascade tests (set in conftest).
+
+## Task Lifecycle
+
+For substantial implementation work, follow this general lifecycle:
+
+1. Understand and review the existing code.
+2. Identify drawbacks, risks, and affected areas.
+3. Create an implementation plan.
+4. Execute the approved implementation plan using `.claude/execution-rules.md`.
+5. Independently review the resulting implementation using `.claude/review-rules.md`.
+6. Fix legitimate review findings.
+7. Run final verification and inspect the git diff.
+
+Do not skip directly from a high-level requirement to implementation when the task requires substantial architectural or code changes.

@@ -15,3 +15,6 @@ dist/
 build/
 *.egg-info/
 .claude/
+project_docs/
+CLAUDE.md
+.claude/
