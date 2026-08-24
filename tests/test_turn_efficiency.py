@@ -17,7 +17,6 @@ from sqlalchemy import event
 from app.chat.context import build_patient_context, clear_patient_context_memo
 from app.chat.orchestrator import handle_chat
 from app.llm.fake import FakeProvider
-from app.llm.tools import LLMTurn
 
 
 @pytest.fixture(autouse=True)

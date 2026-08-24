@@ -123,4 +123,5 @@ async def test_asking_a_question_increments_the_count_for_the_next_turn(db_sessi
     user_id = uuid.uuid4()
     provider = FakeProvider(turns=[LLMTurn(text="How long has that been going on?")])
     result = await handle_chat(db_session, user_id, "I feel dizzy", provider)
+    assert result.session_id is not None
     assert await questions_asked(db_session, result.session_id) == 1
