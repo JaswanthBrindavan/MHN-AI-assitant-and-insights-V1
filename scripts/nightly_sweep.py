@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.episodes import purge_stale
 from app.db import get_sessionmaker
 from app.insights.engine import recompute_insights
 from app.models.common import utcnow
@@ -59,7 +60,16 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
 
         job.status = "succeeded"
         job.finished_at = utcnow()
-        result = {"users_recomputed": recomputed, "conditions_purged": len(to_purge)}
+        # Symptom episodes nobody has mentioned in STALE_AFTER are over. Read
+        # paths already filter them out; this is where the rows actually go,
+        # because a chat turn is the wrong place to run a cleanup.
+        episodes_purged = await purge_stale(db)
+
+        result = {
+            "users_recomputed": recomputed,
+            "conditions_purged": len(to_purge),
+            "episodes_purged": episodes_purged,
+        }
     except Exception as exc:  # noqa: BLE001 — record failure on the job row
         job.status = "failed"
         job.finished_at = utcnow()

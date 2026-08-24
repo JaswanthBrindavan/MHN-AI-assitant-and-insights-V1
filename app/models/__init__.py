@@ -47,6 +47,7 @@ from app.models.coredata import (
 )
 from app.models.jobs import JobRun
 from app.models.knowledge import ConditionRegistry, DrugReference
+from app.models.profile import UserProfile
 from app.models.rules import InsightArtifact, InsightTemplate, RiskRule
 
 __all__ = [
@@ -68,6 +69,7 @@ __all__ = [
     "McpChunk",
     "RagTurnReceipt",
     "JobRun",
+    "UserProfile",
     "ConditionRegistry",
     "DrugReference",
     "Report",

@@ -44,7 +44,11 @@ from app.chat.data_handlers import (
     handle_tracker_add,
     handle_value_check,
 )
+from app.chat.episodes import open_episodes, open_or_touch
+from app.chat.episodes import render_for_prompt as render_episodes
 from app.chat.long_term import recall, record_topics
+from app.chat.profile import get_profile
+from app.chat.profile import render_for_prompt as render_profile
 from app.chat.replies import (
     GREETING_REPLIES,
     HIGH_ESCALATION,
@@ -929,6 +933,29 @@ async def _dispatch_agentic(
         except Exception:  # noqa: BLE001 — enrichment must never break a reply
             logger.warning("health snapshot failed; continuing", exc_info=True)
 
+    # Phase 2 memory: what the reader told us about themselves (consent-gated)
+    # and what they have already raised and not said is better. Both fail open —
+    # neither may cost someone an answer.
+    try:
+        profile_text = render_profile(await get_profile(db, user_id))
+        if profile_text:
+            patient_text = (
+                f"{patient_text}\n\n{profile_text}" if patient_text else profile_text
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("profile context failed; continuing", exc_info=True)
+
+    episodes: list = []
+    try:
+        episodes = await open_episodes(db, user_id)
+        episode_text = render_episodes(episodes)
+        if episode_text:
+            patient_text = (
+                f"{patient_text}\n\n{episode_text}" if patient_text else episode_text
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("episode context failed; continuing", exc_info=True)
+
     compacted, recent = await assemble_context(db, session_id)
     prior_turns = recent[:-1] if recent else []
 
@@ -1073,6 +1100,12 @@ async def _dispatch_agentic(
         retrieved=[c.to_dict() for c in chunks] if chunks else None,
         grounding_status="agentic", used_rag=bool(chunks),
     )
+
+    # Remember what was raised, at the severity the FLOOR decided — never a
+    # severity the model inferred.
+    if tr.matched_terms:
+        for term in tr.matched_terms[:3]:
+            await open_or_touch(db, user_id, term, risk)
 
     provenance: dict = {
         "path": "agentic",

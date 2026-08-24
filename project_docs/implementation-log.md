@@ -20,20 +20,20 @@ review pass under `.claude/review-rules.md`, fix findings, re-verify.
 | Task | Title | Status | Commit |
 |---|---|---|---|
 | 1 | Internal tool-calling vocabulary | ✅ done | `91b6041`, `6ab2d92` |
-| 2 | Anthropic adapter | ⏳ | |
-| 3 | OpenAI-compatible adapter | ⏳ | |
-| 4 | Numeric fidelity guard | ⏳ | |
-| 5 | Tool definitions + executors | ⏳ | |
-| 6 | Bounded agentic loop | ⏳ | |
-| 7 | Wire agentic engine into orchestrator | ⏳ | |
-| 8 | Clarifying questions | ⏳ | |
-| 9 | SSE streaming | ⏳ | |
-| 10 | Reply variation | ⏳ | |
-| 11 | Latency: parallelize + cache | ⏳ | |
+| 2 | Anthropic adapter | ✅ done | `b89093f` |
+| 3 | OpenAI-compatible adapter | ✅ done | `b89093f` |
+| 4 | Numeric fidelity guard | ✅ done | `0df87e0` |
+| 5 | Tool definitions + executors | ✅ done | `0df87e0` |
+| 6 | Bounded agentic loop | ✅ done | `0df87e0`, `9b42df6` |
+| 7 | Wire agentic engine into orchestrator | ✅ done | `f4389d9` |
+| 8 | Clarifying questions | ✅ done | `48cfc50` |
+| 9 | SSE streaming | ✅ done | `bd10503`, `a084efb` |
+| 10 | Reply variation | ✅ done | `955fe91` |
+| 11 | Turn efficiency (plan deviated) | ✅ done | `48cfc50` |
 | 12 | Retire superseded parsers | 🔒 gated | |
 | 13 | Provider bake-off harness | ⏳ | |
-| 26 | Graceful recovery | ⏳ | |
-| 27 | Non-numeric claim verification | ⏳ | |
+| 26 | Graceful recovery | ✅ done | `fe6703b` |
+| 27 | Non-numeric claim verification | ✅ done | `fe6703b` |
 | 28 | Postgres in CI | ⏳ | |
 | 14 | User profile store | ⏳ | |
 | 15 | Episode tracking | ⏳ | |
