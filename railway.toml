@@ -41,7 +41,7 @@ restartPolicyMaxRetries = 5
 #   JWT_ALGORITHM=HS512
 #   JWT_SECRET_BASE64=true
 #   SERVICE_TOKEN         optional, ≥32 chars (server-to-server path)
-#   LLM_PROVIDER=anthropic  LLM_MODEL=claude-haiku-4-5-20251001  LLM_API_KEY=…
+#   LLM_PROVIDER=anthropic  LLM_MODEL=claude-haiku-4-5  LLM_API_KEY=…
 #   GROUNDING_MODE=enforce
 #   EMBEDDING_BASE_URL / EMBEDDING_MODEL — leave empty on Railway unless a
 #   hosted embedding endpoint is available; retrieval falls back to keyword

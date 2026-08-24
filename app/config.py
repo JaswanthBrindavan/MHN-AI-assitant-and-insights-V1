@@ -38,9 +38,24 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.1"
     llm_prompt_version: str = "v1"
+    # Extended thinking is MODEL-GATED: "adaptive" requires a 4.6+ Anthropic
+    # model. Haiku 4.5 and every OpenAI-compatible endpoint reject it with a
+    # 400, so it stays off unless the configured model is known to support it.
+    llm_thinking: str = "off"
     # Reply language: "auto" mirrors the user's language; or a fixed BCP-47ish
     # code ("en", "hi").
     reply_language: str = "auto"
+
+    # Chat engine: "legacy" (deterministic handler chain) | "agentic" (the LLM
+    # orchestrates the same abilities as tools). Both ship; legacy is the
+    # default until the agentic engine has proven itself in staging.
+    chat_engine: str = "legacy"
+    # Tool-call rounds before the agent is forced to answer in text. A bound,
+    # not a target — the loop must always terminate.
+    llm_max_tool_rounds: int = 3
+    # Clarifying questions the assistant may ask per session before it must
+    # answer with what it has.
+    chat_max_clarifying_questions: int = 2
 
     # Embeddings
     embedding_base_url: str = ""

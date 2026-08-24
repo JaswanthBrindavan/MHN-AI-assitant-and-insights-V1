@@ -1,0 +1,206 @@
+"""OpenAI /chat/completions adapter over httpx — the self-hosting path.
+
+Speaks the format used by vLLM, Ollama, llama.cpp, LM Studio, and every hosted
+OpenAI-compatible gateway, so the deployment can move between them without
+touching anything above the adapter. No vendor SDK, so a self-hosted setup
+needs no extra dependency.
+
+Parsing is deliberately forgiving: open-weight models emit malformed tool
+arguments and invented finish reasons far more often than hosted ones, and a
+bad response must become something the agent loop can see and recover from —
+never an exception that kills a patient-facing turn.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Sequence
+
+import httpx
+
+from app.llm.tools import (
+    AssistantMessage,
+    LLMTurn,
+    Message,
+    ToolCall,
+    ToolResultMessage,
+    ToolSpec,
+    UserMessage,
+)
+
+logger = logging.getLogger("davi.llm")
+
+# Wire finish_reason -> internal stop_reason. Anything unrecognised degrades to
+# end_turn: a gateway inventing its own value must never look like a request to
+# call tools.
+_FINISH_MAP = {
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "content_filter": "refusal",
+}
+
+_shared_client: httpx.AsyncClient | None = None
+
+
+def _default_client(timeout: float) -> httpx.AsyncClient:
+    """One pooled client per process — keep-alive skips the TCP+TLS handshake
+    that a per-call client would pay on every message."""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=timeout,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+    return _shared_client
+
+
+def _to_openai_tools(tools: Sequence[ToolSpec]) -> list[dict]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.input_schema,
+            },
+        }
+        for t in tools
+    ]
+
+
+def _to_openai_messages(messages: Sequence[Message]) -> list[dict]:
+    out: list[dict] = []
+    for m in messages:
+        if isinstance(m, UserMessage):
+            out.append({"role": "user", "content": m.content})
+        elif isinstance(m, AssistantMessage):
+            # content must be None, not "", on a tool-call message.
+            msg: dict = {"role": "assistant", "content": m.content or None}
+            if m.tool_calls:
+                msg["tool_calls"] = [
+                    {
+                        "id": c.id,
+                        "type": "function",
+                        "function": {
+                            "name": c.name,
+                            "arguments": json.dumps(c.arguments),
+                        },
+                    }
+                    for c in m.tool_calls
+                ]
+            out.append(msg)
+        elif isinstance(m, ToolResultMessage):
+            # The inverse of Anthropic's rule: one message per result, keyed by
+            # tool_call_id.
+            out.extend(
+                {"role": "tool", "tool_call_id": r.call_id, "content": r.content}
+                for r in m.results
+            )
+    return out
+
+
+def _parse_arguments(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        logger.warning("malformed tool arguments from provider; rejecting call")
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _from_openai_response(data: dict) -> LLMTurn:
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+
+    calls: list[ToolCall] = []
+    for raw in message.get("tool_calls") or []:
+        fn = raw.get("function") or {}
+        calls.append(
+            ToolCall(
+                id=raw.get("id", ""),
+                name=fn.get("name", ""),
+                arguments=_parse_arguments(fn.get("arguments")),
+            )
+        )
+
+    usage_raw = data.get("usage") or {}
+    usage = (
+        {
+            "input_tokens": usage_raw.get("prompt_tokens", 0),
+            "output_tokens": usage_raw.get("completion_tokens", 0),
+        }
+        if usage_raw
+        else None
+    )
+
+    return LLMTurn(
+        text=(message.get("content") or "").strip(),
+        tool_calls=tuple(calls),
+        stop_reason=_FINISH_MAP.get(choice.get("finish_reason", "stop"), "end_turn"),
+        usage=usage,
+    )
+
+
+class OpenAICompatibleProvider:
+    """Tool-calling provider over any OpenAI-compatible /v1 endpoint."""
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str = "",
+        timeout: float = 60.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.model_name = model
+        self._api_key = api_key
+        self._timeout = timeout
+        # Indirection so tests can inject a stub without patching globals.
+        self._client_factory = _default_client
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
+
+    async def generate(self, *, system: str, user: str) -> str:
+        turn = await self.generate_turn(
+            system=system, messages=[UserMessage(user)], tools=()
+        )
+        return turn.text
+
+    async def generate_turn(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] = (),
+    ) -> LLMTurn:
+        payload: dict = {
+            "model": self.model,
+            # Unlike Anthropic, the system prompt is a message, not a field.
+            "messages": [
+                {"role": "system", "content": system},
+                *_to_openai_messages(messages),
+            ],
+            "temperature": 0,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = _to_openai_tools(tools)
+
+        resp = await self._client_factory(self._timeout).post(
+            f"{self.base_url}/chat/completions",
+            json=payload,
+            headers=self._headers(),
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        return _from_openai_response(resp.json())
