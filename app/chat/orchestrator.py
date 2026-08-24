@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chat.agent import run_agent
+from app.chat.agent import recover, run_agent
 from app.chat.context import (
     build_health_snapshot,
     build_patient_context,
@@ -988,6 +988,39 @@ async def _dispatch_agentic(
 
     degraded: str | None = None
 
+    try:
+        index = await load_condition_index(db)
+        extra_terms = index.diagnostic_terms() if index is not None else None
+    except Exception:  # noqa: BLE001
+        extra_terms = None
+
+    async def _try_recover(reason: str, detail: str = "") -> bool:
+        """One corrective retry before falling back. True if it worked.
+
+        Without this, a guard rejection throws the whole answer away and
+        substitutes one fixed sentence — the reader gets a non-answer with no
+        explanation and no path forward, and two in a row look like a broken
+        bot. The floor is unchanged; it is just reached less often.
+        """
+        nonlocal display
+        rewritten = await recover(
+            provider, system, outcome.messages, reason, detail
+        )
+        if not rewritten:
+            return False
+        candidate = strip_markers(rewritten)
+        if risk == HIGH:
+            candidate = f"{HIGH_ESCALATION} {candidate}"
+        retry_ok, _ = values_traceable(candidate, sources)
+        if not retry_ok:
+            return False
+        if not sources and unit_values(candidate):
+            return False
+        if not validate_reply(candidate, risk, extra_terms).ok:
+            return False
+        display = candidate
+        return True
+
     # Fidelity FIRST: a drifted lab value is worse than a blocked reply, and it
     # is the failure mode the validator cannot see.
     sources = [*outcome.source_texts, *(c.content for c in chunks)]
@@ -996,36 +1029,41 @@ async def _dispatch_agentic(
     ok, stray = values_traceable(display, sources)
     if not ok:
         logger.warning("numeric fidelity failure: %s", stray)
-        t("Value check",
-          "a stated value did not match your records — replaced with the "
-          "safe reply")
-        display, degraded = safe_reply(risk, session_id), "fidelity"
+        if await _try_recover("fidelity", ", ".join(stray)):
+            t("Value check", "a stated value was corrected on a second pass")
+        else:
+            t("Value check",
+              "a stated value did not match your records — replaced with the "
+              "safe reply")
+            display, degraded = safe_reply(risk, session_id), "fidelity"
     elif not sources and unit_values(display):
         # Nothing was retrieved and no tool ran, yet the reply states a
         # clinical value or a dose. There is nothing behind it — the model
         # made it up. This is the case values_traceable deliberately cannot
         # judge (no sources to compare against), so the policy lives here.
-        logger.warning(
-            "ungrounded clinical value with no sources: %s", unit_values(display)
-        )
-        t("Value check",
-          "a dose or measurement was stated with nothing to support it — "
-          "replaced with the safe reply")
-        display, degraded = safe_reply(risk, session_id), "ungrounded_value"
+        stated = unit_values(display)
+        logger.warning("ungrounded clinical value with no sources: %s", stated)
+        if await _try_recover("ungrounded_value", ", ".join(stated)):
+            t("Value check", "an unsupported figure was removed on a second pass")
+        else:
+            t("Value check",
+              "a dose or measurement was stated with nothing to support it — "
+              "replaced with the safe reply")
+            display, degraded = safe_reply(risk, session_id), "ungrounded_value"
     elif sources:
         t("Value check", "every value matches your records")
 
     if degraded is None:
-        try:
-            index = await load_condition_index(db)
-            extra = index.diagnostic_terms() if index is not None else None
-        except Exception:  # noqa: BLE001
-            extra = None
-        verdict = validate_reply(display, risk, extra)
+        verdict = validate_reply(display, risk, extra_terms)
         if not verdict.ok:
-            t("Output validation",
-              f"blocked ({verdict.reason}) — replaced with the safe reply")
-            display, degraded = safe_reply(risk, session_id), "validation"
+            if await _try_recover(verdict.reason):
+                t("Output validation",
+                  f"first attempt blocked ({verdict.reason}); the rewrite "
+                  "passed")
+            else:
+                t("Output validation",
+                  f"blocked ({verdict.reason}) — replaced with the safe reply")
+                display, degraded = safe_reply(risk, session_id), "validation"
         else:
             t("Output validation", "passed all safety checks")
 

@@ -46,8 +46,72 @@ class GroundingReport:
         }
 
 
+# --------------------------------------------------------------------------- #
+# Clinical assertions that carry no numbers
+# --------------------------------------------------------------------------- #
+# A sentence with no digits in it was never grounding-checked: is_factual only
+# matched units and thresholds. So "you can stop taking it once you feel
+# better" — the single most dangerous thing this product could say — passed
+# unexamined, because the numeric guards have nothing to look at.
+#
+# Matched on grammatical SHAPE, not a phrase blocklist. A blocklist is the same
+# treadmill this codebase is trying to leave behind: every new phrasing would
+# be a new code change.
+
+# Directives aimed at the reader about medication or care.
+_DIRECTIVE_RE = re.compile(
+    r"\byou (?:can|could|should|shouldn't|should not|need to|must|ought to|"
+    r"may|might want to|don't need to|do not need to)\b"
+    r"[^.?!]{0,60}?"
+    r"\b(?:stop|start|skip|halve|double|increase|reduce|lower|raise|change|"
+    r"switch|take|takes|taking|continue|discontinue|avoid|wait|delay)\b",
+    re.IGNORECASE,
+)
+
+# Prognostic claims — what will happen, stated as fact.
+_PROGNOSTIC_RE = re.compile(
+    r"\b(?:usually|normally|typically|generally|always|will)\s+"
+    r"(?:resolve|resolves|clear|clears|improve|improves|settle|settles|"
+    r"go away|goes away|pass|passes|heal|heals)\b"
+    r"|\bis (?:harmless|nothing to worry about|not serious|no cause for concern)\b"
+    r"|\b(?:resolves|clears|goes away|settles) on (?:its|their) own\b",
+    re.IGNORECASE,
+)
+
+# Routing the reader to care is ALWAYS safe and must never be flagged —
+# blocking it would be the exact opposite of this product's purpose.
+_SAFE_DIRECTION_RE = re.compile(
+    r"\b(?:doctor|clinician|pharmacist|prescriber|physician|nurse|"
+    r"emergency|hospital|urgent care|specialist|professional)\b",
+    re.IGNORECASE,
+)
+
+
+def assertion_kind(sentence: str) -> str | None:
+    """Classify a sentence as a clinical assertion needing a citation.
+
+    Returns "directive", "prognostic", or None.
+    """
+    if _SAFE_DIRECTION_RE.search(sentence):
+        return None
+    if _DIRECTIVE_RE.search(sentence):
+        return "directive"
+    if _PROGNOSTIC_RE.search(sentence):
+        return "prognostic"
+    return None
+
+
 def is_factual(sentence: str) -> bool:
-    return bool(_UNIT_RE.search(sentence) or _THRESHOLD_RE.search(sentence))
+    """True when a sentence makes a claim that requires a citation.
+
+    Numeric claims (values, thresholds, doses) AND non-numeric clinical
+    assertions (directives about medication, prognoses stated as fact).
+    """
+    return bool(
+        _UNIT_RE.search(sentence)
+        or _THRESHOLD_RE.search(sentence)
+        or assertion_kind(sentence)
+    )
 
 
 def _normalize(answer: str) -> str:

@@ -156,3 +156,93 @@ async def run_agent(
     outcome.forced = True
     outcome.messages = history
     return outcome
+
+
+# --------------------------------------------------------------------------- #
+# Recovery
+# --------------------------------------------------------------------------- #
+RECOVERY_FAILED = (
+    "I'm not able to answer that one safely enough to be useful, and I'd "
+    "rather say so than guess. A clinician can look at this properly with "
+    "you. Is there something else I can help with, or would you like me to "
+    "try explaining it a different way?"
+)
+
+# Why each guard rejected, phrased as an instruction the model can act on.
+_CORRECTIONS = {
+    "banned:diagnostic-assertion": (
+        "Your previous answer stated or implied that the reader HAS a "
+        "condition. Rewrite it as what the information suggests is worth "
+        "discussing with their doctor. Assert no diagnosis."
+    ),
+    "banned:provider-leak": (
+        "Your previous answer named an AI model, provider or company. You are "
+        "Davi, the health assistant. Rewrite without naming any of them."
+    ),
+    "banned:numeric-disease-probability": (
+        "Your previous answer gave a disease probability as a number. Rewrite "
+        "it without any numeric likelihood."
+    ),
+    "missing-escalation": (
+        "Your previous answer concerns a potentially serious symptom and must "
+        "tell the reader to seek medical care promptly. Rewrite it so that "
+        "instruction is unmistakable."
+    ),
+    "fidelity": (
+        "Your previous answer stated a value that does not appear in the "
+        "reader's records: {detail}. Use only values the tools returned, "
+        "quoted exactly, or leave the number out."
+    ),
+    "ungrounded_value": (
+        "Your previous answer stated a dose or measurement with nothing to "
+        "support it: {detail}. Remove the number, or say plainly that you do "
+        "not have that figure."
+    ),
+}
+
+_GENERIC_CORRECTION = (
+    "Your previous answer did not pass this service's safety checks. Rewrite "
+    "it more carefully, stay general, and route anything specific to a "
+    "clinician."
+)
+
+
+def correction_for(reason: str, detail: str = "") -> str:
+    """The corrective instruction for a rejection reason."""
+    template = _CORRECTIONS.get(reason)
+    if template is None:
+        # Match on the family when the exact reason is unknown
+        # (banned:<phrase> covers an open set of phrases).
+        for key, value in _CORRECTIONS.items():
+            if reason.startswith(key.split(":")[0] + ":"):
+                template = value
+                break
+    if template is None:
+        return _GENERIC_CORRECTION
+    return template.format(detail=detail or "that value")
+
+
+async def recover(
+    provider,
+    system: str,
+    messages: Sequence[Message],
+    reason: str,
+    detail: str = "",
+) -> str | None:
+    """One corrective retry. Returns the rewritten text, or None.
+
+    None means "fall back to the safe reply" — the existing floor is unchanged,
+    just reached less often. Exactly one extra call, never a loop: a model that
+    keeps failing the guards must not be allowed to keep spending the reader's
+    time.
+    """
+    try:
+        turn = await provider.generate_turn(
+            system=system + "\n\n" + correction_for(reason, detail),
+            messages=messages,
+            tools=(),
+        )
+    except Exception:  # noqa: BLE001 — recovery must never make things worse
+        logger.warning("recovery attempt failed", exc_info=True)
+        return None
+    return turn.text or None

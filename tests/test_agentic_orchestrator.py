@@ -164,7 +164,11 @@ async def test_tools_are_offered_at_none_risk(db_session):
 async def test_a_drifted_value_is_caught_by_the_fidelity_guard(
     db_session, user_with_hba1c
 ):
-    """The tool returned 6.1; the model says 6.5. That must not ship."""
+    """The tool returned 6.1; the model says 6.5. That must not ship.
+
+    Recovery gets one corrective retry, so the drifted figure is gone either
+    way — the invariant is that 6.5% never reaches the reader.
+    """
     provider = _tool_then_say(
         "get_report_parameter", {"parameter": "HbA1c"}, "Your HbA1c was 6.5%."
     )
@@ -172,6 +176,33 @@ async def test_a_drifted_value_is_caught_by_the_fidelity_guard(
         db_session, user_with_hba1c, "what was my hba1c", provider
     )
     assert "6.5%" not in result.response_message
+
+
+async def test_a_drift_that_survives_the_retry_falls_back_to_the_safe_reply(
+    db_session, user_with_hba1c
+):
+    """When the rewrite drifts too, the floor still catches it."""
+    provider = FakeProvider(
+        turns=[
+            LLMTurn(
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="get_report_parameter",
+                        arguments={"parameter": "HbA1c"},
+                    ),
+                ),
+                stop_reason="tool_use",
+            ),
+            LLMTurn(text="Your HbA1c was 6.5%."),
+            LLMTurn(text="Sorry — I meant your HbA1c was 6.7%."),
+        ]
+    )
+    result = await handle_chat(
+        db_session, user_with_hba1c, "what was my hba1c", provider
+    )
+    assert "6.5%" not in result.response_message
+    assert "6.7%" not in result.response_message
     assert result.provenance["degraded"] == "fidelity"
 
 
@@ -183,6 +214,20 @@ async def test_an_invented_dose_is_caught(db_session):
         db_session, uuid.uuid4(), "tell me about blood sugar", provider
     )
     assert "500 mg" not in result.response_message
+
+
+async def test_an_invented_dose_that_survives_the_retry_falls_back(db_session):
+    provider = FakeProvider(
+        turns=[
+            LLMTurn(text="The usual dose is 500 mg twice daily."),
+            LLMTurn(text="Actually the usual dose is 850 mg twice daily."),
+        ]
+    )
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "tell me about blood sugar", provider
+    )
+    assert "500 mg" not in result.response_message
+    assert "850 mg" not in result.response_message
     assert result.provenance["degraded"] == "ungrounded_value"
 
 
@@ -192,7 +237,26 @@ async def test_a_banned_diagnostic_reply_is_replaced(db_session):
         db_session, uuid.uuid4(), "tell me about blood sugar", provider
     )
     assert "you probably have" not in result.response_message.lower()
+
+
+async def test_a_reply_that_stays_banned_after_the_retry_falls_back(db_session):
+    """Exactly one corrective retry — a model that keeps failing the guards
+    must not keep spending the reader's time."""
+    provider = FakeProvider(
+        turns=[
+            LLMTurn(text="You probably have diabetes."),
+            LLMTurn(text="To be clear, you definitely have diabetes."),
+        ]
+    )
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "tell me about blood sugar", provider
+    )
+    low = result.response_message.lower()
+    assert "you probably have" not in low
+    assert "you definitely have" not in low
     assert result.provenance["degraded"] == "validation"
+    # Two model calls, not three: the retry is capped at one.
+    assert len(provider.calls) == 2
 
 
 async def test_a_provider_leak_is_replaced(db_session):
