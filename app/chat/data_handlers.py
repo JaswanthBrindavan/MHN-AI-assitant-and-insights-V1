@@ -622,6 +622,8 @@ async def handle_metric_query(
                         "action": "review_with_clinician",
                         "provenance": {"path": "metric_query",
                                        "metric": query.metric,
+                                       "value_text": value_text,
+                                       "recorded": when,
                                        "source": "report"},
                     }
             return _metric_not_found(display)
@@ -664,7 +666,16 @@ async def handle_metric_query(
             f"(recorded {when}). {_NOT_MEDICAL_ADVICE}"
         ),
         "action": "review_with_clinician",
-        "provenance": {"path": "metric_query", "metric": query.metric},
+        # value_text/recorded are the machine-readable forms the tool
+        # executors hand to the model so it can COMBINE this with other
+        # facts; the legacy engine ignores them.
+        "provenance": {
+            "path": "metric_query",
+            "metric": query.metric,
+            "value_text": value_text,
+            "recorded": when,
+            "source": spec["source"],
+        },
         "visual": visual,
     }
 

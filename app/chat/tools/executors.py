@@ -1,0 +1,177 @@
+"""Executors wrapping the existing handlers, returning structured data.
+
+Each returns a JSON-serialisable dict (or ``None`` for "nothing found")
+carrying BOTH the structured facts and the handler's own validator-safe
+wording under ``deterministic_reply``.
+
+That second field is the point. The handler's phrasing has been through the
+output validator and, for the clinical paths, clinician review; the model is
+told to prefer it verbatim when it answers the question on its own, and to
+compose its own wording only when it needs to COMBINE facts from more than one
+tool. It also gives the numeric-fidelity guard something to check against —
+every value in the reply must appear in a tool result.
+
+No exception handling here. app/chat/tools/registry.py owns the SAVEPOINT and
+the fail-closed contract, so a handler that raises is reported to the model as
+a failed call rather than killing the turn.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.chat.context import build_patient_context
+from app.chat.data_handlers import (
+    handle_document_query,
+    handle_family_list_query,
+    handle_metric_query,
+    handle_report_param_ask,
+    handle_suggestion_query,
+    handle_summary_query,
+    handle_tracker_add,
+    handle_value_check,
+)
+from app.drugs.service import build_drug_reply, find_drug
+
+# Keys a handler may return that the model can use directly.
+_PASSTHROUGH = ("documents", "visual", "citations")
+
+
+def _unwrap(ability: dict | None, **extra) -> dict | None:
+    """Handler result -> tool payload."""
+    if ability is None:
+        return None
+    payload: dict = {
+        "deterministic_reply": ability["reply"],
+        "provenance": ability.get("provenance", {}),
+        **extra,
+    }
+    for key in _PASSTHROUGH:
+        if ability.get(key):
+            payload[key] = ability[key]
+    return payload
+
+
+async def get_latest_metric(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    metric = str(args.get("metric", "")).strip()
+    if not metric:
+        return None
+    ability = await handle_metric_query(db, user_id, f"what is my latest {metric}")
+    if ability is None:
+        return None
+    prov = ability.get("provenance", {})
+    return _unwrap(
+        ability,
+        metric=prov.get("metric", metric),
+        value=prov.get("value_text"),
+        recorded=prov.get("recorded"),
+        source=prov.get("source"),
+        found=prov.get("found", True),
+    )
+
+
+async def get_report_parameter(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    param = str(args.get("parameter", "")).strip()
+    if not param:
+        return None
+    ability = await handle_report_param_ask(db, user_id, f"what is my {param}")
+    return _unwrap(ability, parameter=param)
+
+
+async def get_documents(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    kinds = args.get("kinds") or ["document"]
+    if not isinstance(kinds, list):
+        kinds = [str(kinds)]
+    who = str(args.get("relation") or args.get("owner_name") or "").strip()
+    phrase = f"show me {who + ' ' if who else ''}{' '.join(str(k) for k in kinds)}"
+    ability = await handle_document_query(db, user_id, phrase)
+    return _unwrap(ability, asked_about=who or "you")
+
+
+async def check_value_against_range(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, session_id
+) -> dict | None:
+    metric = str(args.get("metric", "")).strip()
+    value = args.get("value")
+    if not metric or value is None:
+        return None
+    secondary = args.get("secondary")
+    reading = f"{value}/{secondary}" if secondary is not None else f"{value}"
+    ability = await handle_value_check(
+        db, user_id, f"my {metric} is {reading}", session_id
+    )
+    return _unwrap(ability, metric=metric, value=value, secondary=secondary)
+
+
+async def log_lifestyle_entry(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    kind = str(args.get("kind", "")).strip()
+    quantity = args.get("quantity")
+    if not kind or quantity is None:
+        return None
+    days = int(args.get("days_ago") or 0)
+    when = "today" if days == 0 else "yesterday" if days == 1 else f"{days} days ago"
+    ability = await handle_tracker_add(
+        db, user_id, f"I had {quantity} {kind} {when}"
+    )
+    return _unwrap(ability, kind=kind, quantity=quantity, days_ago=days)
+
+
+async def get_health_summary(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    period = str(args.get("period", "week"))
+    ability = await handle_summary_query(
+        db, user_id, f"health summary for the {period}"
+    )
+    return _unwrap(ability, period=period)
+
+
+async def get_family_members(
+    db: AsyncSession, user_id: uuid.UUID, _args: dict, _session_id
+) -> dict | None:
+    ability = await handle_family_list_query(db, user_id, "who is in my family")
+    return _unwrap(ability)
+
+
+async def get_condition_guidance(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    condition = str(args.get("condition", "")).strip()
+    if not condition:
+        return None
+    _text, codes = await build_patient_context(db, user_id)
+    ability = await handle_suggestion_query(
+        db, user_id, f"tips for {condition}", codes
+    )
+    return _unwrap(ability, condition=condition)
+
+
+async def lookup_medicine(
+    db: AsyncSession, _user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    name = str(args.get("name", "")).strip()
+    if not name:
+        return None
+    drug = await find_drug(db, name)
+    if drug is None:
+        return None
+    return {
+        "deterministic_reply": build_drug_reply(drug),
+        "name": drug.name,
+        "composition": [c for c in (drug.composition1, drug.composition2) if c],
+        "uses": (drug.uses or [])[:5],
+        "side_effects": (drug.side_effects or [])[:5],
+        "habit_forming": drug.habit_forming,
+        # Stated explicitly so the model cannot infer that silence means safe.
+        "has_interaction_data": False,
+    }
