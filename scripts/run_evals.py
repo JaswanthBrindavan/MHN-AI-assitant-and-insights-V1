@@ -30,11 +30,6 @@ from app.llm.fake import FakeProvider
 EVAL_USER = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 
 
-class _RaisingProvider(FakeProvider):
-    async def generate(self, *, system: str, user: str) -> str:
-        raise RuntimeError("simulated provider outage")
-
-
 async def _fresh_sessionmaker() -> tuple[async_sessionmaker[AsyncSession], object]:
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -93,7 +88,9 @@ async def run(path: Path) -> int:
         reset_index_cache()
         sm, engine = await _fresh_sessionmaker()
         if scenario.get("provider_raises"):
-            provider = _RaisingProvider()
+            provider = FakeProvider(
+                raises=RuntimeError("simulated provider outage")
+            )
         elif scenario.get("scripted_reply"):
             provider = FakeProvider(responses=[scenario["scripted_reply"]])
         else:

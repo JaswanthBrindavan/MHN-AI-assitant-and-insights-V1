@@ -1,0 +1,82 @@
+"""Provider-neutral tool-calling vocabulary — pure, stdlib only.
+
+Anthropic and OpenAI-compatible endpoints express tool use with incompatible
+wire formats. This module is the single internal shape both adapters translate
+to and from, so nothing above the adapter layer knows which provider is live.
+
+Keep this module free of I/O, httpx, and vendor SDK imports.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """A tool offered to the model. ``input_schema`` is JSON Schema."""
+
+    name: str
+    description: str
+    input_schema: dict
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """The model asking for a tool to run. ``id`` correlates the result."""
+
+    id: str
+    name: str
+    arguments: dict
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """The outcome of one tool call. ``content`` is a JSON string."""
+
+    call_id: str
+    content: str
+    is_error: bool = False
+
+
+@dataclass(frozen=True)
+class UserMessage:
+    content: str
+
+
+@dataclass(frozen=True)
+class AssistantMessage:
+    content: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolResultMessage:
+    """ALL results from one assistant turn, together.
+
+    Splitting parallel results across several messages silently trains the
+    model to stop making parallel calls — holding them in one message makes
+    that mistake unrepresentable.
+    """
+
+    results: tuple[ToolResult, ...]
+
+
+Message = UserMessage | AssistantMessage | ToolResultMessage
+
+
+@dataclass(frozen=True)
+class LLMTurn:
+    """One model response.
+
+    stop_reason: "end_turn" | "tool_use" | "max_tokens" | "refusal"
+    """
+
+    text: str = ""
+    tool_calls: tuple[ToolCall, ...] = ()
+    stop_reason: str = "end_turn"
+    usage: dict | None = None
+
+    @property
+    def wants_tools(self) -> bool:
+        return self.stop_reason == "tool_use" and bool(self.tool_calls)

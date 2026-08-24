@@ -32,20 +32,12 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-class RaisingProvider(FakeProvider):
-    """Raises on every generate() call — simulates a total provider outage."""
-
-    async def generate(self, *, system: str, user: str) -> str:
-        self.calls.append((system, user))
-        raise RuntimeError("provider down")
-
-
 class ScriptThenRaiseProvider(FakeProvider):
     """Returns scripted responses, then raises once the script is exhausted."""
 
     async def generate(self, *, system: str, user: str) -> str:
         if not self._responses:
-            self.calls.append((system, user))
+            self.calls.append({"system": system, "user": user})
             raise RuntimeError("provider down mid-conversation")
         return await super().generate(system=system, user=user)
 
@@ -400,7 +392,7 @@ def test_strip_markers_idempotent():
 # --------------------------------------------------------------------------- #
 async def test_provider_error_degrades_to_safe_reply(db_session, set_grounding_mode):
     set_grounding_mode("log")
-    provider = RaisingProvider()
+    provider = FakeProvider(raises=RuntimeError("provider down"))
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
@@ -423,7 +415,7 @@ async def test_provider_error_at_high_risk_keeps_escalation(
     db_session, set_grounding_mode
 ):
     set_grounding_mode("log")
-    provider = RaisingProvider()
+    provider = FakeProvider(raises=RuntimeError("provider down"))
 
     result = await handle_chat(
         db_session, USER, "I have severe chest pain right now", provider
