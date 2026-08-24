@@ -76,3 +76,49 @@ of this branch's commits present.
 | Severity | Problem |
 |---|---|
 | **High** | **Message ordering was nondeterministic.** `utcnow()` returned one distinct value across 1000 consecutive calls; rows sharing `created_at` fell back to a random uuid4 tiebreak. Six call sites order `conversation_messages` this way, including the one that decides what the model sees as recent turns and what compaction folds. Observed: `covers_through_message_id` pointed at the wrong message — **compaction folded the wrong turns**. Fixed by making `utcnow()` strictly increasing. Two "flaky" tests were never flaky; the suite now passes across random orderings. |
+
+---
+
+## Tasks 2–16 — consolidated findings
+
+Findings from the implementation and review of Phase 0, Phase 1 and Phase 2.
+
+### Confirmed defects, found and fixed
+
+| # | Severity | Where | Finding |
+|---|---|---|---|
+| F1 | **Critical** | `app/chat/agent.py` | **`asyncio.gather` over tool calls broke 3 of every 4.** Every executor shares one `AsyncSession`; SQLAlchemy refuses concurrent operations on one ("This session is provisioning a new connection"). Measured with four calls: the first succeeded, the other three returned "could not be completed" on perfectly good data. The user-visible effect would have been the assistant claiming a reader's records were unavailable whenever the model asked for more than one thing at once — exactly what the tool design encourages. **Fixed:** sequential execution; regression test fails if `gather` returns. |
+| F2 | **High** | `app/chat/tools/registry.py` | `json.dumps` sat OUTSIDE the try block, so a non-serialisable payload escaped the registry's never-raise contract entirely and propagated into the loop. **Fixed:** serialization moved inside the failure boundary. |
+| F3 | **High** | `app/chat/orchestrator.py` | **The trace echoed the banned phrase back to the client** — `blocked (banned:you probably have)`. The reply was correctly withheld while the trace quoted it verbatim. **Fixed:** `redact_reason()` gives the trace the category only; the corrective retry still receives the specific phrase because it needs it. |
+| F4 | **High** | `app/chat/orchestrator.py` | The agentic path had **weaker numeric safety than legacy**: with no tools called and nothing retrieved, `sources` is empty, so `values_traceable` had nothing to compare against and an invented dose passed. **Fixed:** `ungrounded_value` policy — a dose stated when nothing was retrieved and no tool ran has nothing behind it. |
+| F5 | Medium | `app/grounding/fidelity.py` | `%` is a non-word character, so a trailing `\b` after it demanded a following word character and `6.1%.` never matched — the guard silently missed percentages at the end of a sentence. **Fixed:** percentages get their own alternative. |
+| F6 | Medium | `app/chat/episodes.py` | SQLite returns NAIVE datetimes for a `DateTime(timezone=True)` column while PostgreSQL returns aware ones; comparing them raises. Exactly the cross-backend gap drawbacks §8.4 describes. **Fixed:** `_aware()` normalisation. |
+| F7 | Medium | `tests/test_pg_hybrid_retrieval.py` | A test called `can_view_document` with an invented signature. The `pg` skip was hiding it, so it would have failed in CI on the first real run. **Fixed:** verified against the real signature. |
+| F8 | Low | `app/chat/agent.py` | A comprehension variable shadowed the `AgentOutcome` named `outcome`. Python scopes it safely, so it was not a live bug — but it is the line someone misreads at 3am. **Fixed:** renamed. |
+
+### Process failure
+
+| # | Severity | Finding |
+|---|---|---|
+| P1 | **High** | **Review agents were given write access to the tree they were reviewing.** They left nine scratch test files that monkeypatched global state without cleanup. With those files present the **emergency-ordering tests failed** — the most alarming possible signal from this suite, and pure artifact. One agent also left `return None  # MUTANT` in `executors.py`, disabling lifestyle logging entirely. Verified it never reached a commit. **Resolution:** reviewers are read-only from here on. A reviewer that mutates the tree can make working code look broken and broken code look fine. |
+| P2 | Medium | One commit went in with ruff and pyright errors **visible in the same terminal output**. Verification has to be READ, not merely produced. Fixed in the following commit. |
+
+### Plan defects found before coding
+
+| # | Finding | Resolution |
+|---|---|---|
+| A7 | Task 11 called for `asyncio.gather` over the per-turn lookups. Impossible for the same reason as F1 — one shared session. | Rewritten as deduplication: memoised patient context, removed a duplicate `resolve_scope`, registry TTL. |
+| A8 | Task 5's executors read `provenance` keys the handlers never emitted (`value`, `unit`, `recorded_at`); `handle_metric_query` formats them into the reply string and discards the structure. | Widened the handler's provenance first, minimally, using the values already bound on every path. |
+| A9 | Task 7's acceptance gate would fail for an unrelated reason: two eval scenarios pin `path` to legacy handler names the agentic engine cannot produce. | `run_evals` is engine-aware — a scenario pins BEHAVIOUR, not the engine. |
+
+### Deliberately not fixed
+
+- **`FakeProvider.DEFAULT` wording.** Load-bearing: it contains no "clinician",
+  which is how the outage evals distinguish a degraded safe reply from a model
+  answer. Rewording it makes that scenario vacuous.
+- **Extra tool calls in a bake-off case.** Calling something additional is
+  untidy, not wrong; missing a required one is wrong. Scored accordingly.
+- **The `(end_turn, tool_calls present)` row of `wants_tools`.** Genuinely
+  debatable for OpenAI-compatible gateways, which return `finish_reason: "stop"`
+  with a populated `tool_calls` array. Pinning it now would cement a possible
+  adapter bug as intended behaviour.
