@@ -7,6 +7,7 @@ single in-memory connection alive across sessions within a test.
 
 from __future__ import annotations
 
+import os as _os
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -108,3 +109,47 @@ def set_grounding_mode(monkeypatch):
 
     yield _set
     get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# PostgreSQL (opt-in)
+# --------------------------------------------------------------------------- #
+# `_hybrid_rank` returns None immediately on any non-PostgreSQL dialect, so on
+# SQLite the ENTIRE hybrid retrieval path is skipped and has never run in CI.
+# The same is true of pgvector similarity, PG enum binds and partial unique
+# indexes. These fixtures let a test opt in to the real thing.
+#
+# Set TEST_DATABASE_URL to enable; without it the tests skip rather than fail,
+# so a developer with no local PostgreSQL is not blocked.
+
+
+
+def _pg_url() -> str | None:
+    return _os.environ.get("TEST_DATABASE_URL")
+
+
+@pytest_asyncio.fixture
+async def pg_engine():
+    url = _pg_url()
+    if not url:
+        pytest.skip("TEST_DATABASE_URL not set — PostgreSQL tests skipped")
+    eng = create_async_engine(url, future=True)
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield eng
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await eng.dispose()
+
+
+@pytest_asyncio.fixture
+async def pg_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
+    """A real PostgreSQL session, mirroring `db_session`.
+
+    Use for anything whose behaviour differs by dialect. Everything else should
+    keep using `db_session` — SQLite is far faster and the suite runs on every
+    push.
+    """
+    maker = async_sessionmaker(pg_engine, expire_on_commit=False, class_=AsyncSession)
+    async with maker() as session:
+        yield session
