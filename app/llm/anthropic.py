@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 
 from anthropic import AsyncAnthropic
 
@@ -185,3 +185,27 @@ class AnthropicProvider:
             payload["tools"] = _to_anthropic_tools(tools)
         resp = await self._client.messages.create(**payload)
         return _from_anthropic_response(resp)
+
+    async def generate_stream(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+    ) -> AsyncIterator[str]:
+        """Yield text deltas. Tools are NOT offered here.
+
+        Streaming happens after the tool rounds are done — an answer being
+        composed from tool results is the only thing worth streaming, and
+        interleaving tool calls into a token stream buys nothing.
+        """
+        payload: dict = {
+            "model": self.model,
+            "max_tokens": self._max_tokens,
+            "system": system,
+            "messages": _to_anthropic_messages(messages),
+        }
+        if self._thinking == "adaptive":
+            payload["thinking"] = _THINKING_ADAPTIVE
+        async with self._client.messages.stream(**payload) as stream:
+            async for text in stream.text_stream:
+                yield text

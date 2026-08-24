@@ -245,3 +245,14 @@ def validate_reply(
         return ValidationResult(False, "missing-escalation")
 
     return ValidationResult(True)
+
+
+def redact_reason(reason: str) -> str:
+    """A trace-safe form of a validation reason.
+
+    ``validate_reply`` returns the MATCHED phrase ("banned:you probably have")
+    so the corrective retry can be specific. The trace is user-visible, so it
+    gets the category only — echoing the banned text back to the reader defeats
+    the point of blocking it.
+    """
+    return reason.split(":", 1)[0] if ":" in reason else reason

@@ -75,7 +75,11 @@ def values_traceable(reply: str, sources: list[str]) -> tuple[bool, list[str]]:
         return True, []
     haystack = _normalize(" ".join(sources))
     stray = [
-        value for value in unit_values(reply) if _normalize(value) not in haystack
+        value
+        for value in unit_values(reply)
+        if not re.search(
+            rf"(?<![\d.]){re.escape(_normalize(value))}(?![\d.])", haystack
+        )
     ]
     # Preserve the reply's own casing and spacing for a legible log line, and
     # de-duplicate so one repeated value is reported once.

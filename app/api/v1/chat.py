@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +24,8 @@ from app.api.v1.schemas import (
 from app.auth import authorize_user, get_current_user_id
 from app.chat.conversation import add_message, ensure_session, maybe_compact
 from app.chat.orchestrator import handle_chat
+from app.chat.replies import safe_reply
+from app.chat.streaming import validated_stream
 from app.db import get_db
 from app.documents.service import (
     UPLOAD_RESOURCE_TYPE,
@@ -223,3 +228,87 @@ async def list_messages(
         )
         for m in messages
     ]
+
+
+def _sse(event: dict) -> str:
+    """Format one Server-Sent Event frame."""
+    return f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    payload: ChatRequest,
+    current_user: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+) -> StreamingResponse:
+    """Streamed chat.
+
+    The reply is produced by the SAME pipeline as POST /chat — triage floor,
+    emergency directive, tools, guards — and then delivered incrementally.
+    Nothing is streamed that has not passed the banned-phrase check, and the
+    whole-answer guards can still retract with a `replace` event.
+
+    Deterministic paths (emergency, scope decline, greeting) arrive as a single
+    delta: there is nothing to gain from typing out an emergency directive one
+    token at a time.
+
+    Event contract:
+        event: delta    data: {"type":"delta","text":"..."}     append
+        event: replace  data: {"type":"replace","text":"..."}   discard + show
+        event: done     data: {"type":"done", ...}              metadata
+    """
+    user_id = payload.user_id or current_user
+    authorize_user(user_id, current_user)
+
+    result = await handle_chat(
+        db, user_id, payload.message, provider, session_id=payload.session_id
+    )
+    await db.commit()
+
+    async def _events():
+        try:
+            # The answer is already fully guarded; stream it sentence by
+            # sentence so the client can render progressively.
+            async for event in validated_stream(
+                _sentences_of(result.response_message),
+                risk_level=result.risk_level,
+                safe_fallback=safe_reply(result.risk_level, result.session_id),
+            ):
+                yield _sse(event)
+            yield _sse(
+                {
+                    "type": "done",
+                    "risk_level": result.risk_level,
+                    "recommended_action": result.recommended_action,
+                    "session_id": str(result.session_id),
+                    "provenance": result.provenance,
+                    "citations": result.citations,
+                    "documents": result.documents,
+                    "visual": result.visual,
+                    "language": result.language,
+                    "trace": result.trace,
+                }
+            )
+        except Exception:  # noqa: BLE001 — a stream must never 500 mid-flight
+            logger.warning("chat stream failed", exc_info=True)
+            yield _sse(
+                {
+                    "type": "replace",
+                    "text": safe_reply(result.risk_level, result.session_id),
+                    "reason": "stream_error",
+                }
+            )
+
+    return StreamingResponse(
+        _events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _sentences_of(text: str):
+    """Chunk a finished reply for progressive delivery."""
+    for piece in re.split(r"(?<=[.!?])(\s+)", text):
+        if piece:
+            yield piece

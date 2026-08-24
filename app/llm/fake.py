@@ -12,7 +12,7 @@ the call and then fails, for provider-outage tests.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 
 from app.llm.tools import LLMTurn, Message, ToolSpec
 
@@ -78,3 +78,21 @@ class FakeProvider:
         if self._raises is not None:
             raise self._raises
         return LLMTurn(text=self.DEFAULT, stop_reason="end_turn")
+
+    async def generate_stream(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+    ) -> AsyncIterator[str]:
+        """Stream the next scripted turn word by word."""
+        self.calls.append(
+            {"system": system, "messages": list(messages), "stream": True}
+        )
+        if self._raises is not None:
+            raise self._raises
+        text = self._turns.pop(0).text if self._turns else (
+            self._responses.pop(0) if self._responses else self.DEFAULT
+        )
+        for word in text.split(" "):
+            yield word + " "

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 
 import httpx
 
@@ -204,3 +204,45 @@ class OpenAICompatibleProvider:
         )
         resp.raise_for_status()
         return _from_openai_response(resp.json())
+
+    async def generate_stream(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+    ) -> AsyncIterator[str]:
+        """Yield text deltas from an SSE /chat/completions stream."""
+        payload: dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                *_to_openai_messages(messages),
+            ],
+            "temperature": 0,
+            "stream": True,
+        }
+        client = self._client_factory(self._timeout)
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            json=payload,
+            headers=self._headers(),
+            timeout=self._timeout,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    # A malformed frame is not worth killing a reply over.
+                    logger.warning("unparseable SSE frame; skipping")
+                    continue
+                choices = chunk.get("choices") or [{}]
+                delta = (choices[0].get("delta") or {}).get("content")
+                if delta:
+                    yield delta
