@@ -13,7 +13,6 @@ loop is safety nobody can audit.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -71,22 +70,20 @@ def _accumulate_usage(total: dict, turn: LLMTurn) -> None:
     total["calls"] = total.get("calls", 0) + 1
 
 
-def _as_result(call: ToolCall, outcome) -> ToolResult:
-    """Normalise a gather outcome into a ToolResult.
+def _as_error(call: ToolCall, exc: BaseException) -> ToolResult:
+    """Turn an executor exception into a result the model can act on.
 
     An executor is contracted never to raise; if one does anyway, the model is
-    told the call failed rather than the whole turn dying.
+    told that call failed rather than the whole turn dying.
     """
-    if isinstance(outcome, BaseException):
-        logger.warning(
-            "tool executor raised for %s: %s", call.name, type(outcome).__name__
-        )
-        return ToolResult(
-            call_id=call.id,
-            content='{"error": "That lookup could not be completed."}',
-            is_error=True,
-        )
-    return outcome
+    logger.warning(
+        "tool executor raised for %s: %s", call.name, type(exc).__name__
+    )
+    return ToolResult(
+        call_id=call.id,
+        content='{"error": "That lookup could not be completed."}',
+        is_error=True,
+    )
 
 
 async def run_agent(
@@ -121,22 +118,23 @@ async def run_agent(
         history.append(
             AssistantMessage(content=turn.text, tool_calls=turn.tool_calls)
         )
-        # Concurrent execution, then ALL results in one message — splitting
-        # them teaches the model to stop calling tools in parallel.
+        # SEQUENTIAL, deliberately. Every executor shares ONE AsyncSession,
+        # and SQLAlchemy does not support concurrent operations on one — a
+        # gather here is not merely pointless (one session is one connection,
+        # so the work serialises anyway) but actively destructive: measured,
+        # only the FIRST of four calls succeeded and the rest came back
+        # "could not be completed" on perfectly good data. The model would
+        # then tell the reader their records are unavailable when they are not.
         #
-        # return_exceptions=True is a safety property, not tidiness: without
-        # it, one executor raising propagates immediately and leaves its
-        # siblings running unawaited, still holding the DB session the
-        # orchestrator has already moved on from. The registry is meant never
-        # to raise; this is the belt to that braces.
-        raw = await asyncio.gather(
-            *(executor(call) for call in turn.tool_calls),
-            return_exceptions=True,
-        )
-        results = [
-            _as_result(call, settled)
-            for call, settled in zip(turn.tool_calls, raw, strict=True)
-        ]
+        # Results still travel together in ONE message — that is about the
+        # wire shape, not the execution order, and splitting them teaches the
+        # model to stop calling tools in parallel.
+        results = []
+        for call in turn.tool_calls:
+            try:
+                results.append(await executor(call))
+            except Exception as exc:  # noqa: BLE001 — executors must not kill a turn
+                results.append(_as_error(call, exc))
         history.append(ToolResultMessage(results=tuple(results)))
         outcome.tool_names.extend(call.name for call in turn.tool_calls)
         outcome.source_texts.extend(r.content for r in results)

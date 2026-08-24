@@ -222,3 +222,49 @@ async def test_the_tool_payload_is_a_valid_fidelity_source(
 
     ok, stray = values_traceable("Your HbA1c was 6.5%.", sources)
     assert not ok and stray == ["6.5%"]
+
+
+# --------------------------------------------------------------------------- #
+# Regression: multiple tool calls in one turn must ALL succeed
+# --------------------------------------------------------------------------- #
+async def test_several_tool_calls_in_one_turn_all_succeed(
+    db_session, user_with_hba1c
+):
+    """Found by review: executing tool calls with asyncio.gather made only the
+    FIRST succeed. Every executor shares one AsyncSession, and SQLAlchemy
+    refuses concurrent operations on one ("This session is provisioning a new
+    connection"). The rest came back "could not be completed" on perfectly good
+    data — and the model would then tell the reader their records are
+    unavailable when they are not.
+
+    run_agent executes sequentially for exactly this reason. This test fails if
+    anyone reintroduces gather.
+    """
+    from app.chat.agent import run_agent
+    from app.llm.fake import FakeProvider
+    from app.llm.tools import LLMTurn, UserMessage
+
+    calls = (
+        ToolCall(id="a", name="get_report_parameter", arguments={"parameter": "HbA1c"}),
+        ToolCall(id="b", name="get_family_members", arguments={}),
+        ToolCall(id="c", name="get_health_summary", arguments={"period": "week"}),
+    )
+    provider = FakeProvider(
+        turns=[
+            LLMTurn(tool_calls=calls, stop_reason="tool_use"),
+            LLMTurn(text="Here is a combined answer."),
+        ]
+    )
+
+    async def _executor(call):
+        return await execute_tool(db_session, user_with_hba1c, call, None)
+
+    out = await run_agent(
+        provider, "sys", [UserMessage("how am I doing?")], TOOL_SPECS, _executor
+    )
+
+    failures = [s for s in out.source_texts if "could not be completed" in s]
+    assert not failures, f"{len(failures)} of {len(calls)} tool calls failed"
+
+    # And the session is still usable for everything that follows.
+    assert (await db_session.execute(text("SELECT 1"))).scalar() == 1

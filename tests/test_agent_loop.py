@@ -87,23 +87,31 @@ async def test_parallel_calls_return_in_one_message():
     assert len(result_msgs[0].results) == 2
 
 
-async def test_parallel_calls_actually_run_concurrently():
+async def test_calls_run_SEQUENTIALLY_because_they_share_one_db_session():
+    """Deliberately not concurrent.
+
+    Every executor closes over ONE AsyncSession, and SQLAlchemy does not
+    support concurrent operations on one. Measured with asyncio.gather: only
+    the FIRST of four calls succeeded and the rest returned "could not be
+    completed" on perfectly good data — the model would then tell the reader
+    their records are unavailable when they are not.
+    """
     order: list[str] = []
 
     async def _slow_then_fast(call: ToolCall) -> ToolResult:
-        # c1 sleeps longer; if execution were serial it would finish first.
+        # c1 sleeps LONGER. Under concurrency c2 would finish first; in
+        # execution order c1 must.
         await asyncio.sleep(0.05 if call.id == "c1" else 0.01)
         order.append(call.id)
         return ToolResult(call_id=call.id, content="{}")
 
     provider = FakeProvider(turns=[_tool_turn("c1", "c2"), LLMTurn(text="ok")])
     await run_agent(provider, "sys", [UserMessage("x")], [SPEC], _slow_then_fast)
-    assert order == ["c2", "c1"], "tool calls did not run concurrently"
+    assert order == ["c1", "c2"], "tool calls must run in request order"
 
 
 async def test_results_keep_call_order_even_when_they_finish_out_of_order():
-    """asyncio.gather preserves input order — results must line up with the
-    calls that produced them, not with completion time."""
+    """Results must line up with the calls that produced them."""
 
     async def _reversed_timing(call: ToolCall) -> ToolResult:
         await asyncio.sleep(0.05 if call.id == "c1" else 0.01)
@@ -242,9 +250,7 @@ async def test_assistant_preamble_text_is_preserved_in_history():
 # Sibling isolation (regression: gather without return_exceptions orphaned them)
 # --------------------------------------------------------------------------- #
 async def test_one_raising_executor_does_not_orphan_its_siblings():
-    """Without return_exceptions=True, gather propagates the first exception
-    immediately and leaves siblings running unawaited — still holding the DB
-    session the orchestrator has already moved on from."""
+    """A raising executor must not take its siblings down with it."""
     finished: list[str] = []
 
     async def _one_explodes(call: ToolCall) -> ToolResult:
