@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.memory import compact_messages, empty_summary, merge_summaries
+from app.chat.summarize import merge_prose, summarize_prose
 from app.models.chat import (
     ConversationMessage,
     ConversationSession,
@@ -90,7 +91,9 @@ async def latest_summary(
     ).scalars().first()
 
 
-async def maybe_compact(db: AsyncSession, session_id: uuid.UUID) -> dict | None:
+async def maybe_compact(
+    db: AsyncSession, session_id: uuid.UUID, provider=None
+) -> dict | None:
     """Fold messages older than the last KEEP_VERBATIM into a versioned summary.
 
     Deterministic and never raises (caller relies on fail-open behaviour).
@@ -121,6 +124,16 @@ async def maybe_compact(db: AsyncSession, session_id: uuid.UUID) -> dict | None:
         )
         old = summary_row.summary if summary_row else empty_summary()
         merged = merge_summaries(old, new_part)
+
+        # Prose alongside the structure, never instead of it. The structured
+        # keys are the source of truth for every safety-relevant field; this
+        # only adds the nuance the regex extractors cannot see. A summarizer
+        # failure loses the prose and keeps the structure — never the reverse.
+        if provider is not None:
+            prose = await summarize_prose(
+                provider, [{"role": m.role, "message": m.message} for m in to_fold]
+            )
+            merged = merge_prose(merged, prose)
         version = summary_row.version + 1 if summary_row else 1
         token_estimate = sum(len(m.message) for m in to_fold) // 4
 

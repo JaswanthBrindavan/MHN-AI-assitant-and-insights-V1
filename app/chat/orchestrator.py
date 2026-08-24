@@ -897,7 +897,7 @@ async def handle_chat(
         db, session_id, "assistant", result.response_message,
         extracted_intent=assistant_meta,
     )
-    await maybe_compact(db, session_id)
+    await maybe_compact(db, session_id, provider)
     result.session_id = session_id
     return result
 
