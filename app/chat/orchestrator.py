@@ -63,7 +63,7 @@ from app.chat.router import (
 from app.chat.scope import is_off_topic
 from app.chat.tools.definitions import TOOL_SPECS
 from app.chat.tools.registry import execute_tool
-from app.chat.validation import validate_reply
+from app.chat.validation import redact_reason, validate_reply
 from app.config import get_settings
 from app.drugs.service import (
     NON_DRUG_TERMS,
@@ -382,7 +382,7 @@ async def _dispatch(
                 verdict = validate_reply(ability["reply"], risk)
                 if not verdict.ok:
                     t("Output validation",
-                      f"blocked ({verdict.reason}) — replaced with safe reply")
+                      f"blocked ({redact_reason(verdict.reason)}) — replaced with safe reply")
                     ability = {
                         "reply": safe_reply(risk, session_id),
                         "action": ability["action"],
@@ -621,7 +621,7 @@ async def _dispatch(
             verdict = validate_reply(display, risk)
             if not verdict.ok:
                 t("Output validation",
-                  f"blocked ({verdict.reason}) — replaced with the safe reply")
+                  f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
                 display = safe_reply(risk, session_id)
             else:
                 t("Output validation", "passed all safety checks")
@@ -745,7 +745,7 @@ async def _dispatch(
             verdict = validate_reply(display, risk, extra)
             if not verdict.ok:
                 t("Output validation",
-                  f"blocked ({verdict.reason}) — replaced with the safe reply")
+                  f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
                 display = safe_reply(risk, session_id)
             else:
                 t("Output validation", "passed all safety checks")
@@ -1058,11 +1058,11 @@ async def _dispatch_agentic(
         if not verdict.ok:
             if await _try_recover(verdict.reason):
                 t("Output validation",
-                  f"first attempt blocked ({verdict.reason}); the rewrite "
+                  f"first attempt blocked ({redact_reason(verdict.reason)}); the rewrite "
                   "passed")
             else:
                 t("Output validation",
-                  f"blocked ({verdict.reason}) — replaced with the safe reply")
+                  f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
                 display, degraded = safe_reply(risk, session_id), "validation"
         else:
             t("Output validation", "passed all safety checks")
