@@ -42,6 +42,11 @@ class ToolResult:
 @dataclass(frozen=True)
 class UserMessage:
     content: str
+    # Provider-neutral attachments (currently images). Each is a dict in the
+    # shape app/vision/service.py builds; the adapters translate it to their
+    # own wire format. Kept OUT of `content` so nothing upstream of the
+    # adapters has to know an image is involved.
+    attachments: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)

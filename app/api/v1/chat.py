@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,9 +35,13 @@ from app.documents.service import (
     get_own_unclassified,
     submit_document,
 )
+from app.i18n.language import LANGUAGE_NAMES
 from app.llm import get_provider
 from app.llm.base import LLMProvider
 from app.models.chat import ConversationMessage, ConversationSession
+from app.triage.red_flags import NONE
+from app.voice.service import audio_acceptable
+from app.voice.service import get_sidecar as get_voice_sidecar
 
 logger = logging.getLogger("davi.chat")
 
@@ -312,3 +318,111 @@ def _sentences_of(text: str):
     for piece in re.split(r"(?<=[.!?])(\s+)", text):
         if piece:
             yield piece
+
+
+class ChatVoiceRequest(BaseModel):
+    """A voice note. Audio is base64 so the payload stays plain JSON."""
+
+    audio: str
+    content_type: str = "audio/ogg"
+    language_hint: str = ""
+    session_id: uuid.UUID | None = None
+    confirmed: bool = False
+
+
+@router.post("/chat/voice", response_model=ChatResponse)
+async def chat_voice(
+    payload: ChatVoiceRequest,
+    current_user: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+    provider: LLMProvider = Depends(get_llm_provider),
+) -> ChatResponse:
+    """A spoken message.
+
+    Transcription happens FIRST, and the transcript then enters the SAME
+    pipeline as a typed message — triage floor included. There is no separate
+    voice path, so a spoken red flag cannot bypass the safety design by virtue
+    of the input method.
+
+    A low-confidence transcript is offered back for confirmation instead of
+    being acted on: "I can breathe" and "I can't breathe" differ by one
+    phoneme and by everything else. The client re-sends with confirmed=true
+    once the reader agrees.
+    """
+    sidecar = get_voice_sidecar()
+    if sidecar is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Voice is not configured",
+        )
+
+    try:
+        audio = base64.standard_b64decode(payload.audio)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Audio is not valid base64"
+        ) from exc
+
+    ok, reason = audio_acceptable(payload.content_type, len(audio))
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=reason
+        )
+
+    transcript = await sidecar.transcribe(
+        audio, payload.content_type, payload.language_hint
+    )
+    if transcript is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not transcribe the audio",
+        )
+
+    # Ask rather than guess. A misheard symptom is a safety issue, not a UX
+    # annoyance — so this returns WITHOUT running the pipeline at all.
+    if not payload.confirmed and not transcript.confident:
+        sid = await ensure_session(db, current_user, payload.session_id)
+        await db.commit()
+        return ChatResponse(
+            response_message=transcript.confirmation_prompt(),
+            risk_level=NONE,
+            recommended_action="confirm_transcript",
+            provenance={
+                "path": "voice_confirm",
+                "confidence": round(transcript.confidence, 3),
+                "language": transcript.language,
+            },
+            session_id=sid,
+            language=transcript.language,
+            trace=[
+                {"step": "Transcription",
+                 "detail": "not confident enough to answer — checking first"}
+            ],
+        )
+
+    # From here it is an ordinary turn. The triage floor sees the transcript.
+    result = await handle_chat(
+        db, current_user, transcript.text, provider, session_id=payload.session_id
+    )
+    await db.commit()
+
+    result.trace.insert(
+        0,
+        {"step": "Transcription",
+         "detail": f"heard as {LANGUAGE_NAMES.get(transcript.language, transcript.language)}"},
+    )
+    result.provenance["transcript_confidence"] = round(transcript.confidence, 3)
+
+    return ChatResponse(
+        response_message=result.response_message,
+        risk_level=result.risk_level,
+        recommended_action=result.recommended_action,
+        provenance=result.provenance,
+        grounding=result.grounding,
+        session_id=result.session_id,
+        citations=result.citations,
+        visual=result.visual,
+        language=result.language,
+        trace=result.trace,
+        documents=result.documents,
+    )

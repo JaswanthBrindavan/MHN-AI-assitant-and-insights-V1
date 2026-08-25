@@ -53,7 +53,20 @@ def _to_anthropic_messages(messages: Sequence[Message]) -> list[dict]:
     out: list[dict] = []
     for m in messages:
         if isinstance(m, UserMessage):
-            out.append({"role": "user", "content": m.content})
+            if m.attachments:
+                # Images FIRST, then the question: the model reads better when
+                # it has seen the image before being asked about it.
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            *m.attachments,
+                            {"type": "text", "text": m.content},
+                        ],
+                    }
+                )
+            else:
+                out.append({"role": "user", "content": m.content})
         elif isinstance(m, AssistantMessage):
             blocks: list[dict] = []
             # Only emit a text block when there is text: an empty one is not

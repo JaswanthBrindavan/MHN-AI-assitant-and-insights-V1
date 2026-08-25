@@ -87,6 +87,26 @@ class Settings(BaseSettings):
     mhn_ai_token: str = ""
     mhn_ai_timeout_seconds: float = 10.0
 
+    # Spring file access for vision. Davi still holds NO AWS credentials: it
+    # asks Spring — which owns the bucket and already authorizes file reads —
+    # to mint a short-lived presigned GET, then reads those bytes in memory for
+    # one turn. Empty base URL = vision disabled; the chat falls back to the
+    # extracted content.ai it has always used.
+    mhn_spring_base_url: str = ""
+    mhn_spring_token: str = ""
+    mhn_spring_timeout_seconds: float = 15.0
+
+    # Vision. Only reached when a document fetch succeeded, so it is gated by
+    # the same consent checks as every other family read.
+    vision_enabled: bool = False
+    vision_model: str = ""
+
+    # Voice. Self-hosted sidecar, same pattern as translator/ — PHI never
+    # leaves the deployment. Empty base URL = voice disabled.
+    voice_base_url: str = ""
+    voice_token: str = ""
+    voice_timeout_seconds: float = 30.0
+
 
 @lru_cache
 def get_settings() -> Settings:

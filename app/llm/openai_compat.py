@@ -71,11 +71,39 @@ def _to_openai_tools(tools: Sequence[ToolSpec]) -> list[dict]:
     ]
 
 
+
+def _to_openai_image(attachment: dict) -> dict:
+    """Anthropic-shaped image block -> OpenAI image_url part.
+
+    A data: URI rather than a link: the presigned URL is short-lived and
+    pointing a third party at it would hand out access this service was
+    careful to keep scoped.
+    """
+    source = attachment.get("source") or {}
+    media = source.get("media_type", "image/jpeg")
+    data = source.get("data", "")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{media};base64,{data}"},
+    }
+
+
 def _to_openai_messages(messages: Sequence[Message]) -> list[dict]:
     out: list[dict] = []
     for m in messages:
         if isinstance(m, UserMessage):
-            out.append({"role": "user", "content": m.content})
+            if m.attachments:
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            *(_to_openai_image(a) for a in m.attachments),
+                            {"type": "text", "text": m.content},
+                        ],
+                    }
+                )
+            else:
+                out.append({"role": "user", "content": m.content})
         elif isinstance(m, AssistantMessage):
             # content must be None, not "", on a tool-call message.
             msg: dict = {"role": "assistant", "content": m.content or None}
