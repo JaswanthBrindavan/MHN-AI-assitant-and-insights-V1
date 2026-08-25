@@ -11,8 +11,9 @@
 are complete (Tasks 1–11, 13–28). **Task 12 remains deliberately blocked** —
 see below, and note that Phase 4 found a second reason to keep it blocked.
 **Branch:** `praveen-mhn`, merged with `origin/main`, **not pushed**.
-**Verified:** 1718 passed · clean under three random seeds · ruff clean ·
-pyright 0 · run_evals **17/17 on both engines**.
+**Verified:** 1729 passed · clean under three random seeds · ruff clean ·
+pyright 0 · run_evals **17/17 on both engines** · coverage **91.3%**
+(the gate was under-counting async code until Phase 4 — see below).
 
 Nothing here changes behaviour for users yet: everything ships behind
 `CHAT_ENGINE`, which still defaults to `legacy`. The one exception is the
@@ -50,6 +51,34 @@ local/test): `V8__davi_feedback.sql`, `V9__davi_clinician_review.sql`.
 **`tests/test_flyway_parity.py` is new and will fail if you add a
 `V*__davi_*.sql` without registering its tables.** That is intentional — before
 it existed, nothing compared the production DDL to the models.
+
+---
+
+## Phase 4 had a review round, and it found things
+
+A read-only review agent went over all four Phase 4 commits after they landed.
+Fourteen defects, all fixed in `a13f067`; the full list with severities is in
+[`findings-phase-4.md`](./findings-phase-4.md). The three worth knowing about
+before you touch anything:
+
+1. **The coverage gate had been under-counting async code project-wide** —
+   not a Phase 4 bug, a pre-existing one. SQLAlchemy async runs awaited DB
+   calls inside a greenlet and coverage does not follow a greenlet switch, so
+   everything after the first `await db.execute(...)` in a request handler
+   read as unexecuted. `concurrency = ["thread", "greenlet"]` fixes it;
+   the real total went 88.87% → 91.38%. **Any gap you thought was covered in
+   async DB code before this should be re-checked.**
+
+2. **Nothing tested that the orchestrator ships a split prompt** — the
+   mechanism the whole caching feature rests on. Joining it back into one
+   string kills caching and passed the entire suite. Two end-to-end tests now
+   fail on that mutation. If you touch `orchestrator.py:~1104`, they are what
+   protects you.
+
+3. **I introduced a regression and the reviewer caught it.** Hardening the
+   interaction gate made "Can I take my medicine with food?" produce
+   "Whether medicine and food can be taken together depends on the doses…".
+   Generic nouns are now exempt. The lesson is in D5.
 
 ---
 
