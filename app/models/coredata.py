@@ -55,6 +55,7 @@ COREDATA_TABLES = {
     "file_access_exclusions",
     "traditional_health_parameters",
     "thp_age_range",
+    "medical_condition",
 }
 
 
@@ -412,3 +413,50 @@ class ThpAgeRange(Base):
     high_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
     high_danger: Mapped[float] = mapped_column(sa.Float, nullable=False)
     max: Mapped[float] = mapped_column(sa.Float, nullable=False)
+
+
+class MedicalCondition(Base):
+    """Conditions, surgeries AND allergies — one table split by ``type``.
+
+    mhn-spring's V7 turned the original conditions table into a three-in-one
+    record rather than three tables, because the hub screen reads all three
+    together and three tables would have meant three copies of the
+    family-sharing switch.
+
+    Read-only here, and PARTIAL: only the columns Davi needs. Note ``private``,
+    which the owning service honours — anything Davi surfaces must honour it
+    too, or Davi shows what the app deliberately hides.
+    """
+
+    __tablename__ = "medical_condition"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    # condition | surgery | allergy
+    type: Mapped[str | None] = mapped_column(
+        _pg_enum("medical_record_type_enum", "condition", "surgery", "allergy"),
+        nullable=True,
+    )
+    status: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    started_on: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    ended_on: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    notes: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    # Allergy-only columns.
+    reaction: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    category: Mapped[str | None] = mapped_column(
+        _pg_enum("allergy_category_enum", "food", "environmental", "medication"),
+        nullable=True,
+    )
+    severity: Mapped[str | None] = mapped_column(
+        _pg_enum("allergy_severity_enum", "mild", "medium", "severe"),
+        nullable=True,
+    )
+    # Nullable-with-fallback: the column is `bool DEFAULT false NULL`, so a row
+    # predating it reads NULL. NULL is treated as NOT private, matching the
+    # column default rather than inventing a stricter rule than the app's.
+    private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)

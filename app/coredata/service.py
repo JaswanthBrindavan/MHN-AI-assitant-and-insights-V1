@@ -8,10 +8,12 @@ the same table the core app writes — on the user's behalf.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +30,7 @@ from app.models.coredata import (
     Insurance,
     LifestyleLog,
     ManualTracking,
+    MedicalCondition,
     MedicineTracking,
     Prescription,
     Relation,
@@ -36,6 +39,8 @@ from app.models.coredata import (
     Vaccination,
     VitalReading,
 )
+
+logger = logging.getLogger("davi.coredata")
 
 # Document kind → (model, human label). Order = search order for "any test".
 DOCUMENT_KINDS: dict[str, tuple[type, str]] = {
@@ -921,4 +926,74 @@ async def document_owner(
         owner_id=row.user_id,
         is_private=getattr(row, "private", None),
         filepath=getattr(row, "filepath", "") or "",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Medical history — conditions, surgeries, allergies
+# --------------------------------------------------------------------------- #
+# Allergy severities that warrant an unprompted warning. "mild" does not: a
+# warning on every antihistamine question would train readers to ignore the
+# one that matters.
+_WARNING_SEVERITIES = frozenset({"severe", "medium"})
+
+
+async def medication_allergies(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[MedicalCondition]:
+    """The reader's own MEDICATION allergies, worst first.
+
+    Own data only — this is never called for a family member. Honours the
+    ``private`` flag the owning app honours: a row the reader marked private is
+    not something Davi should read back to them in a context they did not ask
+    for.
+    """
+    try:
+        rows = (
+            await db.execute(
+                select(MedicalCondition)
+                .where(
+                    MedicalCondition.user_id == user_id,
+                    MedicalCondition.type == "allergy",
+                    MedicalCondition.category == "medication",
+                    # NULL means not private (the column's own default).
+                    sa.or_(
+                        MedicalCondition.private.is_(False),
+                        MedicalCondition.private.is_(None),
+                    ),
+                )
+                .order_by(MedicalCondition.id)
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001 — a read must never break a reply
+        logger.warning("medication allergy read failed", exc_info=True)
+        return []
+
+    order = {"severe": 0, "medium": 1, "mild": 2}
+    return sorted(rows, key=lambda r: order.get((r.severity or "").lower(), 3))
+
+
+def allergy_warning(allergies: list[MedicalCondition]) -> str:
+    """A deterministic warning line, or "" when none is warranted.
+
+    Deliberately does NOT try to decide whether the drug asked about is in the
+    class the reader reacts to — that is a clinical judgement Davi has no
+    dataset for, and guessing it wrong in either direction is worse than
+    naming what is on record and letting a pharmacist connect them.
+    """
+    named = [
+        a for a in allergies
+        if (a.severity or "").lower() in _WARNING_SEVERITIES and a.name
+    ]
+    if not named:
+        return ""
+    items = "; ".join(
+        f"{a.name}" + (f" ({a.reaction})" if a.reaction else "")
+        for a in named[:3]
+    )
+    return (
+        "Before anything else — your record lists a medication allergy: "
+        f"{items}. Check with a pharmacist or your prescriber that this "
+        "medicine is safe for you, especially if it is related to what you "
+        "react to."
     )

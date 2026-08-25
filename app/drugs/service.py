@@ -215,9 +215,21 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     return None
 
 
-def build_drug_reply(drug: DrugReference) -> str:
-    """A deterministic, validator-safe drug-information reply."""
+def build_drug_reply(drug: DrugReference, allergy_warning: str = "") -> str:
+    """A deterministic, validator-safe drug-information reply.
+
+    ``allergy_warning`` goes FIRST when present. It is a parameter rather than
+    something read from the patient-context block because this path never sees
+    that block: the drug handler returns from the orchestrator BEFORE
+    `build_patient_context` runs, and it sits inside the legacy branch, so the
+    reader's own allergies were unreachable from here on the default engine.
+
+    A reader with a severe penicillin allergy asking "side effects of
+    amoxicillin" got a clean monograph with no mention of it.
+    """
     parts: list[str] = []
+    if allergy_warning:
+        parts.append(allergy_warning)
     # No manufacturer: it adds nothing a patient can act on, and the reply
     # should read like drug information, not a product listing.
     comp = ", ".join(c for c in (drug.composition1, drug.composition2) if c)

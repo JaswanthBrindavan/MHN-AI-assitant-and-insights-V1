@@ -67,6 +67,7 @@ from app.chat.tools.definitions import TOOL_SPECS
 from app.chat.tools.registry import execute_tool
 from app.chat.validation import redact_reason, validate_reply
 from app.config import get_settings
+from app.coredata.service import allergy_warning, medication_allergies
 from app.drugs.service import (
     NON_DRUG_TERMS,
     build_drug_reply,
@@ -590,7 +591,22 @@ async def _dispatch(
                     t("Drug lookup",
                       f"'{term}' matched {drug.name} in the validated medicines "
                       "database — deterministic reply (no LLM)")
-                    reply = build_drug_reply(drug)
+                    # The reader's OWN medication allergies. This path
+                    # returns before the [P] block is built and lives inside
+                    # the legacy branch, so nothing else would carry them.
+                    # Fail-open: a lookup failure must not cost the answer.
+                    warning = ""
+                    try:
+                        async with db.begin_nested():
+                            warning = allergy_warning(
+                                await medication_allergies(db, user_id)
+                            )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "allergy lookup failed; continuing", exc_info=True
+                        )
+                        record_fail_open("allergy_lookup")
+                    reply = build_drug_reply(drug, allergy_warning=warning)
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
