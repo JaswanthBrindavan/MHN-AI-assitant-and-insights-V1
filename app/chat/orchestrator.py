@@ -95,6 +95,15 @@ from app.rag.prompt import (
     build_system_prompt,
 )
 from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
+from app.telemetry import (
+    chat_latency,
+    chat_turns,
+    degradations,
+    llm_tokens,
+    record_fail_open,
+    timed,
+    tool_calls,
+)
 from app.translate.service import (
     InboundPivot,
     SidecarTranslator,
@@ -169,6 +178,7 @@ async def _write_receipt(
         await db.flush()
     except Exception:  # noqa: BLE001 — receipts must never break a reply
         logger.warning("receipt write failed", exc_info=True)
+        record_fail_open("receipts")
 
 
 async def _apply_grounding(
@@ -412,6 +422,7 @@ async def _dispatch(
                 )
         except Exception:  # noqa: BLE001 — abilities must never break a reply
             logger.warning("data ability failed; continuing", exc_info=True)
+            record_fail_open("abilities")
 
     # 4.5) Data query — serve stored insights/pedigree; never compute. Runs
     #      AFTER the abilities so a precise parse ("show me my last BP
@@ -482,6 +493,7 @@ async def _dispatch(
             logger.warning(
                 "drug interaction check failed; continuing", exc_info=True
             )
+            record_fail_open("drug_interaction")
         try:
             term = extract_drug_query_term(message)
             drug = None
@@ -513,6 +525,7 @@ async def _dispatch(
                     )
         except Exception:  # noqa: BLE001 — drug lookup must never break a reply
             logger.warning("drug lookup failed; continuing to RAG", exc_info=True)
+            record_fail_open("drug_lookup")
 
     # 6) Symptom / educational RAG path (risk is none or high here).
     patient_text, user_codes = await build_patient_context(db, user_id)
@@ -530,6 +543,7 @@ async def _dispatch(
                 )
         except Exception:  # noqa: BLE001 — enrichment must never break a reply
             logger.warning("health snapshot failed; continuing", exc_info=True)
+            record_fail_open("health_snapshot")
 
     # Short-term memory: recent verbatim turns drive follow-up resolution. The
     # last entry is the current message (already persisted) — the PRIOR turns
@@ -560,6 +574,11 @@ async def _dispatch(
               f"{sorted(carried)[:4]}")
     chunks = await retrieve_chunks(db, codes, message)
     used_rag = bool(chunks)
+    # Why this turn fell back, if it did. The agentic path has always recorded
+    # this; the legacy path did not, which left the degradation metric blind on
+    # the engine that currently answers real users. Declared here because both
+    # the extractive branch and the main RAG branch set it.
+    legacy_degraded: str | None = None
     try:
         _idx = await load_condition_index(db)
         _names = sorted(
@@ -627,6 +646,7 @@ async def _dispatch(
                 t("Output validation",
                   f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
                 display = safe_reply(risk, session_id)
+                legacy_degraded = "validation"
             else:
                 t("Output validation", "passed all safety checks")
             try:
@@ -666,6 +686,7 @@ async def _dispatch(
                     "used_rag": True,
                     "conditions": sorted(codes),
                     "chunks": [c.id for c in chunks],
+                    **({"degraded": legacy_degraded} if legacy_degraded else {}),
                 },
                 citations=extractive_citations or None,
                 language=lang,
@@ -698,6 +719,7 @@ async def _dispatch(
         answer = await provider.generate(system=system, user=message)
     except Exception:  # noqa: BLE001 — fail open
         logger.warning("LLM provider failed; safe reply", exc_info=True)
+        record_fail_open("provider")
         t("Generate", "provider failed — degrading to the deterministic safe reply")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
@@ -717,6 +739,10 @@ async def _dispatch(
 
     report: GroundingReport | None = None
     grounding_status = "n/a"
+    # (legacy_degraded is declared above, before the extractive branch that
+    # also sets it — the agentic path has always recorded this; the legacy
+    # path did not, leaving the degradation metric blind on the engine that
+    # currently answers real users.)
     try:
         report, grounded_answer = await _apply_grounding(
             provider, system, message, answer, chunks, patient_text
@@ -733,6 +759,7 @@ async def _dispatch(
         if grounded_answer is None:
             t("Safety net", "grounding could not be repaired — safe reply instead")
             display = safe_reply(risk, session_id)
+            legacy_degraded = "grounding"
         else:
             display = strip_markers(grounded_answer)
             if risk == HIGH:
@@ -751,12 +778,15 @@ async def _dispatch(
                 t("Output validation",
                   f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
                 display = safe_reply(risk, session_id)
+                legacy_degraded = "validation"
             else:
                 t("Output validation", "passed all safety checks")
     except Exception:  # noqa: BLE001 — safety layers fail open
         logger.warning("grounding/validation failed; safe reply", exc_info=True)
+        record_fail_open("grounding")
         display = safe_reply(risk, session_id)
         grounding_status = "error"
+        legacy_degraded = "guard_error"
 
     await _write_receipt(
         db, user_id=user_id, session_id=session_id, message=message,
@@ -777,6 +807,7 @@ async def _dispatch(
             "used_rag": used_rag,
             "conditions": sorted(codes),
             "chunks": [c.id for c in chunks],
+            **({"degraded": legacy_degraded} if legacy_degraded else {}),
         },
         grounding=report.to_dict() if report else None,
         citations=citations,
@@ -867,7 +898,27 @@ async def handle_chat(
         db, session_id, "user", message,
         extracted_intent={"risk": triage(work).level},
     )
-    result = await _dispatch(db, user_id, work, provider, session_id, pivot=pivot)
+    # Every path converges here, so this is the one place that sees the whole
+    # turn: how long it took, which engine ran it, and whether the reader got
+    # a real answer or a fallback. Label values come from bounded sets only —
+    # never the message, the user, or a condition name.
+    engine = get_settings().chat_engine
+    with timed(chat_latency, engine=engine):
+        result = await _dispatch(
+            db, user_id, work, provider, session_id, pivot=pivot
+        )
+
+    chat_turns.inc(engine=engine, risk=result.risk_level)
+    degraded = result.provenance.get("degraded")
+    if degraded:
+        # THE number that says whether the system is quietly answering badly.
+        degradations.inc(engine=engine, reason=str(degraded))
+    for name in result.provenance.get("tools", []) or []:
+        tool_calls.inc(tool=str(name))
+    usage = result.provenance.get("usage") or {}
+    for direction in ("input_tokens", "output_tokens"):
+        if usage.get(direction):
+            llm_tokens.inc(usage[direction], direction=direction)
     if pivot.active and result.response_message:
         translated = await pivot_outbound(
             result.response_message, pivot, translator
@@ -932,6 +983,7 @@ async def _dispatch_agentic(
                 )
         except Exception:  # noqa: BLE001 — enrichment must never break a reply
             logger.warning("health snapshot failed; continuing", exc_info=True)
+            record_fail_open("health_snapshot")
 
     # Phase 2 memory: what the reader told us about themselves (consent-gated)
     # and what they have already raised and not said is better. Both fail open —
@@ -944,6 +996,7 @@ async def _dispatch_agentic(
             )
     except Exception:  # noqa: BLE001
         logger.warning("profile context failed; continuing", exc_info=True)
+        record_fail_open("profile")
 
     episodes: list = []
     try:
@@ -955,6 +1008,7 @@ async def _dispatch_agentic(
             )
     except Exception:  # noqa: BLE001
         logger.warning("episode context failed; continuing", exc_info=True)
+        record_fail_open("episodes")
 
     compacted, recent = await assemble_context(db, session_id)
     prior_turns = recent[:-1] if recent else []
@@ -990,6 +1044,7 @@ async def _dispatch_agentic(
         )
     except Exception:  # noqa: BLE001 — fail open, never crash the endpoint
         logger.warning("agent loop failed; safe reply", exc_info=True)
+        record_fail_open("agent")
         t("Generate", "provider failed — degrading to the deterministic safe reply")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,

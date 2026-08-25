@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.chat.tools import executors
 from app.chat.tools.definitions import TOOL_SPECS
 from app.llm.tools import ToolCall, ToolResult
+from app.telemetry import record_fail_open, tool_calls
 
 logger = logging.getLogger("davi.tools")
 
@@ -51,7 +52,8 @@ __all__ = [
 ]
 
 
-def _error(call_id: str, message: str) -> ToolResult:
+def _error(call_id: str, message: str, tool: str = "unknown") -> ToolResult:
+    tool_calls.inc(tool=tool, outcome="error")
     return ToolResult(
         call_id=call_id, content=json.dumps({"error": message}), is_error=True
     )
@@ -72,9 +74,10 @@ async def execute_tool(
             call.id,
             f"No tool named {call.name!r} exists. Available tools: "
             + ", ".join(sorted(EXECUTORS)),
+            tool="unknown",
         )
     if not isinstance(call.arguments, dict):
-        return _error(call.id, "Tool arguments could not be read.")
+        return _error(call.id, "Tool arguments could not be read.", tool=call.name)
 
     try:
         # SAVEPOINT: a failure rolls back only this tool's writes.
@@ -101,8 +104,10 @@ async def execute_tool(
     except Exception:  # noqa: BLE001 — a tool must never break the loop
         # Deliberately no arguments in the log line: they can carry PHI.
         logger.warning("tool %s failed", call.name, exc_info=True)
-        return _error(call.id, "That lookup could not be completed.")
+        record_fail_open("tools")
+        return _error(call.id, "That lookup could not be completed.", tool=call.name)
 
+    tool_calls.inc(tool=call.name, outcome="ok")
     return ToolResult(
         call_id=call.id,
         content=content,

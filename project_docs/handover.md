@@ -1,5 +1,12 @@
 # Handover
 
+> **If you are an agent resuming after a context compaction: read THIS file and
+> [`implementation-log.md`](./implementation-log.md) before doing anything
+> else, then [`memory.md`](./memory.md) for the invariants. Do not resume from
+> a summary — several defects in this project came from acting on a
+> plausible-but-wrong assumption about the repo, and these documents exist to
+> prevent exactly that.**
+
 **State:** Phases 0, 1, 2 and 3 of
 [`implementation-plan.md`](./implementation-plan.md) are complete.
 **Branch:** `praveen-mhn`, merged with `origin/main` (10 commits), **not pushed**.

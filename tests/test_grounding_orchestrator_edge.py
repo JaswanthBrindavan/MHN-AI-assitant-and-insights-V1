@@ -439,7 +439,11 @@ async def test_provider_error_on_enforce_retry_degrades_not_crashes(
     assert len(provider.calls) == 2
     assert result.response_message in _SAFE_NONES
     assert result.provenance["path"] == "symptom_rag"
-    assert "degraded" not in result.provenance
+    # The turn DID fall back, and now says so. This assertion previously read
+    # "degraded" not in provenance — it was encoding the observability gap
+    # rather than the behaviour: the legacy engine degraded silently, so the
+    # metric could not see it.
+    assert result.provenance["degraded"] == "guard_error"
     assert result.grounding is None
 
     receipts = (await db_session.execute(select(RagTurnReceipt))).scalars().all()

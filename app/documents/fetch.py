@@ -37,6 +37,7 @@ from app.config import get_settings
 from app.coredata.service import _RESOURCE_TYPE, can_view_document
 from app.models.common import utcnow
 from app.models.jobs import JobRun
+from app.telemetry import document_reads, record_fail_open
 
 logger = logging.getLogger("davi.documents")
 
@@ -103,6 +104,9 @@ async def _record(
 ) -> None:
     """Audit row. Never raises — an audit failure must not break a reply, but
     it must also never silently skip the reply itself."""
+    # "refused" is not a problem to alert on — it is the consent gate
+    # working. A SPIKE in refusals is worth looking at.
+    document_reads.inc(outcome=status)
     try:
         job = JobRun(
             name="document_fetch",
@@ -118,6 +122,7 @@ async def _record(
         await db.flush()
     except Exception:  # noqa: BLE001
         logger.warning("document fetch audit row failed", exc_info=True)
+        record_fail_open("document_audit")
 
 
 async def _presigned_url(
