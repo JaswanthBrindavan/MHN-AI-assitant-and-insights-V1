@@ -22,6 +22,14 @@ things follow from that, and all three are enforced in code:
 3. **Revocation is immediate.** ``active=False`` ends access on the next
    request. The audit rows stay: they are the record of what happened while
    access was granted, and deleting them would defeat the point.
+
+One caveat this table cannot cover, recorded so it is not discovered the hard
+way: with ``SERVICE_TOKEN`` configured, ``app/auth.py`` accepts a valid service
+token plus ``X-User-Id`` as identity without further checks. Anyone holding
+that token can therefore present as a reviewer, and the audit trail will
+faithfully record the *reviewer* as the accessor. The roster is the only thing
+standing between an ordinary USER and cross-user access; it is not a defence
+against a leaked service token. Treat that token accordingly.
 """
 
 from __future__ import annotations
@@ -39,8 +47,10 @@ from app.models.common import CreatedAt, UUIDPrimaryKey
 DECISIONS = ("release", "suppress")
 
 # Recorded actions. "view" is here because seeing the content IS the
-# disclosure; a queue listing (title and condition only) is "list".
-ACTIONS = ("list", "view", "release", "suppress")
+# disclosure; a queue listing (title and condition only) is "list", filed
+# against each patient it named. "audit_read" covers reading somebody else's
+# trail, which is itself a cross-patient read.
+ACTIONS = ("list", "view", "release", "suppress", "audit_read")
 
 
 class ClinicianReviewer(Base, UUIDPrimaryKey, CreatedAt):

@@ -220,9 +220,16 @@ async def test_a_refused_view_leaves_no_audit_row(client, sessionmaker):
 # --------------------------------------------------------------------------- #
 # Decisions
 # --------------------------------------------------------------------------- #
+# The reviewer and the patient are DIFFERENT people in these tests, which is
+# the only realistic arrangement -- a clinician deciding on their own insight
+# is refused (see test_a_reviewer_cannot_decide_on_their_own_insight).
+CLINICIAN = uuid.UUID("00000000-0000-0000-0000-0000000000bb")
+AS_CLINICIAN = {"X-User-Id": str(CLINICIAN)}
+
+
 async def test_release_makes_the_insight_reach_the_patient(client, sessionmaker):
     """The whole point: an insight that nobody could see now reaches someone."""
-    await _make_reviewer(sessionmaker)
+    await _make_reviewer(sessionmaker, user_id=CLINICIAN)
     artifact_id = await _held_artifact(sessionmaker, user_id=DEV_USER_ID)
 
     # Before: the patient's own endpoint shows nothing.
@@ -231,8 +238,9 @@ async def test_release_makes_the_insight_reach_the_patient(client, sessionmaker)
     decision = await client.post(
         f"/api/v1/review/artifacts/{artifact_id}/release",
         json={"note": "Consistent with the family history; safe to show."},
+        headers=AS_CLINICIAN,
     )
-    assert decision.status_code == 200
+    assert decision.status_code == 200, decision.text
     assert decision.json()["status"] == "active"
 
     served = (await client.get("/api/v1/insights")).json()
@@ -240,15 +248,38 @@ async def test_release_makes_the_insight_reach_the_patient(client, sessionmaker)
 
 
 async def test_suppress_keeps_it_away_from_the_patient(client, sessionmaker):
-    await _make_reviewer(sessionmaker)
+    await _make_reviewer(sessionmaker, user_id=CLINICIAN)
     artifact_id = await _held_artifact(sessionmaker, user_id=DEV_USER_ID)
 
     decision = await client.post(
         f"/api/v1/review/artifacts/{artifact_id}/suppress",
         json={"note": "Too easily misread as a diagnosis."},
+        headers=AS_CLINICIAN,
     )
+    assert decision.status_code == 200, decision.text
     assert decision.json()["status"] == "suppressed"
     assert (await client.get("/api/v1/insights")).json() == []
+
+
+async def test_a_reviewer_cannot_decide_on_their_own_insight(client, sessionmaker):
+    """Independent review is the entire premise of the roster.
+
+    Without this, a clinician who is also a patient can self-approve, and the
+    audit row shows reviewer and subject as the same person -- a record of the
+    control not working.
+    """
+    await _make_reviewer(sessionmaker)  # DEV_USER_ID is the reviewer
+    own = await _held_artifact(sessionmaker, user_id=DEV_USER_ID)
+
+    for action in ("release", "suppress"):
+        response = await client.post(
+            f"/api/v1/review/artifacts/{own}/{action}", json={"note": "mine"}
+        )
+        assert response.status_code == 403, action
+
+    async with sessionmaker() as db:
+        artifact = await db.get(InsightArtifact, own)
+    assert artifact is not None and artifact.status == "held_for_review"
 
 
 async def test_a_decision_requires_a_stated_reason(client, sessionmaker):

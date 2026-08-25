@@ -161,3 +161,70 @@ async def test_both_engines_refuse_interaction_questions(
         f"the {chat_engine} engine did not reach the deterministic refusal"
     )
     assert not VERDICT.search(result.response_message)
+
+
+async def test_recognised_is_true_when_the_dataset_does_know_the_drug(db_session):
+    """The positive direction, so the field is not just a hard-coded False.
+
+    Every other assertion on `recognised` runs against an empty drug_reference,
+    where False is guaranteed by the fixture rather than by the code.
+    """
+    from app.models.knowledge import DrugReference
+
+    db_session.add(
+        DrugReference(
+            name="Warfarin 5mg Tablet",
+            name_normalized="warfarin 5mg tablet",
+            is_discontinued=False,
+        )
+    )
+    await db_session.flush()
+
+    result = await handle_chat(
+        db_session,
+        USER,
+        "can I take warfarin 5mg tablet and aspirin together?",
+        FakeProvider(),
+        uuid.uuid4(),
+    )
+    assert result.provenance["path"] == "drug_interaction_query"
+    assert result.provenance["recognised"] is True
+    # Recognition changes the STATISTIC, never the reply.
+    assert "pharmacist" in result.response_message.lower()
+    assert not VERDICT.search(result.response_message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Can I take my medicine with food?",
+        "can I take my tablets with juice?",
+        "can I take my medication with water?",
+        "is it safe to take my tablet with milk?",
+    ],
+)
+async def test_generic_medicine_nouns_do_not_trigger_a_nonsense_refusal(
+    db_session, message
+):
+    """Hardening the gate briefly broke a very common, ordinary question.
+
+    "Can I take my medicine with food?" produced "Whether medicine and food
+    can be taken together depends on..." — nonsense. The refusal is only
+    meaningful when at least one side names a SPECIFIC substance.
+    """
+    result = await handle_chat(
+        db_session, USER, message, FakeProvider(), uuid.uuid4()
+    )
+    assert result.provenance.get("path") != "drug_interaction_query"
+
+
+async def test_a_named_drug_beside_a_generic_noun_still_refuses(db_session):
+    """The exemption must not become a bypass."""
+    result = await handle_chat(
+        db_session,
+        USER,
+        "can I take paracetamol with my medicine?",
+        FakeProvider(),
+        uuid.uuid4(),
+    )
+    assert result.provenance["path"] == "drug_interaction_query"

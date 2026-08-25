@@ -49,9 +49,21 @@ def upgrade() -> None:
     op.create_index(
         "ix_turn_feedback_user_id", "turn_feedback", ["user_id"], unique=False
     )
+    # The review queue reads exactly this. It was in the Flyway file only, so
+    # production had an index no local or CI database ever built and the query
+    # was planned differently in test than in production.
+    op.create_index(
+        "ix_turn_feedback_untriaged",
+        "turn_feedback",
+        ["created_at"],
+        unique=False,
+        postgresql_where=sa.text("rating = 'down' AND triaged_at IS NULL"),
+        sqlite_where=sa.text("rating = 'down' AND triaged_at IS NULL"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_turn_feedback_untriaged", table_name="turn_feedback")
     op.drop_index("ix_turn_feedback_user_id", table_name="turn_feedback")
     op.drop_index("uq_turn_feedback", table_name="turn_feedback")
     op.drop_table("turn_feedback")

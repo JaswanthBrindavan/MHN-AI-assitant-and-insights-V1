@@ -82,6 +82,17 @@ NON_DRUG_TERMS: frozenset[str] = frozenset(
         "chicken", "fish", "dal", "roti", "chapati", "bread", "juice",
         "green tea", "black tea", "lemon water", "warm water", "hot water",
         "jaggery", "dates", "nuts", "almonds", "cinnamon", "pepper",
+        # GENERIC nouns for "a medicine", as opposed to a named one. Hardening
+        # the interaction gate to fire on phrasing made these matter: without
+        # them, "can I take my medicine with food?" -- an extremely ordinary
+        # question -- produced "Whether medicine and food can be taken
+        # together depends on...", which is nonsense. The refusal is only
+        # meaningful when at least one side names a SPECIFIC substance.
+        # "can I take paracetamol with my medicine?" still fires, correctly.
+        "medicine", "medicines", "medication", "medications", "tablet",
+        "tablets", "pill", "pills", "capsule", "capsules", "drug", "drugs",
+        "syrup", "injection", "supplement", "supplements", "vitamin",
+        "vitamins", "painkiller", "painkillers", "antibiotic", "antibiotics",
     }
 )
 

@@ -273,50 +273,66 @@ async def _interaction_refusal(
     #
     # Ordinary food pairings still reach the LLM through NON_DRUG_TERMS,
     # which carries everyday foods for exactly this reason.
+    # NARROW on purpose. The pattern match touches no I/O and cannot fail for
+    # a database reason; only the lookup can. A wider try -- one that also
+    # wrapped the receipt write below -- would mean a transient DB error
+    # DELETED the refusal and handed "can I take warfarin and aspirin
+    # together?" to the LLM. That is the exact outcome this function exists to
+    # prevent, and it would have been reachable by a database hiccup.
     try:
         pair = extract_interaction_query(message)
-        if pair and not all(term.lower() in NON_DRUG_TERMS for term in pair):
-            # Reply with the USER'S OWN terms, not the canonical product
-            # names — a composition match can resolve "ibuprofen" to an
-            # obscure brand, and answering about that brand reads wrong.
-            names: list[str] = list(pair)
-            # Recorded, not gated on: it says how often the refusal is
-            # firing for terms the dataset has never heard of, which is
-            # the number that would justify buying a better one.
-            recognised = False
-            for raw in pair:
-                if raw.lower() in NON_DRUG_TERMS:
-                    continue
-                async with db.begin_nested():
-                    if await find_drug(db, raw) is not None:
-                        recognised = True
-            t("Drug interaction question",
-              f"'{names[0]}' + '{names[1]}' — deterministic "
-              "check-with-pharmacist reply (no interaction data, "
-              "no LLM)")
-            await _write_receipt(
-                db, user_id=user_id, session_id=session_id,
-                message=message, model_name=provider.model_name,
-            )
-            return ChatResult(
-                response_message=build_interaction_reply(*names),
-                risk_level=risk,
-                recommended_action="discuss_with_prescriber",
-                provenance={
-                    "path": "drug_interaction_query",
-                    "drugs": names,
-                    "source": "drug_reference",
-                    "recognised": recognised,
-                },
-                language=lang,
-                trace=trace,
-            )
-    except Exception:  # noqa: BLE001 — must never break a reply
-        logger.warning(
-            "drug interaction check failed; continuing", exc_info=True
-        )
+    except Exception:  # noqa: BLE001 — a parser must never break a reply
+        logger.warning("interaction extraction failed; continuing", exc_info=True)
         record_fail_open("drug_interaction")
-    return None
+        return None
+
+    if not pair or all(term.lower() in NON_DRUG_TERMS for term in pair):
+        return None
+
+    # Reply with the USER'S OWN terms, not the canonical product names — a
+    # composition match can resolve "ibuprofen" to an obscure brand, and
+    # answering about that brand reads wrong.
+    names: list[str] = list(pair)
+
+    # Recorded, not gated on: it says how often the refusal fires for terms the
+    # dataset has never heard of, which is the number that would justify buying
+    # a better one. A lookup failure costs us that statistic and NOTHING else —
+    # the refusal proceeds either way.
+    recognised = False
+    try:
+        for raw in pair:
+            if raw.lower() in NON_DRUG_TERMS:
+                continue
+            async with db.begin_nested():
+                if await find_drug(db, raw) is not None:
+                    recognised = True
+    except Exception:  # noqa: BLE001 — the refusal does not depend on this
+        logger.warning("drug recognition lookup failed; continuing", exc_info=True)
+        record_fail_open("drug_interaction")
+
+    t("Drug interaction question",
+      f"'{names[0]}' + '{names[1]}' — deterministic "
+      "check-with-pharmacist reply (no interaction data, "
+      "no LLM)")
+    # _write_receipt is already fail-open internally, so a receipt failure
+    # cannot take the refusal down with it.
+    await _write_receipt(
+        db, user_id=user_id, session_id=session_id,
+        message=message, model_name=provider.model_name,
+    )
+    return ChatResult(
+        response_message=build_interaction_reply(*names),
+        risk_level=risk,
+        recommended_action="discuss_with_prescriber",
+        provenance={
+            "path": "drug_interaction_query",
+            "drugs": names,
+            "source": "drug_reference",
+            "recognised": recognised,
+        },
+        language=lang,
+        trace=trace,
+    )
 
 
 async def _dispatch(

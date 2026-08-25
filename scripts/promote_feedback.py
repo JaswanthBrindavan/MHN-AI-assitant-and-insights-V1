@@ -9,8 +9,14 @@ command rather than a hand-written JSON edit.
     python -m scripts.promote_feedback <feedback-id> --name my_case
     python -m scripts.promote_feedback <feedback-id> --dry-run
 
-What it writes into evals/quality_cases.json is deliberately MINIMAL: the
-question, and `addresses` seeded from the question's own content words. It
+PRIVACY, read before running this against production data: the question it
+writes into evals/quality_cases.json is a real person's verbatim words, and
+that file is tracked in git. "Forget me" cannot reach git history. Read the
+question in --list output first and rewrite it into a generic form if it
+carries anything identifying; --dry-run prints exactly what would be written.
+
+What it writes is deliberately MINIMAL: the question, and `addresses` seeded
+from the question's own content words. It
 does NOT write the reply that was down-voted — that reply was judged wrong,
 so freezing it as the expectation would enshrine the defect. A human edits
 the case to say what a good answer looks like; the script's job is to get

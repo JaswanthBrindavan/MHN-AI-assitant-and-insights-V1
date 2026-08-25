@@ -2,16 +2,21 @@
 
 Every endpoint here reads or acts on ANOTHER person's health information, so
 each one begins with the same two steps: confirm the caller is an active
-reviewer, and write an audit row. Neither is optional and neither is skippable
-by a code path — `_require_reviewer` raises, and the audit write happens
-before the content is returned, not after.
+reviewer, and write an audit row. The audit write happens BEFORE the content is
+returned, not after, so a crash in between is not an unlogged disclosure.
+
+The single exception, stated so nobody has to discover it: a patient reading
+their OWN trail via `GET /review/audit?subject_user_id=<self>` needs no
+reviewer standing, and reading your own record is not a disclosure to audit.
+Every other path through this module — including an unscoped or cross-patient
+audit read — requires standing and writes a row.
 """
 
 from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -110,7 +115,10 @@ async def _audit(
 async def review_queue(
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
-    limit: int = 50,
+    # Bounded at BOTH ends. `min(limit, 200)` alone clamps only the top: a
+    # negative limit reaches SQLite as `LIMIT -1`, which means NO limit, and
+    # the caller gets every held insight for every patient in one response.
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> list[QueueItem]:
     """Held insights awaiting a decision, oldest first.
 
@@ -124,16 +132,20 @@ async def review_queue(
             select(InsightArtifact)
             .where(InsightArtifact.status == "held_for_review")
             .order_by(InsightArtifact.created_at.asc())
-            .limit(min(limit, 200))
+            .limit(limit)
         )
     ).scalars().all()
 
-    # One audit row for the listing, naming the reviewer. Per-subject rows
-    # would be one per patient per page-load — noise that would bury the
-    # `view` events that actually matter.
-    await _audit(
-        db, reviewer=current_user, subject=current_user, action="list"
-    )
+    # One row per DISTINCT patient in the page, not one row for the reviewer.
+    #
+    # A listing carries `user_id`, `condition_code` and a title like "Family
+    # history of type 2 diabetes" — that is a patient bound to a named
+    # condition, which is a disclosure. Filing it under the reviewer's own id
+    # would keep it out of the patient's answer to "who looked at my records?",
+    # which is the question this audit exists to answer. Bounded by the page
+    # size, so it cannot flood the table.
+    for subject in dict.fromkeys(r.user_id for r in rows):
+        await _audit(db, reviewer=current_user, subject=subject, action="list")
     await db.commit()
 
     return [
@@ -222,6 +234,15 @@ async def _decide(
     ).scalars().first()
     if artifact is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
+    if artifact.user_id == reviewer_id:
+        # Independent review is the entire premise of this table. A clinician
+        # who is also the patient must not release or suppress their own held
+        # insight — the audit row would show reviewer and subject as the same
+        # person, which is a record of the control not working.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A reviewer cannot decide on their own insight",
+        )
     if artifact.status != "held_for_review":
         # Deciding twice must not be possible. The second decision would
         # overwrite the first with no trace in the artifact itself.
@@ -281,7 +302,7 @@ async def audit_trail(
     subject_user_id: uuid.UUID | None = None,
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
-    limit: int = 100,
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict]:
     """Who accessed what.
 
@@ -291,14 +312,26 @@ async def audit_trail(
     """
     own_records = subject_user_id is not None and subject_user_id == current_user
     if not own_records:
-        # Anything wider than "my own trail" requires reviewer standing.
+        # Anything wider than "my own trail" requires reviewer standing — and
+        # is itself a cross-patient read, so it is audited like any other. An
+        # unscoped call returns the whole trail; a reviewer under investigation
+        # must not be able to read the investigation surface invisibly.
         await _require_reviewer(db, current_user)
     subject = subject_user_id
 
     stmt = select(InsightReviewAudit).order_by(InsightReviewAudit.created_at.desc())
     if subject is not None:
         stmt = stmt.where(InsightReviewAudit.subject_user_id == subject)
-    rows = (await db.execute(stmt.limit(min(limit, 500)))).scalars().all()
+    rows = (await db.execute(stmt.limit(limit))).scalars().all()
+
+    if not own_records:
+        await _audit(
+            db,
+            reviewer=current_user,
+            subject=subject if subject is not None else current_user,
+            action="audit_read",
+        )
+        await db.commit()
 
     return [
         {
@@ -307,7 +340,12 @@ async def audit_trail(
             "subject_user_id": str(r.subject_user_id),
             "artifact_id": str(r.artifact_id) if r.artifact_id else None,
             "action": r.action,
-            "note": r.note,
+            # The clinician's reason is written for clinicians. "Patient is
+            # highly anxious, this will spiral them" is a defensible note and
+            # an indefensible thing to hand the patient unannounced. They see
+            # THAT a decision was made and when; the reasoning stays
+            # professional correspondence.
+            "note": r.note if not own_records else None,
             "content_hash": r.content_hash,
             "at": r.created_at.isoformat(),
         }

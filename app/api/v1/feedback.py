@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -84,13 +84,10 @@ async def submit_feedback(
     ).scalars().first()
     if message is None:
         raise HTTPException(status_code=404, detail="Message not found")
-    if message.role != "assistant":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Feedback applies to assistant replies",
-        )
 
-    # The session's owner is the only person who may judge its turns.
+    # OWNERSHIP FIRST, then shape. Checking the role first would tell a caller
+    # holding somebody else's message id whether that turn was theirs or the
+    # assistant's before refusing them — a small oracle, and free to close.
     session = (
         await db.execute(
             select(ConversationSession).where(
@@ -101,6 +98,12 @@ async def submit_feedback(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     authorize_user(session.user_id, current_user)
+
+    if message.role != "assistant":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Feedback applies to assistant replies",
+        )
 
     existing = (
         await db.execute(
@@ -138,7 +141,9 @@ async def review_queue(
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
     untriaged_only: bool = True,
-    limit: int = 50,
+    # Bounded at both ends: a negative limit reaches SQLite as `LIMIT -1`,
+    # which means no limit at all.
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> list[ReviewItem]:
     """Down-voted turns, with the question and the reply beside them.
 
@@ -153,7 +158,7 @@ async def review_queue(
             TurnFeedback.rating == "down",
         )
         .order_by(TurnFeedback.created_at.desc())
-        .limit(min(limit, 200))
+        .limit(limit)
     )
     if untriaged_only:
         stmt = stmt.where(TurnFeedback.triaged_at.is_(None))

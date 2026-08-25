@@ -133,13 +133,65 @@ def test_an_oversized_chunk_is_dropped_rather_than_truncated():
 
 
 def test_the_budget_drops_chunks_before_conversation_turns():
-    """A dropped chunk costs a source. A dropped turn costs the thread."""
+    """A dropped chunk costs a source. A dropped turn costs the thread.
+
+    Uses THREE turns deliberately. With one turn the second trim loop is
+    guarded by `len(kept_turns) > 1` and cannot run at all, so the assertion
+    would hold against an implementation that dropped turns first, or in any
+    order, or ignored the rule entirely.
+    """
     chunks = [_chunk("y" * 4000) for _ in range(10)]
-    turns = [{"role": "user", "message": "is that serious?"}]
+    turns = [
+        {"role": "user", "message": "OLDEST TURN"},
+        {"role": "assistant", "message": "MIDDLE TURN"},
+        {"role": "user", "message": "is that serious?"},
+    ]
     _, volatile = build_agentic_system_prompt(
         "", None, recent_turns=turns, chunks=chunks, budget_tokens=500
     )
-    assert "is that serious?" in volatile, "the conversation thread was dropped first"
+    assert "y" * 1000 not in volatile, "chunks should have gone first"
+    # Every turn survives: three short turns cost almost nothing, so the
+    # chunks alone account for the overage.
+    assert "OLDEST TURN" in volatile
+    assert "is that serious?" in volatile
+
+
+def test_turns_are_costed_at_their_RENDERED_length():
+    """format_recent_turns truncates each turn; the budget must charge that.
+
+    Charging the full message protects text that is thrown away and pays for it
+    by evicting retrieved knowledge: six 4000-char turns "cost" ~6,900 tokens
+    and render as ~690. That was enough to strip every source from a health
+    question because the reader had earlier pasted a long lab report.
+    """
+    long_turns = [
+        {"role": "user", "message": "z" * 4000},
+        {"role": "assistant", "message": "z" * 4000},
+        {"role": "user", "message": "w" * 4000},
+        {"role": "assistant", "message": "w" * 4000},
+        {"role": "user", "message": "v" * 4000},
+        {"role": "user", "message": "so what should I do?"},
+    ]
+    keep_me = "Blood sugar targets are individual and set with a clinician."
+    _, volatile = build_agentic_system_prompt(
+        "", None, recent_turns=long_turns, chunks=[_chunk(keep_me)]
+    )
+    assert keep_me in volatile, (
+        "the retrieved chunk was evicted by turns that render truncated"
+    )
+
+
+def test_a_directive_on_a_single_element_split_does_not_touch_the_prefix():
+    """One element means no volatile tail, so it must NOT become the prefix.
+
+    Returning `["STABLE" + directive]` would hand _to_system_blocks a
+    per-turn-varying string to mark as the cacheable prefix — a permanent miss
+    plus a cache-write charge every turn.
+    """
+    result = append_directive(["STABLE"], "\n\nEXTRA")
+    assert isinstance(result, str), "a one-element split must degrade to a string"
+    assert result == "STABLE\n\nEXTRA"
+    assert append_directive([], "\n\nEXTRA") == "EXTRA"
 
 
 def test_the_most_recent_turn_survives_any_budget():
@@ -186,3 +238,86 @@ def test_the_token_estimate_is_always_positive(text):
 def test_the_default_budget_leaves_room_for_the_answer():
     """A budget at or above the context window would defeat its own purpose."""
     assert 1000 <= DEFAULT_VOLATILE_BUDGET_TOKENS <= 50_000
+
+
+# --------------------------------------------------------------------------- #
+# The wire between the orchestrator and the adapter
+# --------------------------------------------------------------------------- #
+async def test_the_orchestrator_actually_ships_a_split_prompt(
+    db_session, monkeypatch
+):
+    """The mechanism the whole feature rests on, tested end to end.
+
+    Every spy in the suite sees `join_system(system)`, so a mutation that
+    joined the prompt in the orchestrator — killing caching outright — passed
+    the entire test suite. This is the test that fails on it.
+    """
+    import uuid as _uuid
+
+    from app.chat.orchestrator import handle_chat
+    from app.config import get_settings
+    from app.llm.fake import FakeProvider
+    from app.llm.tools import LLMTurn
+
+    seen: dict = {}
+
+    class SplitSpy(FakeProvider):
+        async def generate_turn(self, *, system, messages, tools=()):
+            seen.setdefault("system", system)
+            return LLMTurn(text="Tiredness has many ordinary causes [GK].")
+
+    monkeypatch.setattr(get_settings(), "chat_engine", "agentic")
+    await handle_chat(
+        db_session,
+        _uuid.UUID("00000000-0000-0000-0000-0000000000dd"),
+        "why am I so tired lately?",
+        SplitSpy(),
+        _uuid.uuid4(),
+    )
+
+    system = seen.get("system")
+    assert system is not None, "the provider was never asked for a turn"
+    assert not isinstance(system, str), (
+        "the orchestrator joined the prompt into one string — the cache "
+        "breakpoint has nothing to mark and caching is silently dead"
+    )
+    assert len(system) == 2, "expected exactly [stable, volatile]"
+
+    # And the adapter must put the breakpoint on element 0, not the tail.
+    blocks = _to_system_blocks(system)
+    assert isinstance(blocks, list)
+    assert blocks[0]["text"] == system[0]
+    assert blocks[0]["cache_control"] == _CACHE_CONTROL
+    assert all("cache_control" not in b for b in blocks[1:])
+
+
+async def test_the_shipped_prefix_is_the_same_one_the_probe_measures(
+    db_session, monkeypatch
+):
+    """A prefix that differs from what cache_probe sizes makes the probe lie."""
+    import uuid as _uuid
+
+    from app.chat.orchestrator import handle_chat
+    from app.config import get_settings
+    from app.llm.fake import FakeProvider
+    from app.llm.tools import LLMTurn
+    from scripts.cache_probe import measure_prefix
+
+    seen: dict = {}
+
+    class SplitSpy(FakeProvider):
+        async def generate_turn(self, *, system, messages, tools=()):
+            seen.setdefault("system", system)
+            return LLMTurn(text="Ordinary information [GK].")
+
+    monkeypatch.setattr(get_settings(), "chat_engine", "agentic")
+    await handle_chat(
+        db_session,
+        _uuid.UUID("00000000-0000-0000-0000-0000000000de"),
+        "what is a healthy blood pressure?",
+        SplitSpy(),
+        _uuid.uuid4(),
+    )
+
+    shipped_prefix = seen["system"][0]
+    assert len(shipped_prefix) == measure_prefix()["system_chars"]

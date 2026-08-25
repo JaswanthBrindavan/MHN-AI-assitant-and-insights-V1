@@ -176,3 +176,44 @@ fifth turn.
 acceptance criterion, and it should not be quoted as a result. The
 `davi_llm_tokens_total` counter will show the real number once a live
 provider is in use.
+
+---
+
+## 5. Correction: where the ~2,541-token prefix does *not* apply
+
+A review of this work caught an overclaim in §1 and in the original commit
+message. Recording it here rather than quietly editing the number, because the
+correction is more useful than the claim was.
+
+**The ~2,541-token prefix only exists on calls that offer tools.** Anthropic
+caches `tools → system → messages`; drop the tools and the request differs from
+byte zero, so the cacheable prefix is the system rules **alone — ~850 tokens,
+under the 1024 minimum.** Three call paths offer no tools:
+
+| Call | Where | Tools offered | Effective prefix |
+|---|---|---:|---|
+| Normal agentic turn at NONE risk | `orchestrator.py` | `TOOL_SPECS` | ~2,541 — **cacheable** |
+| Any turn at raised risk | `orchestrator.py` (`offered = TOOL_SPECS if risk == NONE else ()`) | none | ~850 — **not cacheable** |
+| Forced answer after the tool budget | `agent.py` `run_agent` | none | ~850 — **not cacheable** |
+| Corrective retry | `agent.py` `recover` | none | ~850 — **not cacheable** |
+
+So `append_directive()` — written specifically for the last two — **cannot
+preserve a cache hit on either path it was written for.** It is still correct
+and still worth having: its job is to stop a per-turn directive being written
+into the byte-identical prefix, which would poison caching for every
+*subsequent* tools-bearing turn in the session. But it does not itself make
+those two calls cache, and §2 should not have implied otherwise.
+
+**What this means in practice.** Raised-risk turns and recovery retries are the
+minority of traffic, and they are exactly the turns where latency matters least
+and correctness matters most. The saving still lands where the volume is —
+ordinary NONE-risk questions. But the honest statement is *"caching applies to
+tools-bearing turns"*, not *"caching applies"*.
+
+**What would change it.** Offering `TOOL_SPECS` on the forced-answer call while
+setting `tool_choice: {"type": "none"}` would keep the prefix intact and still
+force text. That is a real option, deliberately not taken here: `tool_choice` is
+provider-specific, the OpenAI-compatible adapter spells it differently, and
+buying a cache hit on a rare path by adding provider-specific branching to the
+one module that is meant to be provider-neutral is a poor trade. Revisit it if
+the metrics ever show these paths are not rare.

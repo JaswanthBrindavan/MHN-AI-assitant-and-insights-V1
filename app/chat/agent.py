@@ -97,6 +97,12 @@ def append_directive(system: str | Sequence[str], extra: str) -> str | list[str]
     if isinstance(system, str):
         return system + extra
     parts = list(system)
+    if len(parts) < 2:
+        # One element (or none) means there is no volatile tail to append to,
+        # and writing into parts[0] is precisely what this function exists to
+        # prevent. Fall back to a plain string: no breakpoint, no silent
+        # corruption of the cached prefix.
+        return (parts[0] + extra) if parts else extra.lstrip("\n")
     parts[-1] = (parts[-1] + extra) if parts[-1] else extra.lstrip("\n")
     return parts
 

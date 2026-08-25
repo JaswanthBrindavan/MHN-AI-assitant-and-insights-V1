@@ -23,10 +23,16 @@ CHARS_PER_TOKEN = 3.5
 # rest of the prompt. This bounds the bytes.
 DEFAULT_VOLATILE_BUDGET_TOKENS = 6000
 
+# How much of one conversation turn is actually rendered into the prompt.
+# The budget MUST cost turns at this length, not their full length — see
+# _fit_budget._cost.
+TURN_RENDER_LIMIT = 400
+
 
 def estimate_tokens(text: str) -> int:
     """Rough token count. See CHARS_PER_TOKEN — an estimate, never a promise."""
     return int(len(text) / CHARS_PER_TOKEN) + 1
+
 
 _SAFETY_RULES = (
     "You are Davi, a careful health assistant offering general, educational "
@@ -81,7 +87,7 @@ def format_recent_turns(turns: list[dict]) -> str:
         who = "User" if t.get("role") == "user" else "Davi"
         text = (t.get("message") or "").strip().replace("\n", " ")
         if text:
-            lines.append(f"{who}: {text[:400]}")
+            lines.append(f"{who}: {text[:TURN_RENDER_LIMIT]}")
     return "\n".join(lines)
 
 
@@ -194,9 +200,18 @@ def _fit_budget(
     kept_turns = list(recent_turns or [])
 
     def _cost() -> int:
+        # Turns are costed at their RENDERED length. format_recent_turns
+        # truncates each to TURN_RENDER_LIMIT, so charging the full message
+        # would protect text that is thrown away and pay for it by dropping
+        # retrieved knowledge: six 4000-char turns "cost" ~6900 tokens and
+        # render as ~690, which was enough to evict every chunk from a health
+        # question because somebody earlier pasted a long lab report.
         return sum(
             estimate_tokens(c.content) for c in kept_chunks
-        ) + sum(estimate_tokens(str(t.get("message", ""))) for t in kept_turns)
+        ) + sum(
+            estimate_tokens(str(t.get("message", ""))[:TURN_RENDER_LIMIT])
+            for t in kept_turns
+        )
 
     while _cost() > remaining and kept_chunks:
         kept_chunks.pop()

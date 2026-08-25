@@ -223,3 +223,239 @@ measurement, and not quoted as one.
 
 Reviewers remained **read-only** throughout, per the process fix recorded in
 Phase 3.
+
+---
+
+# Phase 4 review round (read-only reviewer)
+
+A read-only review agent went over all four Phase 4 commits. It found real
+things, including one regression I had introduced hours earlier and one class
+of bug that had been silently degrading the coverage gate for the whole
+project. Everything below was **verified before being acted on**.
+
+## Confirmed and fixed
+
+### R-1 — "Can I take my medicine with food?" got a nonsense refusal
+**Severity: HIGH — a regression I introduced in Task 25.**
+
+Hardening the interaction gate to fire on phrasing meant one unrecognised term
+was enough. `extract_interaction_query("Can I take my medicine with food?")`
+returns `("medicine", "food")`; `"food"` is exempt, `"medicine"` was not — so
+an extremely ordinary question produced *"Whether medicine and food can be
+taken together depends on the doses, the timing…"*.
+
+That is worse than the LLM answer it replaced. The asymmetry argument for
+hardening the gate ("a false refusal is merely unhelpful") holds for real drug
+names; it does not hold when **neither** term is a drug and the reply is
+gibberish.
+
+**Fixed:** generic nouns for "a medicine" (`medicine`, `medication`, `tablet`,
+`pill`, `capsule`, `drug`, `syrup`, `supplement`, `vitamin`, `painkiller`,
+`antibiotic`, and plurals) joined `NON_DRUG_TERMS`. The refusal now needs at
+least one side to name a **specific** substance. *"Can I take paracetamol with
+my medicine?"* still fires — correctly, since one side is specific.
+
+### R-2 — A negative `limit` defeated every row cap
+**Severity: MEDIUM.** Three new endpoints used `.limit(min(limit, N))`, which
+clamps only the upper bound.
+
+Verified directly: `LIMIT -1` on SQLite returns **every row** (measured: 5 of 5
+with a limit of −1). So `GET /review/queue?limit=-1` returned the entire held
+queue for every patient — bypassing the cap that exists to stop that endpoint
+being a bulk-disclosure surface. On PostgreSQL the same request is an
+unhandled 500.
+
+**Fixed:** `Query(default=…, ge=1, le=…)` on all three.
+
+### R-3 — `forget_everything` never deleted feedback
+**Severity: MEDIUM.** `app/models/feedback.py` states the comment field *"is
+erased by the same 'forget me' path as the profile."* It was not. Nothing in
+the codebase deleted a `TurnFeedback` row.
+
+A reader could down-vote with *"you were wrong about my HIV meds"*, call
+forget-me, and have that text persist against their user id indefinitely —
+while the file a reviewer would check to verify the behaviour asserted the
+opposite.
+
+**Fixed:** `forget_everything` now deletes feedback and reports the count.
+
+### R-4 — `GET /review/audit` wrote no audit row
+**Severity: MEDIUM.** The module docstring claimed every endpoint audits. The
+one endpoint that can return the **cross-patient** trail — reviewer ids,
+subject ids, content hashes, and every clinician's free-text note — recorded
+nothing. A reviewer under investigation could read the investigation surface
+invisibly.
+
+**Fixed:** a cross-patient or unscoped read writes an `audit_read` row. A
+patient reading their *own* trail does not, and the docstring now states that
+exception instead of overclaiming.
+
+### R-5 — The queue listing was audited to the reviewer, not the patient
+**Severity: MEDIUM.** A listing carries `user_id` + `condition_code` + a title
+like *"Family history of type 2 diabetes"* — a patient bound to a named
+condition, which is a disclosure. The single audit row was filed under the
+**reviewer's** id, so it never appeared in the patient's answer to "who looked
+at my records?" — the question the subject index exists to answer.
+
+**Fixed:** one row per **distinct patient** in the page. Bounded by page size.
+
+### R-6 — Clinician decision notes were returned verbatim to patients
+**Severity: MEDIUM.** `note` is 1,000 characters a clinician writes for other
+clinicians. *"Patient is highly anxious, this will spiral them"* is a
+defensible note and an indefensible thing to hand the patient unannounced.
+
+**Fixed:** patients reading their own trail see **that** a decision was made
+and when; the reasoning stays professional correspondence. Reviewers still see
+it in full.
+
+### R-7 — A reviewer could decide on their own held insight
+**Severity: MEDIUM.** `_decide` never compared reviewer to subject.
+Independent review is the entire premise of the roster, and the audit row would
+have recorded reviewer and subject as the same person — a record of the control
+not working.
+
+**Fixed:** 403. Two tests whose setup made the reviewer own the artifact were
+rewritten to use a separate clinician identity, which is the realistic
+arrangement anyway.
+
+### R-8 — The budget costed turns at full length; the renderer truncates to 400
+**Severity: MEDIUM.** `format_recent_turns` renders `text[:400]`, but
+`_fit_budget` charged the whole message. Six 4,000-character turns "cost"
+~6,900 tokens against a 6,000 budget and render as ~690 — enough to evict
+**every retrieved chunk** from a health question because the reader had earlier
+pasted a long lab report.
+
+**Fixed:** `TURN_RENDER_LIMIT = 400` is now shared by the renderer and the cost
+function, with a test that fails if they diverge.
+
+### R-9 — The fail-open in `_interaction_refusal` swallowed the refusal itself
+**Severity: MEDIUM.** The `try` wrapped the receipt write and the `ChatResult`
+construction, not just the parse and the lookup. A transient database error
+inside `_write_receipt` therefore returned `None` — handing *"can I take
+warfarin and aspirin together?"* to the LLM. That is precisely the outcome the
+commit claimed to eliminate, reachable by a database hiccup.
+
+**Fixed:** narrowed to two small blocks. The parse failing returns `None`
+(nothing was asked); the recognition lookup failing costs only the statistic —
+the refusal proceeds either way. `_write_receipt` is already fail-open
+internally.
+
+### R-10 — `append_directive` could write into the prefix
+**Severity: LOW (latent).** A one-element sequence made `parts[-1]` the prefix,
+which is exactly what the function exists to prevent; an empty one raised
+`IndexError`.
+
+**Fixed:** fewer than two elements degrades to a plain string — no breakpoint,
+no silent corruption.
+
+### R-11 — V8's partial index existed only in Flyway
+**Severity: LOW.** Production would have an index no local or CI database ever
+built, so the review-queue query was planned differently in test than in
+production. **Fixed** in the Alembic revision with both dialect predicates.
+
+### R-12 — Two comments described a different implementation
+**Severity: LOW, but the caching one is a trap.** `anthropic.py` said the
+breakpoint goes on the **LAST** system block; the code marks the **first**.
+Both happen to cover the tools, so the code was right — but the next person to
+"fix the code to match the comment" moves the breakpoint onto the volatile tail
+and silently ends caching. The comment now says which block and why, and
+explicitly warns against that change.
+
+`models/rules.py` still documented the status column as
+`active | superseded | held_for_review`, missing `suppressed`.
+
+### R-13 — Two tests that could not fail, and one mechanism with no test
+**Severity: MEDIUM — this is the one that matters most.**
+
+- `test_the_budget_drops_chunks_before_conversation_turns` seeded **one** turn.
+  The trim loop is guarded by `len(kept_turns) > 1`, so a single turn is
+  structurally undroppable and the assertion held against any implementation.
+  Rewritten with three turns.
+- **Nothing tested that the orchestrator actually ships a split prompt** — the
+  mechanism the entire caching feature rests on. `FakeProvider` calls
+  `join_system()` before recording, so every spy in the suite sees a flat
+  string. Verified the reviewer's claim by mutation: joining the prompt in the
+  orchestrator killed caching outright and **passed the whole suite**. Two new
+  end-to-end tests now fail on exactly that mutation.
+- `provenance["recognised"]` was only ever asserted `False`, guaranteed by an
+  empty `drug_reference`. A positive-direction test now seeds a drug.
+
+### R-14 — Coverage had been under-counting async code project-wide
+**Severity: MEDIUM, and pre-existing — not a Phase 4 defect.**
+
+Chasing an implausible 54% on the new feedback endpoint (40 passing tests, and
+a `raise` inserted into the "uncovered" region failed them immediately) led to
+the cause: **SQLAlchemy async runs each awaited DB call inside a greenlet**, and
+coverage does not follow a greenlet switch with the default thread tracer. Every
+statement after the first `await db.execute(...)` in a request handler was
+reported as unexecuted.
+
+```
+app/api/v1/feedback.py   54% -> 98%
+app/api/v1/review.py     69% -> 98%
+TOTAL                 88.87% -> 91.38%
+```
+
+This means the 80% gate has been measuring less than it appeared to since it
+was introduced, and any genuine gap in async DB code was indistinguishable from
+the artefact. **Fixed:** `concurrency = ["thread", "greenlet"]`.
+
+## Accepted as documentation, not code
+
+### R-15 — The ~2,541-token prefix does not apply to no-tools calls
+Sharp catch. Anthropic caches `tools → system → messages`, so a call with
+`tools=()` has a prefix of the system rules **alone — ~850 tokens, under the
+minimum**. Three paths do that: raised-risk turns, the forced answer after the
+tool budget, and the corrective retry. So `append_directive()` cannot preserve
+a cache hit on either path it was written for.
+
+It is still correct and still worth having — its job is to stop a directive
+being written into the prefix, which would poison caching for every subsequent
+tools-bearing turn. But §2 of the Task 23 doc implied more than that.
+
+**Recorded as a correction in `task-23-caching.md` §5** rather than quietly
+edited, along with the option not taken (`tool_choice: none`, rejected because
+it means provider-specific branching in the provider-neutral module).
+
+### R-16 — The promoter writes patient free text into a git-tracked file
+Real, and "forget me" cannot reach git history. A warning now heads the module,
+pointing at `--dry-run` and asking the operator to generalise the wording before
+committing.
+
+### R-17 — A service token can present as a reviewer
+Pre-existing auth design, not introduced here: with `SERVICE_TOKEN` set,
+`auth.py` accepts the token plus `X-User-Id` as identity. The V9 comment said
+the roster is *"the ONLY thing"* standing between a user id and cross-user
+access. Now recorded in `models/review.py`: the roster protects against an
+ordinary user, not against a leaked service token.
+
+## Reported and not acted on
+
+- **Step 3.4 ordering** — the refusal now runs before the deterministic data
+  abilities. The reviewer could not construct a colliding input from the four
+  interaction patterns and flagged it as unproven; I could not either. Noted,
+  not changed.
+- **`clinician_reviewers` has both a unique and a plain index on `user_id`.**
+  Redundant but consistent across Flyway and Alembic, so it is not drift. Not
+  worth a migration on its own.
+- **`test_suppressed_is_a_live_status` asserts a constant.** True. It sits
+  beside `test_review_recompute.py`, which proves the same property against the
+  real engine, so it is a cheap signpost rather than the evidence. Left as is.
+- **Engine comment on changed facts** — if the facts change such that the
+  sensitive rule stops firing, the replacement artifact is `active` and reaches
+  the patient without review. Correct as designed (a non-sensitive insight was
+  never review material), but the comment states it unconditionally. Left for
+  a clinician to rule on rather than changed unilaterally.
+
+## Process note
+
+The reviewer was **read-only**, per the rule adopted in Phase 3 after review
+agents with write access left scratch files that produced false failures in
+unrelated safety tests. It found more, and cost less, than the write-enabled
+rounds did.
+
+Two of its findings were **wrong to act on as stated** and were checked before
+being believed — the "shadowing bug" was already fixed, and the `_fit_budget`
+infinite-loop and negative-budget concerns were disproved by reading the loop
+guards. Both are recorded above as reported-and-refuted rather than silently
+dropped.

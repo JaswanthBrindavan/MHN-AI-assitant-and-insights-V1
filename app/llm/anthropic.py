@@ -112,10 +112,14 @@ def _to_anthropic_messages(messages: Sequence[Message]) -> list[dict]:
 
 
 # Anthropic renders the cacheable prompt in a fixed order: tools, then
-# system, then messages. A breakpoint on the LAST system block therefore
-# covers the tool schemas too — which matters here, because the tool schemas
-# are the larger half of what is stable (see project_docs/task-23-caching.md
-# for the measurement).
+# system, then messages. The breakpoint goes on the FIRST system block, which
+# is the stable prefix; because tools come before system, that one mark covers
+# the tool schemas too. This matters here: the tool schemas are the LARGER half
+# of what is stable, and the system rules alone (~850 tokens) are UNDER the
+# minimum. See project_docs/task-23-caching.md for the measurement.
+#
+# Do not "fix" this to mark the last block. The last block is the volatile
+# tail, and marking it would rewrite the cache on every single turn.
 _CACHE_CONTROL = {"type": "ephemeral"}
 
 # Below this, Anthropic silently declines to cache and the request behaves

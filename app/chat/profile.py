@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.common import utcnow
 from app.models.core import ConsentLedger
+from app.models.feedback import TurnFeedback
 from app.models.profile import UserProfile
 from app.services.pedigree import FAMILY_RISK_PURPOSE  # noqa: F401  (sibling purpose)
 
@@ -216,7 +217,7 @@ async def forget_everything(db: AsyncSession, user_id: uuid.UUID) -> dict:
     """
     from app.models.chat import UserMemory
 
-    deleted = {"profile": 0, "memories": 0}
+    deleted = {"profile": 0, "memories": 0, "feedback": 0}
     try:
         result = await db.execute(
             delete(UserProfile).where(UserProfile.user_id == user_id)
@@ -226,6 +227,14 @@ async def forget_everything(db: AsyncSession, user_id: uuid.UUID) -> dict:
             delete(UserMemory).where(UserMemory.user_id == user_id)
         )
         deleted["memories"] = getattr(result, "rowcount", 0) or 0
+        # Feedback comments are free text the reader typed and can carry PHI
+        # ("you were wrong about my HIV meds"). app/models/feedback.py states
+        # that this path erases them; it did not, until a review noticed the
+        # docstring was writing a cheque the code never cashed.
+        result = await db.execute(
+            delete(TurnFeedback).where(TurnFeedback.user_id == user_id)
+        )
+        deleted["feedback"] = getattr(result, "rowcount", 0) or 0
         await db.flush()
     except Exception:  # noqa: BLE001
         logger.warning("erase failed", exc_info=True)
