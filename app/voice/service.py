@@ -14,8 +14,9 @@ issue, not a UX annoyance: "I can breathe" and "I can't breathe" differ by one
 phoneme and by everything else. Below the confidence floor the caller is told to
 confirm rather than handed a transcript to act on.
 
-Fail-open on synthesis (the reader still gets the text), fail-CLOSED on
-transcription (a turn is not attempted on words nobody is sure of).
+Fail-CLOSED on transcription: a turn is not attempted on words nobody is
+sure of. (Synthesis is implemented but not yet wired — see VoiceSidecar.
+synthesize.)
 """
 
 from __future__ import annotations
@@ -159,6 +160,13 @@ class VoiceSidecar:
         )
 
     async def synthesize(self, text: str, language: str = "en") -> bytes | None:
+        """Text to speech.
+
+        NOTE: nothing calls this yet — ChatResponse carries no audio field.
+        It is here because the sidecar contract has both halves and
+        splitting them across releases would mean two sidecar deployments.
+        Wire it when a client can play audio back.
+        """
         data = await self._post(
             "/speak", {"text": text, "language": language}
         )

@@ -134,3 +134,42 @@ def test_guard_modules_have_no_llm_imports():
         for line in import_lines:
             for banned in ("ollama", "openai", "httpx", "llmprovider", "app.llm"):
                 assert banned not in line, f"{f.name} imports {banned}: {line}"
+
+
+# --------------------------------------------------------------------------- #
+# Session ownership (H2)
+# --------------------------------------------------------------------------- #
+async def test_a_session_id_belonging_to_someone_else_is_not_reused(db_session):
+    """Found in the Phase 3 review, pre-existing since Task 16.
+
+    ensure_session returned any existing row by id without checking who owned
+    it, so passing another user's session_id loaded THEIR history into your
+    prompt and appended your turn to it. Fixed in the shared function, which
+    covers all four callers (/chat, /chat/stream, /chat/upload, /chat/voice).
+    """
+    import uuid as _uuid
+
+    from app.chat.conversation import ensure_session
+    from app.models.chat import ConversationSession
+
+    owner = _uuid.uuid4()
+    stranger = _uuid.uuid4()
+
+    owned = await ensure_session(db_session, owner, None)
+    handed_back = await ensure_session(db_session, stranger, owned)
+
+    assert handed_back != owned, "another user's session was handed over"
+
+    row = await db_session.get(ConversationSession, handed_back)
+    assert row is not None
+    assert row.user_id == stranger
+
+
+async def test_your_own_session_id_is_still_reused(db_session):
+    import uuid as _uuid
+
+    from app.chat.conversation import ensure_session
+
+    user_id = _uuid.uuid4()
+    first = await ensure_session(db_session, user_id, None)
+    assert await ensure_session(db_session, user_id, first) == first

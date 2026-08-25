@@ -98,7 +98,11 @@ def _to_openai_messages(messages: Sequence[Message]) -> list[dict]:
                         "role": "user",
                         "content": [
                             *(_to_openai_image(a) for a in m.attachments),
-                            {"type": "text", "text": m.content},
+                            *(
+                                [{"type": "text", "text": m.content}]
+                                if m.content
+                                else []
+                            ),
                         ],
                     }
                 )

@@ -37,6 +37,14 @@ class ToolResult:
     call_id: str
     content: str
     is_error: bool = False
+    # Whether the values in this result may be treated as SOURCES by the
+    # numeric-fidelity guard. True for a database read: the value came from
+    # the reader's record, so quoting it is faithful. FALSE for anything a
+    # model produced — a vision transcription of a lab report is a guess, and
+    # letting it into `sources` would have the fidelity guard authorise the
+    # very misreads it exists to catch (INR 1.0 read as 10.0, potassium 5.9
+    # read as 59).
+    trusted_values: bool = True
 
 
 @dataclass(frozen=True)

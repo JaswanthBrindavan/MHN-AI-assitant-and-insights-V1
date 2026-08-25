@@ -137,7 +137,12 @@ async def run_agent(
                 results.append(_as_error(call, exc))
         history.append(ToolResultMessage(results=tuple(results)))
         outcome.tool_names.extend(call.name for call in turn.tool_calls)
-        outcome.source_texts.extend(r.content for r in results)
+        # ONLY trusted results become numeric sources. A model-produced
+        # result (a vision transcription) is a claim, not a record, and
+        # letting it in would have the fidelity guard authorise a misread.
+        outcome.source_texts.extend(
+            r.content for r in results if r.trusted_values
+        )
 
     # Budget exhausted. Offering no tools is what forces text — a model that
     # keeps asking would otherwise never produce an answer.

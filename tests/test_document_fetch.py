@@ -22,18 +22,46 @@ from app.models.jobs import JobRun
 
 
 class _Resp:
-    def __init__(self, status=200, body=b"", headers=None, payload=None):
+    """A JSON response, for the Spring presigned-URL call."""
+
+    def __init__(self, status=200, payload=None):
         self.status_code = status
-        self.content = body
-        self.headers = headers or {}
         self._payload = payload
 
     def json(self):
         return self._payload
 
 
+class _StreamResp:
+    """A streamed response, for the byte fetch.
+
+    Yields the body in CHUNKS so the incremental size cap is genuinely
+    exercised — handing over a pre-built body would reproduce the bug the cap
+    exists to prevent rather than catch it.
+    """
+
+    def __init__(self, status=200, body=b"", headers=None, chunk=4096, raises=None):
+        self.status_code = status
+        self.headers = headers or {}
+        self._body = body
+        self._chunk = chunk
+        self._raises = raises
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def aiter_bytes(self):
+        if self._raises is not None:
+            raise self._raises
+        for i in range(0, len(self._body), self._chunk):
+            yield self._body[i : i + self._chunk]
+
+
 class _Client:
-    """Stub httpx client: first GET returns the presigned URL, second the bytes."""
+    """Stub client: GET returns the presigned URL, stream() returns the bytes."""
 
     def __init__(self, url_resp=None, bytes_resp=None):
         self.url_resp = url_resp
@@ -42,15 +70,25 @@ class _Client:
 
     async def get(self, url, **kwargs):
         self.calls.append(url)
-        if len(self.calls) == 1:
-            return self.url_resp
+        return self.url_resp
+
+    def stream(self, method, url, **kwargs):
+        self.calls.append(url)
+        if self.bytes_resp is None:
+            raise RuntimeError("no byte response scripted")
         return self.bytes_resp
 
 
-def _ok_client(body=b"\xff\xd8\xffimagedata", content_type="image/jpeg"):
+IMAGE_BYTES = bytes([0xFF, 0xD8, 0xFF]) + b"imagedata"
+
+
+def _ok_client(body=IMAGE_BYTES, content_type="image/jpeg", declared_length=None):
+    headers = {"content-type": content_type}
+    if declared_length is not None:
+        headers["content-length"] = str(declared_length)
     return _Client(
         url_resp=_Resp(payload={"url": "https://s3.example/signed"}),
-        bytes_resp=_Resp(body=body, headers={"content-type": content_type}),
+        bytes_resp=_StreamResp(body=body, headers=headers),
     )
 
 
@@ -154,17 +192,25 @@ async def test_no_url_from_spring_means_no_read(db_session):
     assert jobs[0].error == "no_url"
 
 
-async def test_a_non_http_url_is_rejected(db_session):
-    """A malformed or relative URL must not be followed."""
+async def test_a_non_http_url_is_never_followed(db_session):
+    """A malformed, relative or non-http URL must not be FETCHED.
+
+    Asserting only `doc is None` was not enough: with the guard removed the
+    stub raises on the next call, the bare except catches it, and the function
+    returns None anyway — the test passed against a broken implementation.
+    Counting the calls is what actually pins the behaviour.
+    """
     user_id = uuid.uuid4()
-    client = _Client(
-        url_resp=_Resp(payload={"url": "file:///etc/passwd"}), bytes_resp=None
-    )
-    doc = await fetch_document_bytes(
-        db_session, viewer_id=user_id, owner_id=user_id, kind="report",
-        resource_id=1, is_private=False, client=client,
-    )
-    assert doc is None
+    for hostile in ("file:///etc/passwd", "httpfoo://evil", "/relative", "ftp://x"):
+        client = _Client(
+            url_resp=_Resp(payload={"url": hostile}), bytes_resp=None
+        )
+        doc = await fetch_document_bytes(
+            db_session, viewer_id=user_id, owner_id=user_id, kind="report",
+            resource_id=1, is_private=False, client=client,
+        )
+        assert doc is None, hostile
+        assert len(client.calls) == 1, f"followed {hostile}"
 
 
 async def test_nothing_happens_when_spring_is_not_configured(
@@ -234,19 +280,58 @@ async def test_every_allowed_type_is_an_image():
 # --------------------------------------------------------------------------- #
 # Failure handling
 # --------------------------------------------------------------------------- #
-async def test_a_transport_failure_returns_none_rather_than_raising(db_session):
-    class _Explodes:
+async def test_a_failure_getting_the_url_returns_none(db_session):
+    class _ExplodesImmediately:
         calls: list[str] = []
 
         async def get(self, url, **kwargs):
             raise RuntimeError("network down")
 
+        def stream(self, method, url, **kwargs):  # pragma: no cover - unreached
+            raise RuntimeError("network down")
+
     user_id = uuid.uuid4()
     doc = await fetch_document_bytes(
         db_session, viewer_id=user_id, owner_id=user_id, kind="report",
-        resource_id=1, is_private=False, client=_Explodes(),
+        resource_id=1, is_private=False, client=_ExplodesImmediately(),
     )
     assert doc is None
+    jobs = await _jobs(db_session)
+    assert jobs[0].error == "no_url"
+
+
+async def test_a_failure_fetching_the_BYTES_returns_none(db_session):
+    """The previous test raises on the FIRST call, so it exercises the URL
+    handler. This one gets a URL successfully and then fails — the byte-fetch
+    handler, which had no coverage at all."""
+
+    class _ExplodesOnBytes:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        async def get(self, url, **kwargs):
+            self.calls.append(url)
+            return _Resp(payload={"url": "https://s3.example/signed"})
+
+        def stream(self, method, url, **kwargs):
+            self.calls.append(url)
+            # Valid headers, so it gets PAST the type and length checks and
+            # fails where this test intends: mid-body.
+            return _StreamResp(
+                headers={"content-type": "image/jpeg"},
+                raises=RuntimeError("connection reset mid-download"),
+            )
+
+    user_id = uuid.uuid4()
+    client = _ExplodesOnBytes()
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=user_id, owner_id=user_id, kind="report",
+        resource_id=1, is_private=False, client=client,
+    )
+    assert doc is None
+    assert len(client.calls) == 2
+    jobs = await _jobs(db_session)
+    assert jobs[0].error == "transport"
 
 
 async def test_a_successful_read_is_audited(db_session):
@@ -263,7 +348,7 @@ async def test_a_successful_read_is_audited(db_session):
 async def test_the_bytes_are_never_written_anywhere(db_session):
     """They live for one turn, in memory. Nothing persists them."""
     user_id = uuid.uuid4()
-    secret = b"\xff\xd8\xffSECRETIMAGEBYTES"
+    secret = bytes([0xFF, 0xD8, 0xFF]) + b"SECRETIMAGEBYTES"
     await fetch_document_bytes(
         db_session, viewer_id=user_id, owner_id=user_id, kind="report",
         resource_id=1, is_private=False, client=_ok_client(body=secret),
@@ -273,3 +358,140 @@ async def test_the_bytes_are_never_written_anywhere(db_session):
         f"{j.status} {j.error or ''} {j.input_hash or ''}" for j in jobs
     )
     assert "SECRET" not in blob
+
+
+# --------------------------------------------------------------------------- #
+# The FAMILY branch of the consent gate
+# --------------------------------------------------------------------------- #
+# Found in review: every test above uses viewer == owner, which short-circuits
+# at the first line of can_view_document. The family branch — the four-condition
+# gate that is the whole reason this module is careful — had ZERO coverage
+# across the entire suite. These exercise it.
+
+
+async def _connect(db_session, requester, acceptor, *, accepted=True,
+                   req_read=None, acc_read=None):
+    from app.models.coredata import FamilyConnect
+
+    row = FamilyConnect(
+        requester_id=requester,
+        acceptor_id=acceptor,
+        accepted=accepted,
+        req_read=req_read,
+        acc_read=acc_read,
+    )
+    db_session.add(row)
+    await db_session.flush()
+    return row
+
+
+async def test_a_connected_member_can_read_when_the_owner_granted(db_session):
+    """Owner ACCEPTED the connection, so the grant sits on acc_read."""
+    owner, viewer = uuid.uuid4(), uuid.uuid4()
+    await _connect(db_session, requester=viewer, acceptor=owner, acc_read=True)
+
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=viewer, owner_id=owner, kind="report",
+        resource_id=1, is_private=False, client=_ok_client(),
+    )
+    assert doc is not None
+
+
+async def test_the_grant_on_the_wrong_side_does_not_count(db_session):
+    """req_read is the REQUESTER's grant. Here the owner accepted, so only
+    acc_read is theirs — a true req_read is the viewer's own sharing setting
+    and must not unlock the owner's files."""
+    owner, viewer = uuid.uuid4(), uuid.uuid4()
+    await _connect(
+        db_session, requester=viewer, acceptor=owner, req_read=True, acc_read=False
+    )
+
+    client = _ok_client()
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=viewer, owner_id=owner, kind="report",
+        resource_id=1, is_private=False, client=client,
+    )
+    assert doc is None
+    assert client.calls == []
+
+
+async def test_an_unaccepted_connection_grants_nothing(db_session):
+    owner, viewer = uuid.uuid4(), uuid.uuid4()
+    await _connect(
+        db_session, requester=viewer, acceptor=owner, accepted=False, acc_read=True
+    )
+
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=viewer, owner_id=owner, kind="report",
+        resource_id=1, is_private=False, client=_ok_client(),
+    )
+    assert doc is None
+
+
+async def test_a_private_document_is_refused_despite_a_valid_grant(db_session):
+    owner, viewer = uuid.uuid4(), uuid.uuid4()
+    await _connect(db_session, requester=viewer, acceptor=owner, acc_read=True)
+
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=viewer, owner_id=owner, kind="report",
+        resource_id=1, is_private=True, client=_ok_client(),
+    )
+    assert doc is None
+
+
+async def test_a_per_file_exclusion_overrides_the_grant(db_session):
+    """The fourth condition: the owner shares generally but hid THIS file."""
+    from app.models.coredata import FileAccessExclusion
+
+    owner, viewer = uuid.uuid4(), uuid.uuid4()
+    await _connect(db_session, requester=viewer, acceptor=owner, acc_read=True)
+    db_session.add(
+        FileAccessExclusion(
+            user_id=viewer, resource_type="reports", resource_id=42
+        )
+    )
+    await db_session.flush()
+
+    client = _ok_client()
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=viewer, owner_id=owner, kind="report",
+        resource_id=42, is_private=False, client=client,
+    )
+    assert doc is None
+    assert client.calls == []
+
+    # A different file under the same grant is still readable.
+    other = await fetch_document_bytes(
+        db_session, viewer_id=viewer, owner_id=owner, kind="report",
+        resource_id=43, is_private=False, client=_ok_client(),
+    )
+    assert other is not None
+
+
+async def test_an_oversized_content_length_is_refused_before_reading(db_session):
+    """The cheap check: if the header already says it is too big, do not read
+    a byte of it."""
+    user_id = uuid.uuid4()
+    client = _ok_client(body=b"small", declared_length=MAX_BYTES + 1)
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=user_id, owner_id=user_id, kind="report",
+        resource_id=1, is_private=False, client=client,
+    )
+    assert doc is None
+    jobs = await _jobs(db_session)
+    assert jobs[0].error == "too_large"
+
+
+async def test_a_lying_content_length_does_not_get_a_free_pass(db_session):
+    """A header claiming 10 bytes while the body streams megabytes must still
+    be caught — the incremental check is the real guard, and the reason the
+    body is streamed rather than buffered."""
+    user_id = uuid.uuid4()
+    client = _ok_client(body=b"x" * (MAX_BYTES + 1), declared_length=10)
+    doc = await fetch_document_bytes(
+        db_session, viewer_id=user_id, owner_id=user_id, kind="report",
+        resource_id=1, is_private=False, client=client,
+    )
+    assert doc is None
+    jobs = await _jobs(db_session)
+    assert jobs[0].error == "too_large"

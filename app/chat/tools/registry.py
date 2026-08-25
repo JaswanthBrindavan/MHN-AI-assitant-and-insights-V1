@@ -38,7 +38,17 @@ EXECUTORS = {
     "analyze_image": executors.analyze_image,
 }
 
-__all__ = ["EXECUTORS", "TOOL_SPECS", "execute_tool"]
+# Tools whose output a MODEL produced rather than a database returned. Their
+# values must never become sources for the numeric-fidelity guard: an OCR
+# misread would otherwise be authorised by the one guard designed to catch it.
+UNTRUSTED_VALUE_TOOLS = frozenset({"analyze_image"})
+
+__all__ = [
+    "EXECUTORS",
+    "TOOL_SPECS",
+    "UNTRUSTED_VALUE_TOOLS",
+    "execute_tool",
+]
 
 
 def _error(call_id: str, message: str) -> ToolResult:
@@ -93,4 +103,8 @@ async def execute_tool(
         logger.warning("tool %s failed", call.name, exc_info=True)
         return _error(call.id, "That lookup could not be completed.")
 
-    return ToolResult(call_id=call.id, content=content)
+    return ToolResult(
+        call_id=call.id,
+        content=content,
+        trusted_values=call.name not in UNTRUSTED_VALUE_TOOLS,
+    )

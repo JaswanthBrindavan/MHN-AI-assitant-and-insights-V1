@@ -61,7 +61,14 @@ def _to_anthropic_messages(messages: Sequence[Message]) -> list[dict]:
                         "role": "user",
                         "content": [
                             *m.attachments,
-                            {"type": "text", "text": m.content},
+                            # An empty text block is not valid content — the
+                            # AssistantMessage branch below guards the same
+                            # thing for the same reason.
+                            *(
+                                [{"type": "text", "text": m.content}]
+                                if m.content
+                                else []
+                            ),
                         ],
                     }
                 )

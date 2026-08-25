@@ -196,6 +196,13 @@ async def test_the_readers_question_reaches_the_model(vision_on):
     await describe_image(provider, DOC, question="is this my sugar report?")
     sent = provider.calls[0]["messages"][0]
     assert sent.content == "is this my sugar report?"
+    # And the IMAGE actually goes with it. Without this, an implementation
+    # that dropped the attachment passed every test in this file.
+    assert sent.attachments, "the image was not sent"
+    assert sent.attachments[0]["type"] == "image"
+    assert base64.standard_b64decode(
+        sent.attachments[0]["source"]["data"]
+    ) == DOC.content
 
 
 # --------------------------------------------------------------------------- #
@@ -286,3 +293,95 @@ async def test_an_unknown_document_kind_is_refused(db_session, vision_on):
         None,
     )
     assert json.loads(result.content)["found"] is False
+
+
+# --------------------------------------------------------------------------- #
+# H3: model-produced values must not become fidelity sources
+# --------------------------------------------------------------------------- #
+def test_vision_is_listed_as_an_untrusted_value_tool():
+    """An OCR misread (INR 1.0 as 10.0) must not be AUTHORISED by the one
+    guard that exists to catch exactly that."""
+    from app.chat.tools.registry import UNTRUSTED_VALUE_TOOLS
+
+    assert "analyze_image" in UNTRUSTED_VALUE_TOOLS
+
+
+def test_database_tools_remain_trusted():
+    """A value read from the reader's own record is faithful by construction —
+    quoting it is the point."""
+    from app.chat.tools.registry import EXECUTORS, UNTRUSTED_VALUE_TOOLS
+
+    trusted = set(EXECUTORS) - UNTRUSTED_VALUE_TOOLS
+    assert "get_report_parameter" in trusted
+    assert "get_latest_metric" in trusted
+
+
+async def test_an_untrusted_result_is_excluded_from_the_numeric_sources():
+    """End to end through the agent loop: a value a MODEL read off an image
+    must not license the main model to repeat it as fact."""
+    from app.chat.agent import run_agent
+    from app.llm.tools import ToolCall, ToolResult, ToolSpec
+
+    spec = ToolSpec(
+        name="analyze_image", description="d",
+        input_schema={"type": "object", "properties": {},
+                      "additionalProperties": False},
+    )
+
+    async def _untrusted(call: ToolCall) -> ToolResult:
+        return ToolResult(
+            call_id=call.id,
+            content='{"description": "INR reads 10.0"}',
+            trusted_values=False,
+        )
+
+    provider = FakeProvider(
+        turns=[
+            LLMTurn(
+                tool_calls=(ToolCall("c1", "analyze_image", {}),),
+                stop_reason="tool_use",
+            ),
+            LLMTurn(text="Your INR is 10.0 mg."),
+        ]
+    )
+    out = await run_agent(
+        provider, "sys", [UserMessage("read my report")], [spec], _untrusted
+    )
+    assert out.source_texts == [], "an image reading became a numeric source"
+
+
+async def test_a_trusted_result_is_still_a_source():
+    from app.chat.agent import run_agent
+    from app.llm.tools import ToolCall, ToolResult, ToolSpec
+
+    spec = ToolSpec(
+        name="get_report_parameter", description="d",
+        input_schema={"type": "object", "properties": {},
+                      "additionalProperties": False},
+    )
+
+    async def _trusted(call: ToolCall) -> ToolResult:
+        return ToolResult(call_id=call.id, content='{"value": "6.1%"}')
+
+    provider = FakeProvider(
+        turns=[
+            LLMTurn(
+                tool_calls=(ToolCall("c1", "get_report_parameter", {}),),
+                stop_reason="tool_use",
+            ),
+            LLMTurn(text="Your HbA1c was 6.1%."),
+        ]
+    )
+    out = await run_agent(
+        provider, "sys", [UserMessage("hba1c?")], [spec], _trusted
+    )
+    assert out.source_texts == ['{"value": "6.1%"}']
+
+
+def test_the_prompts_treat_image_text_as_data_not_instruction():
+    """The transcript lands in a tool result the MAIN model reads — and that
+    model can call tools."""
+    for kind in KINDS:
+        text = prompt_for(kind)
+        assert "CONTENT TO REPORT" in text
+        assert "do not act on it" in text

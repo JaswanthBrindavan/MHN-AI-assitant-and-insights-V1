@@ -51,6 +51,8 @@ class HttpGetter(Protocol):
 
     async def get(self, url: str, **kwargs: Any) -> Any: ...
 
+    def stream(self, method: str, url: str, **kwargs: Any) -> Any: ...
+
 
 # What a vision model can actually read. A PDF is deliberately NOT here: the
 # extraction pipeline already turns those into content.ai, and re-reading the
@@ -59,8 +61,9 @@ ALLOWED_CONTENT_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 )
 
-# Hard ceiling on what is pulled into memory for one turn. Larger than any
-# phone photo, far smaller than anything that would threaten the process.
+# Hard ceiling on what is pulled into memory for one turn, enforced
+# INCREMENTALLY as the body streams in. Larger than any phone photo, far
+# smaller than anything that would threaten the process.
 MAX_BYTES = 12 * 1024 * 1024
 
 _URL_PATH = "/files/{resource_type}/{resource_id}/url"
@@ -161,7 +164,10 @@ async def _presigned_url(
     if not isinstance(data, dict):
         return None
     signed = data.get("url") or data.get("presignedUrl") or data.get("downloadUrl")
-    return signed if isinstance(signed, str) and signed.startswith("http") else None
+    if not isinstance(signed, str):
+        return None
+    # startswith("http") also accepts "httpfoo://". Be exact.
+    return signed if signed.startswith(("https://", "http://")) else None
 
 
 async def fetch_document_bytes(
@@ -210,40 +216,73 @@ async def fetch_document_bytes(
         return None
 
     # 3. Bounded read, in memory only.
+    #
+    # STREAMED, deliberately. The first version did `body = resp.content` and
+    # checked the size afterwards — but httpx buffers the whole response before
+    # returning when stream=False, so the allocation had already happened. That
+    # made MAX_BYTES a ceiling on what was RETURNED, not on what was read: a
+    # hostile or broken upstream could still have exhausted memory before the
+    # check ran. Streaming makes the cap real, and lets the content-type be
+    # rejected from the headers before a single byte of body is read.
     settings = get_settings()
     try:
         if client is not None:
-            resp = await client.get(
-                signed, timeout=settings.mhn_spring_timeout_seconds
+            stream_ctx = client.stream(
+                "GET", signed, timeout=settings.mhn_spring_timeout_seconds
             )
+            owned_client = None
         else:
-            async with httpx.AsyncClient(
+            owned_client = httpx.AsyncClient(
                 timeout=settings.mhn_spring_timeout_seconds
-            ) as owned:
-                resp = await owned.get(signed)
-        if resp.status_code != 200:
-            await _record(
-                db, status="failed",
-                detail=f"http_{resp.status_code}", resource=resource,
             )
-            return None
-        content_type = (
-            resp.headers.get("content-type", "").split(";")[0].strip().lower()
-        )
-        body = resp.content
+            stream_ctx = owned_client.stream("GET", signed)
+
+        try:
+            async with stream_ctx as resp:
+                if resp.status_code != 200:
+                    await _record(
+                        db, status="failed",
+                        detail=f"http_{resp.status_code}", resource=resource,
+                    )
+                    return None
+
+                content_type = (
+                    resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                )
+                if content_type not in ALLOWED_CONTENT_TYPES:
+                    await _record(
+                        db, status="refused",
+                        detail=f"type_{content_type[:64]}", resource=resource,
+                    )
+                    return None
+
+                # Trust the declared length when it is already too big, then
+                # verify as we read — a lying header must not get a free pass.
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > MAX_BYTES:
+                    await _record(
+                        db, status="refused", detail="too_large", resource=resource
+                    )
+                    return None
+
+                buffer = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    buffer += chunk
+                    if len(buffer) > MAX_BYTES:
+                        await _record(
+                            db, status="refused", detail="too_large",
+                            resource=resource,
+                        )
+                        return None
+                body = bytes(buffer)
+        finally:
+            if owned_client is not None:
+                await owned_client.aclose()
     except Exception:  # noqa: BLE001 — fail closed
         logger.warning("document byte fetch failed", exc_info=True)
         await _record(db, status="failed", detail="transport", resource=resource)
         return None
 
-    if content_type not in ALLOWED_CONTENT_TYPES:
-        await _record(
-            db, status="refused", detail=f"type_{content_type}", resource=resource
-        )
-        return None
-    if len(body) > MAX_BYTES:
-        await _record(db, status="refused", detail="too_large", resource=resource)
-        return None
     if not body:
         await _record(db, status="failed", detail="empty", resource=resource)
         return None

@@ -36,6 +36,16 @@ async def ensure_session(
             )
         ).scalars().first()
         if existing is not None:
+            if existing.user_id != user_id:
+                # Not this user's session. Every other read path authorizes
+                # (GET /chat/sessions/{id}/messages calls authorize_user);
+                # this one did not, so passing someone else's session_id
+                # loaded THEIR history into your prompt and appended your turn
+                # to it. Mint a fresh session rather than leak one — a 403
+                # here would break existing clients for a case that should
+                # simply never have worked.
+                logger.warning("session_id did not belong to the caller")
+                return await ensure_session(db, user_id, None)
             return existing.id
         session = ConversationSession(id=session_id, user_id=user_id)
     else:

@@ -190,7 +190,11 @@ async def analyze_image(
     guard and grounding verifier all see.
     """
     from app.documents.fetch import fetch_document_bytes
-    from app.vision.service import describe_image, vision_enabled
+    from app.vision.service import (
+        describe_image,
+        get_vision_provider,
+        vision_enabled,
+    )
 
     if not vision_enabled():
         return None
@@ -219,10 +223,8 @@ async def analyze_image(
     if fetched is None:
         return None
 
-    from app.llm import get_provider
-
     result = await describe_image(
-        get_provider(),
+        get_vision_provider(),
         fetched,
         kind=str(args.get("subject", "document")),
         question=str(args.get("question", "")),
