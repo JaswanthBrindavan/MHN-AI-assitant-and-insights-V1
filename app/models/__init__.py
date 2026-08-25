@@ -45,6 +45,7 @@ from app.models.coredata import (
     Vaccination,
     VitalReading,
 )
+from app.models.feedback import TurnFeedback
 from app.models.jobs import JobRun
 from app.models.knowledge import ConditionRegistry, DrugReference
 from app.models.profile import UserProfile
@@ -69,6 +70,7 @@ __all__ = [
     "McpChunk",
     "RagTurnReceipt",
     "JobRun",
+    "TurnFeedback",
     "UserProfile",
     "ConditionRegistry",
     "DrugReference",

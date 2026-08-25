@@ -168,6 +168,12 @@ document_reads = Counter(
     "Document byte fetches, by outcome. 'refused' is the consent gate working.",
 )
 
+feedback_received = Counter(
+    "davi_feedback_total",
+    "Reader verdicts on assistant turns, by rating and reason. The only "
+    "signal here that comes from outside the system's own opinion of itself.",
+)
+
 _ALL = (
     chat_turns,
     chat_latency,
@@ -176,6 +182,7 @@ _ALL = (
     tool_calls,
     llm_tokens,
     document_reads,
+    feedback_received,
 )
 
 

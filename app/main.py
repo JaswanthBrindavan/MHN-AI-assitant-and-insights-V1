@@ -11,6 +11,7 @@ from app.api.v1 import (
     admin,
     chat,
     documents,
+    feedback,
     health,
     insights,
     pedigree,
@@ -37,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(documents.router, prefix=API_V1)
     app.include_router(admin.router, prefix=API_V1)
     app.include_router(profile.router, prefix=API_V1)
+    app.include_router(feedback.router, prefix=API_V1)
 
     # Self-contained test console (dev tool; synthetic accounts only).
     if _UI_INDEX.exists():
