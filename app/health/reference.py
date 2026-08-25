@@ -27,20 +27,48 @@ from app.models.coredata import ThpAgeRange, TraditionalHealthParameter
 logger = logging.getLogger("davi.health")
 
 # metric key → substrings to match against a THP name/alias (lowercased).
-_THP_HINTS: dict[str, tuple[str, ...]] = {
-    "blood_sugar": ("blood sugar", "glucose", "sugar"),
-    "fasting_glucose": ("fasting glucose", "fasting blood sugar", "fasting sugar",
-                        "fasting"),
-    "random_glucose": ("random glucose", "post-meal", "postprandial", "random"),
-    "hba1c": ("hba1c", "glycated"),
-    "heart_rate": ("heart rate", "pulse"),
-    "spo2": ("spo2", "oxygen saturation", "oxygen"),
-    "hemoglobin": ("hemoglobin", "haemoglobin"),
-    "total_cholesterol": ("total cholesterol", "cholesterol"),
-    "ldl": ("ldl",),
-    "hdl": ("hdl",),
-    "bmi": ("bmi", "body mass index"),
+# Metric key -> the EXACT reference-parameter names that mean it.
+#
+# This was a substring match ("ldl" in the name), which is wrong in a
+# catalogue where parameter names contain each other. Against the backend's
+# real 192-row catalogue it produced three silently wrong answers:
+#
+#   ldl        -> "HDL/LDL Ratio"                (range 0.4-999, status DRAFT)
+#                 an LDL of 190 -- statin territory -- graded NORMAL
+#   hdl        -> "CHOL/HDL ratio"               (tops out at 8.4)
+#                 every HDL in mg/dL graded DANGER, routed to urgent care
+#   hemoglobin -> "Glycated Hemoglobin (HbA1c)"  (4-5.7 %)
+#                 anaemia at 8 g/dL graded HIGH, in the wrong unit
+#
+# A word-boundary regex does NOT fix this: "hdl" is already a whole word in
+# "CHOL/HDL ratio", and "ldl" is one in "LDL/HDL ratio" and "VLDL
+# Cholesterol". Only naming the parameter works.
+#
+# Names verified present in the backend catalogue. An unmapped or renamed
+# parameter yields NO match, which falls back to Davi's own constants in
+# app/health/ranges.py -- the pre-catalogue behaviour, and clinically correct.
+# Falling back is always the safe direction here.
+# Keys are the metric keys app/health/ranges.py defines — keep the two in step,
+# or a metric silently loses its backend range.
+_THP_NAMES: dict[str, tuple[str, ...]] = {
+    "blood_sugar": ("Fasting Blood Sugar", "Blood Sugar"),
+    "fasting_glucose": ("Fasting Blood Sugar",),
+    "random_glucose": ("Random Blood Sugar", "Post Prandial Blood Sugar"),
+    "hba1c": ("Glycated Hemoglobin (HbA1c)",),
+    "heart_rate": ("Pulse Rate", "Heart Rate"),
+    "spo2": ("SpO2", "Oxygen Saturation"),
+    "hemoglobin": ("Hemoglobin",),
+    "total_cholesterol": ("Total Cholesterol",),
+    "ldl": ("LDL Cholesterol",),
+    "hdl": ("HDL Cholesterol",),
+    "bmi": ("BMI", "Body Mass Index"),
 }
+
+# Reference data the owning team has not approved must never grade a
+# patient's value. Absent columns (an older database) are treated as approved,
+# because those rows predate the curation workflow.
+_USABLE_STATUSES = frozenset({"approved", None})
+
 _DEFAULT_ADULT_AGE = 40
 
 
@@ -87,24 +115,42 @@ def _classify_bands(r: ThpAgeRange, value: float) -> tuple[str, str]:
 async def _match_thp(
     db: AsyncSession, metric_key: str
 ) -> TraditionalHealthParameter | None:
-    hints = _THP_HINTS.get(metric_key)
-    if not hints:
+    """The reference parameter for this metric, or None.
+
+    EXACT name/alias match, not substring, and ordered so the answer is the
+    same every time. None means "the backend has nothing trustworthy for this"
+    and the caller falls back to Davi's own constants -- which is the safe
+    direction, and was the behaviour before the catalogue was populated.
+    """
+    names = _THP_NAMES.get(metric_key)
+    if not names:
         return None
+    wanted = {n.lower() for n in names}
+
     rows = (
-        await db.execute(select(TraditionalHealthParameter))
-    ).scalars().all()
-    # First-hint priority: a THP whose name/alias contains an earlier hint wins.
-    best: tuple[int, TraditionalHealthParameter] | None = None
-    for thp in rows:
-        hay = " ".join(
-            [thp.name.lower(), *[str(a).lower() for a in (thp.aliases or [])]]
+        await db.execute(
+            # Deterministic: without an ORDER BY the same question could match
+            # different parameters on different days, depending only on how the
+            # planner returned rows.
+            select(TraditionalHealthParameter).order_by(
+                TraditionalHealthParameter.id
+            )
         )
-        for rank, hint in enumerate(hints):
-            if hint in hay:
-                if best is None or rank < best[0]:
-                    best = (rank, thp)
-                break
-    return best[1] if best else None
+    ).scalars().all()
+
+    for preferred in names:
+        for thp in rows:
+            if thp.status not in _USABLE_STATUSES:
+                continue
+            if thp.visible is False:
+                continue
+            candidates = {thp.name.strip().lower()}
+            candidates |= {
+                str(a).strip().lower() for a in (thp.aliases or []) if a
+            }
+            if preferred.lower() in candidates and preferred.lower() in wanted:
+                return thp
+    return None
 
 
 async def evaluate_backend(

@@ -377,6 +377,18 @@ class TraditionalHealthParameter(Base):
     aliases: Mapped[list | None] = mapped_column(
         sa.ARRAY(sa.String).with_variant(sa.JSON(), "sqlite"), nullable=True
     )
+    # Curation state, added by the backend in V14/V18. Mapped because Davi
+    # must not grade a patient's value against reference data the owning team
+    # has not approved: "HDL/LDL Ratio" ships as status='draft'.
+    #
+    # Nullable with a permissive default so a database predating those columns
+    # still behaves — the rows there are the curated originals.
+    status: Mapped[str | None] = mapped_column(
+        sa.String(32), nullable=True, default="approved"
+    )
+    visible: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True, default=True
+    )
 
 
 class ThpAgeRange(Base):

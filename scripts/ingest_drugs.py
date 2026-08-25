@@ -6,6 +6,19 @@ Rows with a blank name are skipped. Truncate-and-reload semantics (the CSV is
 the source of truth), batched inserts for the ~250K rows.
 
 Run:  python -m scripts.ingest_drugs "/path/to/merged_medicines.csv"
+
+DANGER, and the reason for the guard below. mhn-spring's V14 added
+`medicine_master.drug_reference_id` and `prescription_item.drug_reference_id`,
+both `REFERENCES drug_reference(id) ON DELETE SET NULL`, and its V19 populated
+them for the whole ~250K catalogue. The truncate here would therefore NULL
+every one of those links -- silently, at the database level, regardless of what
+the ORM thinks -- and it is not recoverable: reloaded rows get fresh uuids
+(`UUIDPrimaryKey` defaults to uuid4), and V19's relink is guarded by
+`drug_reference_id IS DISTINCT FROM ref.id` on a migration Flyway will never
+run again.
+
+So this refuses to truncate a table something else is pointing at, unless
+somebody says so explicitly.
 """
 
 from __future__ import annotations
@@ -16,7 +29,7 @@ import re
 import sys
 from pathlib import Path
 
-from sqlalchemy import delete, insert
+from sqlalchemy import delete, insert, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.knowledge import DrugReference
@@ -108,8 +121,43 @@ def row_to_record(row: dict) -> dict | None:
     }
 
 
-async def ingest_drug_csv(db: AsyncSession, csv_path: Path) -> dict:
+async def linked_row_count(db: AsyncSession) -> int:
+    """How many rows in OTHER teams' tables point at drug_reference.
+
+    Returns 0 when those tables do not exist, which is every local and test
+    database. This is a production guard, not a local inconvenience.
+    """
+    total = 0
+    for table in ("medicine_master", "prescription_item"):
+        try:
+            async with db.begin_nested():
+                result = await db.execute(
+                    text(
+                        f"SELECT count(*) FROM {table} "
+                        "WHERE drug_reference_id IS NOT NULL"
+                    )
+                )
+                total += int(result.scalar() or 0)
+        except Exception:  # noqa: BLE001 — absent table, or not PostgreSQL
+            continue
+    return total
+
+
+async def ingest_drug_csv(
+    db: AsyncSession, csv_path: Path, *, force: bool = False
+) -> dict:
     stats = {"rows": 0, "inserted": 0, "skipped": 0}
+
+    linked = await linked_row_count(db)
+    if linked and not force:
+        raise RuntimeError(
+            f"{linked:,} rows in medicine_master / prescription_item reference "
+            "drug_reference. Truncating it would NULL every one of those links "
+            "(ON DELETE SET NULL), and reloaded rows get new ids so the links "
+            "cannot be rebuilt -- mhn-spring's V19 relink will not run again. "
+            "Re-run with --force only after agreeing a re-link with that team."
+        )
+
     await db.execute(delete(DrugReference))
 
     batch: list[dict] = []
@@ -133,12 +181,12 @@ async def ingest_drug_csv(db: AsyncSession, csv_path: Path) -> dict:
     return stats
 
 
-async def _main(path: str) -> None:
+async def _main(path: str, force: bool = False) -> None:
     from app.db import get_sessionmaker
 
     sm = get_sessionmaker()
     async with sm() as db:
-        stats = await ingest_drug_csv(db, Path(path))
+        stats = await ingest_drug_csv(db, Path(path), force=force)
         await db.commit()
     print(
         f"Drug DB: {stats['inserted']} medicines ingested "
@@ -147,6 +195,13 @@ async def _main(path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit("usage: python -m scripts.ingest_drugs <merged_medicines.csv>")
-    asyncio.run(_main(sys.argv[1]))
+    args = [a for a in sys.argv[1:] if a != "--force"]
+    if len(args) < 1:
+        sys.exit(
+            "usage: python -m scripts.ingest_drugs <merged_medicines.csv> "
+            "[--force]\n"
+            "  --force  truncate even when other tables reference "
+            "drug_reference.\n"
+            "           Read the module docstring before using it."
+        )
+    asyncio.run(_main(args[0], force="--force" in sys.argv[1:]))
