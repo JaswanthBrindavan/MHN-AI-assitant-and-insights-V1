@@ -1778,16 +1778,26 @@ async def lookup_medicine(
     drug = await find_drug(db, str(args.get("name", "")))
     if drug is None:
         return None
+    substitutes = await find_substitutes(db, drug)
     return {
-        "deterministic_reply": build_drug_reply(drug),
+        "deterministic_reply": build_drug_reply(drug, substitutes),
         "name": drug.name,
         "composition": [c for c in (drug.composition1, drug.composition2) if c],
-        "uses": (drug.uses or [])[:5],
-        "side_effects": (drug.side_effects or [])[:5],
+        "uses": list(drug.used_for or [])[:5],
+        "side_effects": [
+            s for s in (drug.side_effects or "").split(", ") if s
+        ][:5],
         "habit_forming": drug.habit_forming,
         "has_interaction_data": False,
     }
 ```
+
+> **Updated for `medicine_master` (Flyway V19).** This snippet originally read
+> `drug.uses` and sliced `drug.side_effects` as a list. V19 moved the drug path
+> off `drug_reference`: `uses` became `used_for`, and `side_effects` became a
+> `", "`-joined **TEXT** column — so the old list slice silently truncates a
+> word (`"nausea, vomiting"[:5] == "nause"`) and hands it to the model as a
+> fact. Valid Python, invisible to pyright. Do not restore the old form.
 
 - [ ] **Step 6: Add the test fixture**
 
