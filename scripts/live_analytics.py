@@ -40,7 +40,8 @@ from app.chat.orchestrator import handle_chat
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.llm import get_provider
-from app.models.knowledge import ConditionRegistry, DrugReference
+from app.models.coredata import MedicineMaster
+from app.models.knowledge import ConditionRegistry
 from scripts.seed_demo_users import DEEPA, FARAH
 
 # Published per-token rates (USD per token). Haiku 4.5 = $1 / $5 per MTok.
@@ -133,9 +134,13 @@ async def build_sample(db, per_cat: int) -> list[tuple[str, str, str | None]]:
     # Drugs: real names, deterministic slice.
     drugs = (
         await db.execute(
-            select(DrugReference.name)
-            .where(DrugReference.is_discontinued.is_(False))
-            .order_by(DrugReference.name_normalized)
+            select(MedicineMaster.name)
+            .where(
+                MedicineMaster.status == "approved",
+                MedicineMaster.deleted_at.is_(None),
+                MedicineMaster.is_discontinued.is_(False),
+            )
+            .order_by(MedicineMaster.name_normalized)
             .limit(per_cat * 40)
         )
     ).scalars().all()

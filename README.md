@@ -133,7 +133,7 @@ The real `OllamaProvider` can be smoke-tested manually — see
 | `GET` | `/pedigree` | Current slots + conditions (soft-deleted excluded) |
 | `DELETE` | `/pedigree/conditions/{id}` | Soft-delete + recompute |
 | `GET` | `/insights` | Active artifacts only (`held_for_review` excluded) |
-| `POST` | `/chat` | `{message}` → `{response_message, risk_level, recommended_action, provenance, grounding, session_id}`. Drug-information questions ("side effects of dolo 650") get a deterministic reply from `drug_reference` — never the LLM — with the mandatory medication safety note; the red-flag floor always wins over the drug path. |
+| `POST` | `/chat` | `{message}` → `{response_message, risk_level, recommended_action, provenance, grounding, session_id}`. Drug-information questions ("side effects of dolo 650") get a deterministic reply from `medicine_master` — never the LLM — with the mandatory medication safety note; the red-flag floor always wins over the drug path. |
 | `GET` | `/health` | Liveness |
 
 Every endpoint taking a `user_id` resolves it against the token identity and

@@ -1,19 +1,27 @@
 """Deterministic drug lookup + safe drug-information replies.
 
-Backed by the clinically-validated merged medicines database (drug_reference).
-Every reply built here includes the mandatory medication safety line and is
-written to pass the output validator (no diagnosing, no med-causation claims).
+Backed by the core app's medicine catalogue (medicine_master, Flyway V19 —
+which absorbed the drug_reference ingest). Every reply built here includes the
+mandatory medication safety line and is written to pass the output validator
+(no diagnosing, no med-causation claims).
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.replies import MEDICATION_NOTE
-from app.models.knowledge import DrugReference
+from app.models.coredata import MedicineMaster
+
+# Only approved, non-deleted catalogue rows are visible to chat.
+_BASE_FILTERS = (
+    MedicineMaster.status == "approved",
+    MedicineMaster.deleted_at.is_(None),
+)
 
 # How many side effects / uses / substitutes to include in a reply.
 MAX_LIST_ITEMS = 5
@@ -97,16 +105,18 @@ def extract_drug_query_term(message: str) -> str | None:
 
 
 def _normalize(term: str) -> str:
-    return re.sub(r"\s+", " ", term.strip().lower())
+    # Mirrors medicine_master's name_normalized trigger:
+    # lower(regexp_replace(name, '[^a-zA-Z0-9]+', ' ', 'g')), stripped.
+    return re.sub(r"[^a-z0-9]+", " ", term.lower()).strip()
 
 
-async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
+async def find_drug(db: AsyncSession, term: str) -> MedicineMaster | None:
     """Best-effort deterministic match: exact name → name prefix → composition."""
     norm = _normalize(term)
     if len(norm) < 3:
         return None
 
-    def _first_active(rows: list[DrugReference]) -> DrugReference | None:
+    def _first_active(rows: list[MedicineMaster]) -> MedicineMaster | None:
         # Prefer non-discontinued, then shortest name (most canonical), then
         # alphabetical for determinism.
         rows = sorted(
@@ -117,7 +127,9 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     exact = list(
         (
             await db.execute(
-                select(DrugReference).where(DrugReference.name_normalized == norm)
+                select(MedicineMaster).where(
+                    *_BASE_FILTERS, MedicineMaster.name_normalized == norm
+                )
             )
         ).scalars().all()
     )
@@ -129,9 +141,12 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     prefix = list(
         (
             await db.execute(
-                select(DrugReference)
-                .where(DrugReference.name_normalized.like(f"{norm} %"))
-                .order_by(DrugReference.name_normalized, DrugReference.id)
+                select(MedicineMaster)
+                .where(
+                    *_BASE_FILTERS,
+                    MedicineMaster.name_normalized.like(f"{norm} %"),
+                )
+                .order_by(MedicineMaster.name_normalized, MedicineMaster.id)
                 .limit(25)
             )
         ).scalars().all()
@@ -151,9 +166,12 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
         dose_prefix = list(
             (
                 await db.execute(
-                    select(DrugReference)
-                    .where(DrugReference.name_normalized.like(f"{norm}%"))
-                    .order_by(DrugReference.name_normalized, DrugReference.id)
+                    select(MedicineMaster)
+                    .where(
+                        *_BASE_FILTERS,
+                        MedicineMaster.name_normalized.like(f"{norm}%"),
+                    )
+                    .order_by(MedicineMaster.name_normalized, MedicineMaster.id)
                     .limit(25)
                 )
             ).scalars().all()
@@ -164,9 +182,12 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     candidates = list(
         (
             await db.execute(
-                select(DrugReference)
-                .where(DrugReference.composition_normalized.like(f"%{norm}%"))
-                .order_by(DrugReference.name_normalized, DrugReference.id)
+                select(MedicineMaster)
+                .where(
+                    *_BASE_FILTERS,
+                    MedicineMaster.composition_normalized.like(f"%{norm}%"),
+                )
+                .order_by(MedicineMaster.name_normalized, MedicineMaster.id)
                 .limit(50)
             )
         ).scalars().all()
@@ -194,22 +215,47 @@ async def find_drug(db: AsyncSession, term: str) -> DrugReference | None:
     return None
 
 
-def build_drug_reply(drug: DrugReference) -> str:
-    """A deterministic, validator-safe drug-information reply."""
+async def find_substitutes(db: AsyncSession, drug: MedicineMaster) -> list[str]:
+    """Up to 5 same-composition alternatives (deterministic order)."""
+    if not drug.composition_normalized:
+        return []
+    rows = (
+        await db.execute(
+            select(MedicineMaster.name)
+            .where(
+                *_BASE_FILTERS,
+                MedicineMaster.composition_normalized
+                == drug.composition_normalized,
+                MedicineMaster.id != drug.id,
+                MedicineMaster.is_discontinued.is_(False),
+            )
+            .order_by(func.length(MedicineMaster.name), MedicineMaster.name)
+            .limit(MAX_LIST_ITEMS)
+        )
+    ).scalars().all()
+    return list(rows)
+
+
+def build_drug_reply(
+    drug: MedicineMaster, substitutes: Sequence[str | None] | None = None
+) -> str:
+    """A deterministic, validator-safe drug-information reply (PURE — the
+    caller fetches ``substitutes`` via :func:`find_substitutes`)."""
     parts: list[str] = []
-    # No manufacturer: it adds nothing a patient can act on, and the reply
-    # should read like drug information, not a product listing.
     comp = ", ".join(c for c in (drug.composition1, drug.composition2) if c)
     intro = f"{drug.name}"
     if comp:
         intro += f" contains {comp}"
     parts.append(intro + ".")
 
-    uses = [u for u in (drug.uses or []) if u][:MAX_LIST_ITEMS]
+    uses = [u for u in (drug.used_for or []) if u][:MAX_LIST_ITEMS]
     if uses:
         parts.append("It is generally used for: " + "; ".join(uses) + ".")
 
-    effects = [s for s in (drug.side_effects or []) if s][:MAX_LIST_ITEMS]
+    # side_effects is a ", "-joined TEXT column in medicine_master.
+    effects = [
+        s for s in (drug.side_effects or "").split(", ") if s
+    ][:MAX_LIST_ITEMS]
     if effects:
         parts.append(
             "Commonly reported side effects include: "
@@ -217,15 +263,13 @@ def build_drug_reply(drug: DrugReference) -> str:
             + ". Not everyone experiences these, and this list is not complete."
         )
 
-    if drug.habit_forming:
-        hf = drug.habit_forming.strip().lower()
-        if hf == "yes":
-            parts.append(
-                "This medicine is listed as habit-forming, so it is especially "
-                "important to use it exactly as prescribed."
-            )
-        elif hf == "no":
-            parts.append("This medicine is not listed as habit-forming.")
+    if drug.habit_forming is True:
+        parts.append(
+            "This medicine is listed as habit-forming, so it is especially "
+            "important to use it exactly as prescribed."
+        )
+    elif drug.habit_forming is False:
+        parts.append("This medicine is not listed as habit-forming.")
 
     if drug.is_discontinued:
         parts.append(
@@ -233,7 +277,7 @@ def build_drug_reply(drug: DrugReference) -> str:
             "advise on current availability."
         )
 
-    subs = [s for s in (drug.substitutes or []) if s][:MAX_LIST_ITEMS]
+    subs = [s for s in (substitutes or []) if s][:MAX_LIST_ITEMS]
     if subs:
         parts.append(
             "Listed alternatives with similar composition include: "
@@ -252,7 +296,7 @@ def build_drug_reply(drug: DrugReference) -> str:
 # --------------------------------------------------------------------------- #
 # Interaction / combination questions ("can I take X and Y together")
 # --------------------------------------------------------------------------- #
-# The drug_reference dataset carries no interaction data, so these questions
+# The medicine_master catalogue carries no interaction data, so these questions
 # must never be answered substantively — neither by the LLM (ungrounded) nor
 # with the generic safe fallback (a non-answer). Instead they get a dedicated
 # deterministic reply that names both items and routes to a pharmacist.
