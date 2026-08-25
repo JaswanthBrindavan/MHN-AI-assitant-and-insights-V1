@@ -15,6 +15,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.erasure import is_pending
 from app.coredata.service import (
     BODY_METRIC_ORDER,
     MANUAL_METRIC_ORDER,
@@ -61,10 +62,29 @@ async def build_patient_context(
     to scope retrieval.
 
     Memoised per session — see ``_context_memo``.
+
+    **Returns nothing while an erasure is pending.** `pedigree_conditions` and
+    `insight_artifacts` are two of the eleven tables the erasure destroys, and
+    the reader has been told — in the API response, not just in a docstring —
+    "Davi has stopped using your information already". Gating only
+    `memory_assembly` left this path open, so the turn after a "forget me"
+    still carried the reader's family history, the most sensitive category
+    here, into the model's prompt.
+
+    The suppression is memoised like any other result: within one session
+    (`id(db)`) the pending state cannot change, because a forget-me request and
+    a chat turn are separate HTTP requests with separate sessions. Belt and
+    braces, `request_erasure` clears this memo, so even a caller that did both
+    on one session cannot serve a stale pre-request value.
     """
-    cached = _context_memo.get(_memo_key(db, user_id))
+    key = _memo_key(db, user_id)
+    cached = _context_memo.get(key)
     if cached is not None:
         return cached[0], set(cached[1])
+
+    if await is_pending(db, user_id):
+        _context_memo[key] = ("", set())
+        return "", set()
 
     conditions = (
         await db.execute(

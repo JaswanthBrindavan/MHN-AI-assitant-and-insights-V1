@@ -348,7 +348,17 @@ async def refresh(
     Identical inputs are a no-op beyond a timestamp touch: `source_hash` is the
     same, so the stored text does not change and the reader's cached prefix
     survives.
+
+    Never rebuilds while an erasure is pending. The document is itself one of
+    the eleven tables the erasure destroys, so the nightly sweep would
+    otherwise re-derive a fresh copy of the reader's data every night of the
+    grace window — recreating what they asked to have deleted.
     """
+    from app.chat.erasure import is_pending
+
+    if await is_pending(db, user_id):
+        return None
+
     built = await build(db, user_id)
     try:
         row = await get(db, user_id)

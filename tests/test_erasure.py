@@ -171,6 +171,73 @@ async def test_a_pending_erasure_stops_the_memory_reaching_the_prompt(
     )
 
 
+@pytest.mark.parametrize("engine_name", ["legacy", "agentic"])
+async def test_family_history_stops_reaching_the_prompt(
+    db_session, monkeypatch, engine_name
+):
+    """The gap the allergy test above could not see.
+
+    `is_pending` gated `memory_assembly` only. `build_patient_context` is a
+    SEPARATE read path over `pedigree_conditions` and `insight_artifacts` — two
+    of the eleven tables the erasure destroys — and it runs BEFORE that gate on
+    both engines. So the turn after a "forget me" still carried the reader's
+    family history into the prompt.
+
+    The fixture above already seeded that pedigree; nothing asserted on it,
+    which is exactly how this survived. The reader is told "Davi has stopped
+    using your information already" in the API response itself, so this is a
+    promise made to them, not only to a reader of the PR.
+    """
+    monkeypatch.setattr(get_settings(), "chat_engine", engine_name)
+    await _seed_everything(db_session)
+
+    captured: list[str] = []
+
+    class Spy(FakeProvider):
+        async def generate(self, *, system, user):
+            captured.append(join_system(system))
+            return "General information [GK]."
+
+        async def generate_turn(self, *, system, messages, tools=()):
+            from app.llm.tools import LLMTurn
+
+            captured.append(join_system(system))
+            return LLMTurn(text="General information [GK].")
+
+    await handle_chat(db_session, USER, "why am I so tired?", Spy(), uuid.uuid4())
+    assert captured, "the provider was not called"
+    assert "type 2 diabetes" in captured[0], (
+        "fixture problem: the family history never reached the prompt at all"
+    )
+
+    await erasure.request_erasure(db_session, USER, grace_days=30)
+    await db_session.flush()
+
+    captured.clear()
+    await handle_chat(db_session, USER, "why am I so tired?", Spy(), uuid.uuid4())
+    assert captured, "the provider was not called"
+    assert "type 2 diabetes" not in captured[0], (
+        "family history still reaches the prompt after a forget-me request"
+    )
+
+
+async def test_the_sweep_does_not_rebuild_a_document_for_a_pending_erasure(db_session):
+    """The document is one of the eleven erasable tables.
+
+    Rebuilding it nightly through the grace window re-derives a fresh copy of
+    exactly what the reader asked to have deleted.
+    """
+    from app.memory import document as memory_document
+
+    await _seed_everything(db_session, USER)
+    assert await memory_document.refresh(db_session, USER) is not None
+
+    await erasure.request_erasure(db_session, USER, grace_days=30)
+    await db_session.flush()
+
+    assert await memory_document.refresh(db_session, USER) is None
+
+
 async def test_a_pending_erasure_stops_new_memory_being_written(db_session):
     """Nothing new is learned about someone who asked to be forgotten."""
     await erasure.request_erasure(db_session, USER, grace_days=30)

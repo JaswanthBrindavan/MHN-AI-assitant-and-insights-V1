@@ -93,6 +93,13 @@ async def request_erasure(
     )
     db.add(request)
     await db.flush()
+
+    # Any [P] block cached earlier in THIS session was built from data the
+    # reader has now asked to stop being used. Local import: context.py imports
+    # is_pending from here, so a module-level import would be a cycle.
+    from app.chat.context import clear_patient_context_memo
+
+    clear_patient_context_memo(db)
     # No user id, no free text: this log line is operational, and the erasure
     # path is the last place to start writing identifiers into logs.
     logger.info("erasure scheduled in %d days", grace_days)
