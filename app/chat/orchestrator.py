@@ -67,6 +67,7 @@ from app.drugs.service import (
     extract_drug_query_term,
     extract_interaction_query,
     find_drug,
+    find_substitutes,
 )
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
 from app.i18n.language import (
@@ -444,7 +445,7 @@ async def _dispatch(
                         provenance={
                             "path": "drug_interaction_query",
                             "drugs": names,
-                            "source": "drug_reference",
+                            "source": "medicine_master",
                         },
                         language=lang,
                         trace=trace,
@@ -456,16 +457,19 @@ async def _dispatch(
         try:
             term = extract_drug_query_term(message)
             drug = None
+            substitutes: list[str] = []
             if term:
                 # SAVEPOINT: a lookup failure must leave the session usable.
                 async with db.begin_nested():
                     drug = await find_drug(db, term)
+                    if drug is not None:
+                        substitutes = await find_substitutes(db, drug)
             if term:
                 if drug is not None:
                     t("Drug lookup",
                       f"'{term}' matched {drug.name} in the validated medicines "
                       "database — deterministic reply (no LLM)")
-                    reply = build_drug_reply(drug)
+                    reply = build_drug_reply(drug, substitutes)
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
@@ -477,7 +481,7 @@ async def _dispatch(
                         provenance={
                             "path": "drug_query",
                             "drug": drug.name,
-                            "source": "drug_reference",
+                            "source": "medicine_master",
                         },
                         language=lang,
                         trace=trace,
