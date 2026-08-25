@@ -1,6 +1,6 @@
 # Davi: safety fixes, mhn-spring V19 integration, and the per-user memory document
 
-60 commits. **The schema is already applied** — adopted into mhn-spring as
+62 commits. **The schema is already applied** — adopted into mhn-spring as
 `V21__davi_chat_platform.sql`, byte-identical to what this branch produced.
 Nothing else here can be validated end-to-end without it, so that is the
 unblocking step and it is done.

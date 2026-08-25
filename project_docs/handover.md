@@ -6,7 +6,7 @@
 > several defects in this project came from acting on a plausible-but-wrong
 > assumption about the repo, and these documents exist to prevent exactly that.
 
-**Branch:** `praveen-mhn`, **59 commits ahead of `main`**, tree clean.
+**Branch:** `praveen-mhn`, **62 commits ahead of `main`**, tree clean.
 **Verified:** 1,863 passed · clean under shuffled seeds · ruff clean ·
 pyright 0 · `run_evals` **17/17 on both engines** · coverage ~91%.
 

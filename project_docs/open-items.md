@@ -1,6 +1,10 @@
 # Open items — decisions, blocked work, and unfixed findings
 
-> **Updated — this work is on branch `praveen-mhn`, awaiting a PR.**
+> **Updated 2026-08-25 — branch `praveen-mhn`, PR open.**
+>
+> **The schema is live.** `V21__davi_chat_platform.sql` is merged into
+> mhn-spring's main and its tables are present in the staging database. Nothing
+> here is waiting on a migration any more.
 >
 > **Closed:** A1 (Sonnet 5), A5 (memory document BUILT), A6 (emergency
 > recording), A8 (job_runs actor), A9/D1 (monotonic clock), C1 (complete
@@ -195,6 +199,54 @@ Fixing it properly means a separate short-lived session — the same shape as C7
 
 ---
 
+## D. What is genuinely left
+
+Nothing here is blocked and nothing here is a defect. This is the forward work,
+in the order I would take it.
+
+### D1 — The second cache breakpoint
+**Ready, not wired.** The memory document's `prompt_block` is byte-stable —
+`test_rendering_is_deterministic` and `test_an_unchanged_record_does_not_rewrite_the_block`
+are what a breakpoint rests on, and both pass. Wiring it is a small change.
+
+**Do not claim the saving — measure it.** `python -m scripts.cache_probe --model
+claude-sonnet-5` against a real key. A breakpoint below the model's minimum
+caches nothing **and returns no error**, which is exactly how the Haiku
+constants were wrong for so long; the same failure mode is available here.
+
+### D2 — Rebuild-on-write triggers
+The nightly sweep rebuilds the document and `FRESHNESS = 1 hour` bounds the
+staleness, so nothing is ever *wrong* — it is just late. A document uploaded at
+14:02 should rebuild at 14:02 rather than waiting for the ceiling to expire.
+
+The write points are already known: pedigree writes, profile updates, tracker
+logs, and the mhn-ai processing callback. The work is calling `refresh` from
+them without putting a rebuild on the request's critical path.
+
+### D3 — The remaining reads, as tools
+From [`whole-app-coverage.md`](./whole-app-coverage.md): **mood**,
+**sleep/wearables**, **lifestyle aggregates**, and `report_parameter_value`.
+
+These become **tools, not memory-document fields** — deliberately. They are
+either fast-moving (wearables change hourly, and a document rebuilt hourly
+would carry stale step counts as if they were current) or rarely asked for
+(`report_parameter_value`), and the document is read on *every* turn. A field
+costs tokens on all turns; a tool costs them only on the turns that need it.
+
+### D4 — Two questions for the mhn-spring team
+Neither blocks anything; both change what Davi is allowed to say.
+
+1. **What does the medication `private` tickbox mean?** Davi currently treats
+   it as "do not surface", which is the safe reading. If it means "hide from
+   family" rather than "hide from the assistant", Davi is withholding the
+   reader's own medication from the reader — including from the allergy check.
+2. **Can the lifestyle rollups drift?** Davi reads the aggregates rather than
+   recomputing from the logs, on the principle that two services must not show
+   one phone two different numbers. That is only right if the rollups are
+   authoritative and cannot lag their source rows.
+
+---
+
 ## The order I would actually do this in
 
 1. **A1 — pick the model.** Everything about caching is downstream of it.
@@ -204,7 +256,8 @@ Fixing it properly means a separate short-lived session — the same shape as C7
    (C5, C6). ~60 lines, and the connection fix already landed.
 4. **C2** at ~100K users. **C3 + C4** before 1M.
 5. **A2's handler audit**, then Task 12 if staging is clean.
-6. **A5** — the memory document, once A1 makes its token budget decidable.
+6. ~~**A5** — the memory document~~ **done.** Then **D1** (measure the cache
+   breakpoint against a real key), **D2**, **D3**.
 
 C7 and C9 are the same fix (a short-lived session for out-of-band writes) and
 are worth doing together, whenever a connection-pressure symptom appears.
@@ -224,11 +277,13 @@ are worth doing together, whenever a connection-pressure symptom appears.
 | C2 | The aggregate is scoped to the caller before it groups. |
 | C3 | Two windows: messages 180 days, receipts 400. Keep the evidence, drop the content. |
 
-### Still to build for A5
+### A5 is built
 
-The per-user memory document itself. `per-user-memory.md` stages it; stages 1
-and 2 (history into `messages`, second cache breakpoint) are worth doing first
-and are independent of the document.
+The per-user memory document exists (`app/memory/document.py`,
+`app/models/memory_document.py`), measured at 91 tokens against a 900 ceiling
+that a test enforces. What `per-user-memory.md` staged as steps 1 and 2 is what
+remains: history into `messages`, and the second cache breakpoint — now **D1**
+above.
 
 ### One decision this work surfaced
 
