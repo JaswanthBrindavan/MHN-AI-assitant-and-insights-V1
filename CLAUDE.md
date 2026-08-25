@@ -198,10 +198,18 @@ Original build phases 0–7 complete, plus `project_docs/implementation-plan.md`
 phases 0–4 (Tasks 1–11, 13–28). **Task 12 — retiring the legacy regex chain —
 is deliberately blocked**; see `project_docs/handover.md`.
 
-Suite green on aiosqlite (1718 tests, clean under three random seeds); the
-`pg`-marked reversibility + coexistence checks pass on a local Postgres 16 with
-pgvector. `scripts/run_evals` is 17/17 on BOTH engines. ruff + pyright clean.
-All clinical content is DRAFT.
+Suite green on aiosqlite (1,863 tests, clean under shuffled seeds).
+`scripts/run_evals` is 17/17 on BOTH engines. ruff + pyright clean. All
+clinical content is DRAFT.
+
+**Branch `praveen-mhn` is 59 commits ahead of main and awaiting a PR.** Its
+first requirement is applying `db/flyway/V20__davi_chat_platform.sql` into
+mhn-spring — one idempotent file with every outstanding Davi schema change.
+Read `project_docs/handover.md` before continuing.
+
+The `pg`-marked checks (`tests/test_migrations.py`,
+`tests/test_coexistence.py`) need a real PostgreSQL and have not been run on
+this machine.
 
 Docker is not available on the original dev machine, so `pg` tests were run
 against a Homebrew Postgres 16 with a source-built pgvector — see the

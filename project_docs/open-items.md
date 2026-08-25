@@ -1,14 +1,19 @@
 # Open items — decisions, blocked work, and unfixed findings
 
-> **Updated after your decisions.** Closed: A1 (Sonnet 5), A6 (emergency
-> recording), A8 (job_runs actor), A9/D1 (monotonic clock ratified), C1
-> (complete deferred erasure), C2 (session-list scan), C3 (retention).
-> Costs are tracked in [`model-cost.md`](./model-cost.md). All outstanding
-> schema ships as ONE file: `db/flyway/V10__davi_erasure_and_actor.sql`.
+> **Updated — this work is on branch `praveen-mhn`, awaiting a PR.**
 >
-> **Still open:** A2 (Task 12 — you are running staging), A3, A4, A5 (agreed,
-> not yet built), A7, C4–C10, and everything in section B.
-
+> **Closed:** A1 (Sonnet 5), A5 (memory document BUILT), A6 (emergency
+> recording), A8 (job_runs actor), A9/D1 (monotonic clock), C1 (complete
+> deferred erasure), C2 (session-list scan), C3 (retention), C6 (memo leak —
+> superseded by the document), plus period data and adherence.
+>
+> **Found and fixed since:** mhn-spring's V18 silently made three
+> patient-facing answers wrong; a drug reply ignored the reader's allergies;
+> Davi's V7–V10 collided with mhn-spring's Flyway chain.
+>
+> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, C7–C10, and
+> everything in section B. See [`handover.md`](./handover.md) for the ordered
+> pick-up list.
 
 Everything outstanding, in one place. Three sections: **what needs your
 decision**, **what is blocked on something I do not have**, and **findings that
