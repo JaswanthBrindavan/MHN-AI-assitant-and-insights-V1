@@ -45,8 +45,9 @@ merely unread there: they were unreachable.
 > effects of amoxicillin"* — a penicillin-class drug — and gets a clean
 > monograph. On `agentic` the same question includes the allergy.
 
-Fixed with one parameter. `medical_condition` is now mapped, honouring
-`private`.
+Fixed with one parameter — now `build_drug_reply(drug, substitutes,
+allergy_warning=...)` after the `medicine_master` merge below. The warning goes
+first. `medical_condition` is now mapped, honouring `private`.
 
 ### 3. A commit inside a savepoint would have written ~9,500 synthetic chats
 
@@ -78,6 +79,30 @@ collision before it shipped.
 remains here is a staging copy, and the parity guard is what stops it drifting
 from the models. Both it and the coexistence check skip cleanly when the
 directory is absent rather than failing a fresh clone.
+
+---
+
+## Merged `main` — the `medicine_master` drug path (#21)
+
+#21 rerouted the drug path from `drug_reference` to the Flyway-owned
+`medicine_master` (V19) — the move `spring-integration-v19.md` recommended. It
+lands on top of this branch's drug-path safety work; both survive. Two conflict
+resolutions worth a reviewer's eye:
+
+**Their step-5a interaction block was dropped, deliberately.** This branch moved
+that handler into the shared prologue precisely because sitting at 5a made it
+legacy-only — the defect in safety fix #3's neighbourhood. Re-adding it would
+restore it. Their provenance change is carried into the prologue copy instead.
+`interaction_never_guesses` passing on the **agentic** engine is what proves
+nothing was lost. Their version also gates the refusal on `matched_any` where
+the prologue version does not — that is open item **A3**, still yours to review.
+
+**The agentic engine's `lookup_medicine` tool auto-merged broken** — no
+conflict, because that file only exists on this branch, so #21 never saw it.
+`drug.uses` no longer exists (pyright caught it), and `side_effects` became
+`", "`-joined TEXT, so the old list slice silently truncated a **word**:
+`"nausea, vomiting"[:5] == "nause"`, fed to the model as a fact. Valid Python.
+Fixed and covered.
 
 ---
 
