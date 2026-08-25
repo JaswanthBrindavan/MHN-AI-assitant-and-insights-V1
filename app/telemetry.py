@@ -168,6 +168,12 @@ document_reads = Counter(
     "Document byte fetches, by outcome. 'refused' is the consent gate working.",
 )
 
+review_actions = Counter(
+    "davi_review_actions_total",
+    "Clinician review-queue actions, by action. Cross-user access to health "
+    "information -- the one counter here that is about oversight, not health.",
+)
+
 feedback_received = Counter(
     "davi_feedback_total",
     "Reader verdicts on assistant turns, by rating and reason. The only "
@@ -183,6 +189,7 @@ _ALL = (
     llm_tokens,
     document_reads,
     feedback_received,
+    review_actions,
 )
 
 

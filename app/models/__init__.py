@@ -49,6 +49,7 @@ from app.models.feedback import TurnFeedback
 from app.models.jobs import JobRun
 from app.models.knowledge import ConditionRegistry, DrugReference
 from app.models.profile import UserProfile
+from app.models.review import ClinicianReviewer, InsightReviewAudit
 from app.models.rules import InsightArtifact, InsightTemplate, RiskRule
 
 __all__ = [
@@ -69,6 +70,8 @@ __all__ = [
     "ConversationSummary",
     "McpChunk",
     "RagTurnReceipt",
+    "ClinicianReviewer",
+    "InsightReviewAudit",
     "JobRun",
     "TurnFeedback",
     "UserProfile",

@@ -29,6 +29,8 @@ FLYWAY_DIR = pathlib.Path(__file__).resolve().parent.parent / "db" / "flyway"
 FLYWAY_TABLES = {
     "user_profiles": "V7__davi_user_profile.sql",
     "turn_feedback": "V8__davi_feedback.sql",
+    "clinician_reviewers": "V9__davi_clinician_review.sql",
+    "insight_review_audit": "V9__davi_clinician_review.sql",
 }
 
 

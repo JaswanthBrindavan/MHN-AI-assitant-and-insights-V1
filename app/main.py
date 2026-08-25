@@ -16,6 +16,7 @@ from app.api.v1 import (
     insights,
     pedigree,
     profile,
+    review,
 )
 
 API_V1 = "/api/v1"
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(admin.router, prefix=API_V1)
     app.include_router(profile.router, prefix=API_V1)
     app.include_router(feedback.router, prefix=API_V1)
+    app.include_router(review.router, prefix=API_V1)
 
     # Self-contained test console (dev tool; synthetic accounts only).
     if _UI_INDEX.exists():
