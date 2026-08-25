@@ -204,8 +204,15 @@ coverage ~91%
 Every safety fix is mutation-checked — reverting it fails its tests.
 
 **Not verified here:** anything needing a live API key (cache hit rate,
-provider bake-off, real quality numbers) or a PostgreSQL (`pg`-marked
-migration and coexistence tests). The CI Postgres job is where those run.
+provider bake-off, real quality numbers) or a PostgreSQL (`pg`-marked tests).
+
+**And one of those does not run in CI either.** With `db/` gitignored, a fresh
+clone collects 7 `pg` tests and `test_coexistence.py` is not among them — it
+needs `db/existing_schema.sql`, which is generated from mhn-spring's chain and
+no longer committed. `test_migrations.py` and the hybrid-retrieval test still
+run. Since coexistence is the check that would have caught V18, it is worth
+deciding deliberately rather than discovering later: open item **C12** has the
+three options.
 
 ---
 
