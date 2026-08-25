@@ -76,6 +76,15 @@ addopts = "-m 'not pg'"
 [tool.coverage.run]
 source = ["app"]
 omit = ["app/alembic/*"]
+# SQLAlchemy async runs each awaited DB call inside a GREENLET, and coverage
+# does not follow a greenlet switch with the default thread tracer. Every
+# statement after the first `await db.execute(...)` in a request handler was
+# therefore reported as unexecuted -- code that demonstrably runs, since a
+# raise placed there fails the tests. Without this line the gate silently
+# under-counts every async DB-touching module in the repo: the feedback and
+# review endpoints measured 54% and 69% while genuinely being at 98%.
+# It costs roughly 2x on a coverage run; ordinary test runs are unaffected.
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 # Coverage gate — enforced whenever coverage runs, e.g.:
