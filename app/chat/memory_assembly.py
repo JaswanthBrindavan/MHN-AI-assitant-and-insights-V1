@@ -42,6 +42,7 @@ from app.chat.long_term import recall, record_topics
 from app.chat.profile import get_profile
 from app.chat.profile import render_for_prompt as render_profile
 from app.knowledge.registry import load_condition_index
+from app.memory import document as memory_document
 from app.telemetry import record_fail_open
 
 logger = logging.getLogger("davi.chat")
@@ -59,6 +60,9 @@ class UserMemory:
     episode_text: str = ""
     recall_text: str = ""
     episodes: list = field(default_factory=list)
+    # True when this came from the stored document rather than a live
+    # assembly. Recorded so the hit rate is observable rather than assumed.
+    from_document: bool = False
 
     def blocks(self) -> list[str]:
         """The non-empty blocks, in the order they should appear."""
@@ -82,6 +86,20 @@ async def assemble(db: AsyncSession, user_id: uuid.UUID) -> UserMemory:
     # reader with everything it knows about them.
     if await is_pending(db, user_id):
         return UserMemory()
+
+    # The assembled document, when there is a fresh one. One primary-key read
+    # instead of the twenty-odd this function otherwise issues.
+    #
+    # Falling back is ALWAYS safe: the live assembly below is what ran before
+    # the document existed, and it is correct — just slower. So a missing,
+    # stale or unreadable document costs latency, never an answer.
+    try:
+        row = await memory_document.get(db, user_id)
+        if memory_document.is_fresh(row) and row is not None and row.prompt_block:
+            return UserMemory(profile_text=row.prompt_block, from_document=True)
+    except Exception:  # noqa: BLE001 — an optimisation must never break a turn
+        logger.warning("memory document read failed; assembling live", exc_info=True)
+        record_fail_open("memory_document")
 
     profile_text = ""
     try:

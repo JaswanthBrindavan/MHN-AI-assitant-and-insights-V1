@@ -42,6 +42,7 @@
 --   5. erasure_requests     — deferred, cancellable "forget me"
 --   6. job_runs.actor_user_id — WHO caused a job, not just what
 --   7. Retention indexes    — make the time-based purges cheap
+--   8. user_memory_document — the assembled memory the assistant carries
 -- ============================================================================
 
 
@@ -291,3 +292,50 @@ CREATE INDEX IF NOT EXISTS ix_conversation_messages_created_at
 
 CREATE INDEX IF NOT EXISTS ix_rag_turn_receipts_created_at
     ON public.rag_turn_receipts (created_at);
+
+
+-- ============================================================================
+-- 8. user_memory_document
+-- ============================================================================
+-- One row per user: everything the assistant knows about that reader,
+-- assembled once and read with a single primary-key lookup instead of the
+-- twenty-odd queries that otherwise run on every chat turn.
+--
+-- DERIVED AND REBUILDABLE. Every source of truth stays where it is; losing
+-- this table costs a rebuild, never data. It holds only the reader's OWN data
+-- — family records are read live on every turn, because family permission is
+-- checked live and a document that had absorbed a relative's result would
+-- survive the revocation that should have removed it.
+--
+-- `prompt_block` is rendered at WRITE time and is byte-stable between
+-- rebuilds. That is not tidiness: it is what allows the block to sit behind a
+-- prompt-cache breakpoint. Text that varied between identical rebuilds would
+-- break the cache for that reader on every turn.
+--
+-- `source_hash` covers everything the document was built from, so identical
+-- inputs produce no write and the stored text — and therefore the reader's
+-- cached prefix — survives untouched.
+--
+-- `token_estimate` is recorded because every token here is charged on every
+-- turn, outside the cache, forever. It is the number that governs the bill.
+
+CREATE TABLE IF NOT EXISTS public.user_memory_document (
+    id             uuid PRIMARY KEY,
+    user_id        uuid NOT NULL,
+    document       jsonb NOT NULL,
+    prompt_block   text NOT NULL,
+    source_hash    varchar(64) NOT NULL,
+    built_at       timestamptz NOT NULL,
+    schema_version smallint NOT NULL DEFAULT 1,
+    token_estimate integer NOT NULL DEFAULT 0
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_memory_document
+    ON public.user_memory_document (user_id);
+
+CREATE INDEX IF NOT EXISTS ix_user_memory_document_user_id
+    ON public.user_memory_document (user_id);
+
+-- The nightly sweep reads oldest-first to find what needs rebuilding.
+CREATE INDEX IF NOT EXISTS ix_user_memory_document_built_at
+    ON public.user_memory_document (built_at);

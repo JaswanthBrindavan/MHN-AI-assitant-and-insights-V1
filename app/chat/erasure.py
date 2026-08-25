@@ -38,6 +38,7 @@ from app.models.common import utcnow
 from app.models.core import PedigreeCondition, PedigreeMember
 from app.models.erasure import CANCELLED, COMPLETED, PENDING, ErasureRequest
 from app.models.feedback import TurnFeedback
+from app.models.memory_document import UserMemoryDocument
 from app.models.profile import UserProfile
 from app.models.review import ClinicianReviewer
 from app.models.rules import InsightArtifact
@@ -58,6 +59,10 @@ _ERASE_IN_ORDER = (
     ("rag_turn_receipts", RagTurnReceipt),
     ("insight_artifacts", InsightArtifact),
     ("conversation_sessions", ConversationSession),
+    # Derived, but it is a copy of the reader's data and must go with the
+    # rest. Deleting it is also what stops a stale document being served
+    # after the sources behind it are gone.
+    ("user_memory_document", UserMemoryDocument),
 )
 
 

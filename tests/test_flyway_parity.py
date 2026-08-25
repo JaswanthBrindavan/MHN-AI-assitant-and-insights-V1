@@ -38,6 +38,7 @@ FLYWAY_TABLES = {
     "clinician_reviewers": "V20__davi_chat_platform.sql",
     "insight_review_audit": "V20__davi_chat_platform.sql",
     "erasure_requests": "V20__davi_chat_platform.sql",
+    "user_memory_document": "V20__davi_chat_platform.sql",
     # Created in V6, gains actor_user_id in V20 — the case _added_columns
     # exists for.
     "job_runs": "V6__davi_ai_tables.sql",

@@ -28,6 +28,7 @@ from app.chat.retention import purge_expired
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.insights.engine import recompute_insights
+from app.memory import document as memory_document
 from app.models.common import utcnow
 from app.models.core import PedigreeCondition
 from app.models.jobs import JobRun
@@ -87,6 +88,18 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
         # and batched; holding them open with everything else would lock a
         # database two other services share.
         settings = get_settings()
+
+        # Rebuild the memory document for everyone the recompute touched.
+        # Rebuilding on the events that change it is the design; this is the
+        # backstop for anything that changed without one, and it is what keeps
+        # a document from sitting stale for a reader who has not chatted.
+        rebuilt = 0
+        for uid in user_ids:
+            if await memory_document.refresh(db, uid) is not None:
+                rebuilt += 1
+        await db.commit()
+        result["memory_documents_rebuilt"] = rebuilt
+
         result.update(await execute_due(db))
         result.update(
             await purge_expired(
