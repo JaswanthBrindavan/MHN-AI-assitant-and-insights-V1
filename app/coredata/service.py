@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy import func, select
@@ -32,6 +32,9 @@ from app.models.coredata import (
     ManualTracking,
     MedicalCondition,
     MedicineTracking,
+    PeriodSettings,
+    PeriodStatus,
+    PeriodTracking,
     Prescription,
     Relation,
     Report,
@@ -997,3 +1000,184 @@ def allergy_warning(allergies: list[MedicalCondition]) -> str:
         "medicine is safe for you, especially if it is related to what you "
         "react to."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Cycle tracking — OWN DATA ONLY, never a family member's
+# --------------------------------------------------------------------------- #
+# mhn-spring made this class of data default-private and argued why in its own
+# DDL: the family model is default-ALLOW, and shipping cycle data on it would
+# hand every accepted connection visibility of contraception and pregnancy
+# status nobody opted into. `resource_type_enum` was deliberately not extended
+# with a cycle value, so it is not a shareable resource at all.
+#
+# Davi therefore never reads this for anyone but the reader themselves, and
+# there is no viewer_id parameter here to make that mistake possible.
+
+
+@dataclass(frozen=True)
+class CycleSnapshot:
+    """What Davi may say about a reader's cycle, already gated."""
+
+    tracking_enabled: bool = False
+    stage: str | None = None
+    pregnancy: str | None = None
+    breastfeeding: bool = False
+    diagnosed_pcos: bool = False
+    cycles_countable: bool | None = None
+    predictions_suppressed: bool | None = None
+    last_period_start: date | None = None
+    average_cycle_length: int | None = None
+    recent_cycles: int = 0
+    # Set only when the reader turned the fertile-window display ON. Davi must
+    # not state one otherwise -- it is an estimate, not contraception, and the
+    # owning team deliberately defaults it off.
+    may_show_fertile_window: bool = False
+
+    @property
+    def has_anything(self) -> bool:
+        return self.tracking_enabled and (
+            self.last_period_start is not None or self.stage is not None
+        )
+
+
+async def cycle_snapshot(db: AsyncSession, user_id: uuid.UUID) -> CycleSnapshot:
+    """The reader's own cycle picture, or an empty one. Never raises.
+
+    Returns empty when tracking is disabled: an explicit "off" is an answer,
+    and reading past it would surface data the reader switched off.
+    """
+    try:
+        settings = (
+            await db.execute(
+                select(PeriodSettings).where(PeriodSettings.user_id == user_id)
+            )
+        ).scalars().first()
+    except Exception:  # noqa: BLE001
+        logger.warning("cycle settings read failed", exc_info=True)
+        return CycleSnapshot()
+
+    # No row means the reader has never opened cycle tracking. Absent is off.
+    if settings is None or settings.enabled is False:
+        return CycleSnapshot()
+
+    try:
+        # TEMPORAL: the current status is the latest row that has taken effect.
+        status = (
+            await db.execute(
+                select(PeriodStatus)
+                .where(PeriodStatus.user_id == user_id)
+                .order_by(
+                    PeriodStatus.effective_from.desc(), PeriodStatus.id.desc()
+                )
+                .limit(1)
+            )
+        ).scalars().first()
+    except Exception:  # noqa: BLE001
+        logger.warning("cycle status read failed", exc_info=True)
+        status = None
+
+    try:
+        # RECORDED cycles only. A predicted row is an estimate the app drew,
+        # not something that happened, and reporting one as fact would be a
+        # claim the reader never made.
+        cycles = (
+            await db.execute(
+                select(PeriodTracking)
+                .where(
+                    PeriodTracking.user_id == user_id,
+                    sa.or_(
+                        PeriodTracking.is_predicted.is_(False),
+                        PeriodTracking.is_predicted.is_(None),
+                    ),
+                )
+                .order_by(PeriodTracking.start_date.desc())
+                .limit(6)
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001
+        logger.warning("cycle history read failed", exc_info=True)
+        cycles = []
+
+    lengths = [c.cycle_length for c in cycles if c.cycle_length]
+    last_start = cycles[0].start_date.date() if cycles else None
+
+    return CycleSnapshot(
+        tracking_enabled=True,
+        stage=status.stage if status else None,
+        pregnancy=status.pregnancy if status else None,
+        breastfeeding=bool(status.breastfeeding) if status else False,
+        diagnosed_pcos=bool(status.diagnosed_pcos) if status else False,
+        cycles_countable=status.cycles_countable if status else None,
+        predictions_suppressed=status.predictions_suppressed if status else None,
+        last_period_start=last_start,
+        average_cycle_length=(
+            round(sum(lengths) / len(lengths)) if lengths else None
+        ),
+        recent_cycles=len(cycles),
+        may_show_fertile_window=bool(
+            settings.show_fertile_window and settings.predict_enabled
+        ),
+    )
+
+
+def render_cycle(snapshot: CycleSnapshot) -> str:
+    """A deterministic summary for a cycle question. "" when there is nothing.
+
+    States what is recorded. It does NOT predict a next period or a fertile
+    window: prediction is the app's job, it has the model for it, and
+    `predictions_suppressed` exists precisely because there are states where a
+    prediction would be wrong to offer.
+    """
+    if not snapshot.has_anything:
+        return ""
+
+    parts: list[str] = []
+    if snapshot.last_period_start:
+        parts.append(
+            "Your last recorded period started on "
+            f"{snapshot.last_period_start.isoformat()}."
+        )
+    if snapshot.average_cycle_length and snapshot.recent_cycles > 1:
+        parts.append(
+            f"Across your last {snapshot.recent_cycles} recorded cycles the "
+            f"average length is about {snapshot.average_cycle_length} days."
+        )
+    if snapshot.pregnancy and snapshot.pregnancy != "not_pregnant":
+        parts.append(
+            f"Your record notes pregnancy status: {snapshot.pregnancy}."
+        )
+    if snapshot.breastfeeding:
+        parts.append("Your record notes that you are breastfeeding.")
+    if snapshot.diagnosed_pcos:
+        parts.append("Your record notes a PCOS diagnosis.")
+    if snapshot.predictions_suppressed:
+        parts.append(
+            "Cycle predictions are turned off for your current recorded "
+            "status, so there is no expected date to give."
+        )
+    if not parts:
+        return ""
+    parts.append(
+        "This is what is recorded in the app, not a diagnosis — anything that "
+        "seems different from usual is worth raising with your doctor."
+    )
+    return " ".join(parts)
+
+
+def pregnancy_safety_flag(snapshot: CycleSnapshot) -> str:
+    """The ONE cycle fact that belongs in every prompt, or "".
+
+    Pregnancy and breastfeeding change what is safe to say about a great many
+    medicines, so this much travels with the reader. Contraception, stage, PCOS
+    and cycle dates do NOT: they are not needed to answer a headache question,
+    and putting them in every prompt would spread them across logs, caches and
+    support screenshots for no benefit.
+    """
+    if snapshot.pregnancy == "pregnant":
+        return "The reader's record notes they are pregnant."
+    if snapshot.pregnancy == "postpartum":
+        return "The reader's record notes they are postpartum."
+    if snapshot.breastfeeding:
+        return "The reader's record notes they are breastfeeding."
+    return ""
