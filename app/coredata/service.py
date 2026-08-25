@@ -888,3 +888,37 @@ async def recent_doctor_consults(
         )
         for dc, d, sp in rows
     ]
+
+
+@dataclass
+class DocumentOwner:
+    """Who owns a document and whether it is private — the two facts the
+    consent gate needs before any read."""
+
+    owner_id: uuid.UUID
+    is_private: bool | None
+    filepath: str
+
+
+async def document_owner(
+    db: AsyncSession, kind: str, doc_id: int
+) -> DocumentOwner | None:
+    """Look up a document's owner and privacy flag by (kind, id).
+
+    Returns None for an unknown kind or a missing row — the caller then has
+    nothing to check consent against, and must refuse.
+    """
+    entry = DOCUMENT_KINDS.get(kind)
+    if entry is None:
+        return None
+    model, _label = entry
+    row = (
+        await db.execute(select(model).where(model.id == doc_id))
+    ).scalars().first()
+    if row is None:
+        return None
+    return DocumentOwner(
+        owner_id=row.user_id,
+        is_private=getattr(row, "private", None),
+        filepath=getattr(row, "filepath", "") or "",
+    )

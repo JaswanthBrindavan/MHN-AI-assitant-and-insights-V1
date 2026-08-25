@@ -196,3 +196,93 @@ async def test_the_readers_question_reaches_the_model(vision_on):
     await describe_image(provider, DOC, question="is this my sugar report?")
     sent = provider.calls[0]["messages"][0]
     assert sent.content == "is this my sugar report?"
+
+
+# --------------------------------------------------------------------------- #
+# The analyze_image tool inherits the consent gate
+# --------------------------------------------------------------------------- #
+async def test_the_tool_is_off_when_vision_is_off(db_session):
+    """No flag, no image reading — regardless of what the model asks for."""
+    import json
+    import uuid as _uuid
+
+    from app.chat.tools.registry import execute_tool
+    from app.llm.tools import ToolCall
+
+    result = await execute_tool(
+        db_session,
+        _uuid.uuid4(),
+        ToolCall(id="c1", name="analyze_image",
+                 arguments={"document_id": 1, "kind": "report"}),
+        None,
+    )
+    assert not result.is_error
+    assert json.loads(result.content)["found"] is False
+
+
+async def test_the_tool_refuses_a_document_the_reader_cannot_see(
+    db_session, vision_on
+):
+    """The property that matters most: there is no path from a chat message to
+    an image the family-consent gate would deny. The tool cannot widen access,
+    because it goes through the same fetch that refuses before any network
+    call."""
+    import json
+    import uuid as _uuid
+
+    from app.chat.tools.registry import execute_tool
+    from app.llm.tools import ToolCall
+    from app.models.coredata import Report
+
+    owner = _uuid.uuid4()
+    stranger = _uuid.uuid4()
+    db_session.add(
+        Report(id=777, user_id=owner, filepath="reports/x", private=False)
+    )
+    await db_session.flush()
+
+    result = await execute_tool(
+        db_session,
+        stranger,
+        ToolCall(id="c1", name="analyze_image",
+                 arguments={"document_id": 777, "kind": "report"}),
+        None,
+    )
+    assert not result.is_error
+    assert json.loads(result.content)["found"] is False
+
+
+async def test_a_missing_document_is_not_found_rather_than_an_error(
+    db_session, vision_on
+):
+    import json
+    import uuid as _uuid
+
+    from app.chat.tools.registry import execute_tool
+    from app.llm.tools import ToolCall
+
+    result = await execute_tool(
+        db_session,
+        _uuid.uuid4(),
+        ToolCall(id="c1", name="analyze_image",
+                 arguments={"document_id": 999999, "kind": "report"}),
+        None,
+    )
+    assert json.loads(result.content)["found"] is False
+
+
+async def test_an_unknown_document_kind_is_refused(db_session, vision_on):
+    import json
+    import uuid as _uuid
+
+    from app.chat.tools.registry import execute_tool
+    from app.llm.tools import ToolCall
+
+    result = await execute_tool(
+        db_session,
+        _uuid.uuid4(),
+        ToolCall(id="c1", name="analyze_image",
+                 arguments={"document_id": 1, "kind": "not_a_kind"}),
+        None,
+    )
+    assert json.loads(result.content)["found"] is False

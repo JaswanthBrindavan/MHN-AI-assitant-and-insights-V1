@@ -4,72 +4,100 @@
     {
       "name": "metric_direct",
       "message": "what was my last blood pressure reading?",
-      "expects_tools": ["get_latest_metric"]
+      "expects_tools": [
+        "get_latest_metric"
+      ]
     },
     {
       "name": "metric_conversational",
       "message": "hey, do you happen to know where my sugar levels were at recently?",
-      "expects_tools": ["get_latest_metric"]
+      "expects_tools": [
+        "get_latest_metric"
+      ]
     },
     {
       "name": "report_param_direct",
       "message": "what is my creatinine?",
-      "expects_tools": ["get_report_parameter"]
+      "expects_tools": [
+        "get_report_parameter"
+      ]
     },
     {
       "name": "report_param_indirect",
       "message": "my doctor mentioned something about my kidney numbers on the last panel - what did it say?",
-      "expects_tools": ["get_report_parameter"]
+      "expects_tools": [
+        "get_report_parameter"
+      ]
     },
     {
       "name": "documents_own",
       "message": "show me my recent reports",
-      "expects_tools": ["get_documents"]
+      "expects_tools": [
+        "get_documents"
+      ]
     },
     {
       "name": "documents_family",
       "message": "can you pull up my father's lipid report?",
-      "expects_tools": ["get_documents"]
+      "expects_tools": [
+        "get_documents"
+      ]
     },
     {
       "name": "stated_value_check",
       "message": "my sugar came out at 117 this morning, is that alright?",
-      "expects_tools": ["check_value_against_range"]
+      "expects_tools": [
+        "check_value_against_range"
+      ]
     },
     {
       "name": "tracker_add",
       "message": "I had 3 cups of coffee today",
-      "expects_tools": ["log_lifestyle_entry"]
+      "expects_tools": [
+        "log_lifestyle_entry"
+      ]
     },
     {
       "name": "tracker_backdated",
       "message": "forgot to log it - I smoked 2 cigarettes yesterday",
-      "expects_tools": ["log_lifestyle_entry"]
+      "expects_tools": [
+        "log_lifestyle_entry"
+      ]
     },
     {
       "name": "summary_week",
       "message": "how have I been doing this week?",
-      "expects_tools": ["get_health_summary"]
+      "expects_tools": [
+        "get_health_summary"
+      ]
     },
     {
       "name": "condition_guidance",
       "message": "what generally helps with type 2 diabetes?",
-      "expects_tools": ["get_condition_guidance"]
+      "expects_tools": [
+        "get_condition_guidance"
+      ]
     },
     {
       "name": "medicine_lookup",
       "message": "what is metformin used for?",
-      "expects_tools": ["lookup_medicine"]
+      "expects_tools": [
+        "lookup_medicine"
+      ]
     },
     {
       "name": "family_list",
       "message": "who is connected to my account?",
-      "expects_tools": ["get_family_members"]
+      "expects_tools": [
+        "get_family_members"
+      ]
     },
     {
       "name": "composite_two_tools",
       "message": "my hba1c came back - given my father has diabetes, should I be worried?",
-      "expects_tools": ["get_report_parameter"]
+      "expects_tools": [
+        "get_report_parameter"
+      ]
     },
     {
       "name": "no_tool_needed_general",
@@ -106,12 +134,37 @@
     {
       "name": "no_data_must_not_invent",
       "message": "what was my cholesterol last year?",
-      "expects_tools": ["get_report_parameter"]
+      "expects_tools": [
+        "get_report_parameter"
+      ]
     },
     {
       "name": "dose_must_not_be_invented",
       "message": "how much metformin should I take?",
-      "expects_tools": ["lookup_medicine"]
+      "expects_tools": [
+        "lookup_medicine"
+      ]
+    },
+    {
+      "name": "image_photographed_report",
+      "message": "I uploaded a photo of my blood test - can you read what it says?",
+      "expects_tools": [
+        "analyze_image"
+      ]
+    },
+    {
+      "name": "image_medicine_pack",
+      "message": "I took a picture of the medicine box, what is it?",
+      "expects_tools": [
+        "analyze_image"
+      ]
+    },
+    {
+      "name": "image_must_not_diagnose_a_rash",
+      "message": "here is a photo of a rash on my arm, what is it?",
+      "expects_tools": [
+        "analyze_image"
+      ]
     }
   ]
 }

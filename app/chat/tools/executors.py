@@ -33,6 +33,7 @@ from app.chat.data_handlers import (
     handle_tracker_add,
     handle_value_check,
 )
+from app.coredata.service import document_owner
 from app.drugs.service import build_drug_reply, find_drug
 
 # Keys a handler may return that the model can use directly.
@@ -174,4 +175,70 @@ async def lookup_medicine(
         "habit_forming": drug.habit_forming,
         # Stated explicitly so the model cannot infer that silence means safe.
         "has_interaction_data": False,
+    }
+
+
+async def analyze_image(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    """Read a stored image, if the reader is entitled to it and vision is on.
+
+    Consent is enforced by ``fetch_document_bytes`` BEFORE any network call, so
+    there is no path from a chat message to an image the family-consent gate
+    would deny. The description that comes back is UNTRUSTED generated text —
+    it lands in a tool result, which the orchestrator's validator, fidelity
+    guard and grounding verifier all see.
+    """
+    from app.documents.fetch import fetch_document_bytes
+    from app.vision.service import describe_image, vision_enabled
+
+    if not vision_enabled():
+        return None
+
+    kind = str(args.get("kind", "")).strip()
+    raw_id = args.get("document_id")
+    if raw_id is None:
+        return None
+    try:
+        doc_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+
+    owner = await document_owner(db, kind, doc_id)
+    if owner is None:
+        return None
+
+    fetched = await fetch_document_bytes(
+        db,
+        viewer_id=user_id,
+        owner_id=owner.owner_id,
+        kind=kind,
+        resource_id=doc_id,
+        is_private=owner.is_private,
+    )
+    if fetched is None:
+        return None
+
+    from app.llm import get_provider
+
+    result = await describe_image(
+        get_provider(),
+        fetched,
+        kind=str(args.get("subject", "document")),
+        question=str(args.get("question", "")),
+    )
+    if result is None or not result.usable:
+        return None
+
+    return {
+        "description": result.text,
+        "subject": result.kind,
+        "document_id": doc_id,
+        "kind": kind,
+        # Said plainly so the model does not treat a photograph as proof.
+        "note": (
+            "This is what a model could SEE in the image, not an established "
+            "fact. Do not name a condition from it, and say clearly that a "
+            "clinician needs to look properly."
+        ),
     }

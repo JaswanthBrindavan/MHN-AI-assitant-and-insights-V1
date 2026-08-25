@@ -195,6 +195,42 @@ LOOKUP_MEDICINE = ToolSpec(
     ),
 )
 
+ANALYZE_IMAGE = ToolSpec(
+    name="analyze_image",
+    description=(
+        "Look at a photographed document, medicine pack, or visible concern "
+        "the reader has stored, and report what is legibly visible. Use it "
+        "when a question is about what a picture SHOWS and the extracted text "
+        "does not answer it — a photographed report the pipeline could not "
+        "read, a medicine pack, a skin or eye concern. It reads only what is "
+        "there: it does not identify conditions and it cannot diagnose. Get "
+        "the document id from get_documents first."
+    ),
+    input_schema=_obj(
+        {
+            "document_id": {"type": "integer"},
+            "kind": {
+                "type": "string",
+                "description": (
+                    "Document kind from get_documents, e.g. 'report', 'scan', "
+                    "'prescription'."
+                ),
+            },
+            "subject": {
+                "type": "string",
+                "enum": ["document", "medicine", "skin", "unknown"],
+                "description": "What the image is of. Governs how it is read.",
+            },
+            "question": {
+                "type": "string",
+                "description": "What the reader wants to know about it.",
+            },
+        },
+        ["document_id", "kind"],
+    ),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_LATEST_METRIC,
     GET_REPORT_PARAMETER,
@@ -205,4 +241,5 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_FAMILY_MEMBERS,
     GET_CONDITION_GUIDANCE,
     LOOKUP_MEDICINE,
+    ANALYZE_IMAGE,
 )

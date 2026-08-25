@@ -35,6 +35,7 @@ EXECUTORS = {
     "get_family_members": executors.get_family_members,
     "get_condition_guidance": executors.get_condition_guidance,
     "lookup_medicine": executors.lookup_medicine,
+    "analyze_image": executors.analyze_image,
 }
 
 __all__ = ["EXECUTORS", "TOOL_SPECS", "execute_tool"]
