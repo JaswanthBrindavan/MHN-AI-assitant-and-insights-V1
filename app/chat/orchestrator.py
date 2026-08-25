@@ -235,6 +235,90 @@ async def _data_query_reply(db: AsyncSession, user_id: uuid.UUID) -> str:
     )
 
 
+async def _interaction_refusal(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider: LLMProvider,
+    session_id: uuid.UUID | None,
+    risk: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult | None:
+    """The deterministic reply to "can I take X with Y". None if not asked.
+
+    Lives OUTSIDE the engine branch on purpose. It is provider-independent and
+    it is the one drug question where an ungrounded answer can hurt someone,
+    so both engines must pass through it — see project_docs/
+    task-25-drug-interactions.md.
+    """
+    if risk != NONE:
+        # The triage floor always wins; a red flag stays on the escalation
+        # path rather than being answered as a medication question.
+        return None
+    # Combination questions ("can I take X and Y together"). There is
+    # NO interaction dataset, so the only honest answer is a deterministic
+    # one that names both items and routes to a pharmacist — never an
+    # ungrounded LLM answer, and never the generic safe fallback.
+    #
+    # This fires on the PHRASING, not on whether drug_reference recognised
+    # the terms. Requiring a database hit (as this did originally) meant an
+    # unrecognised medicine name — a foreign brand, a misspelling, a
+    # supplement, anything outside the Indian dataset — fell through to the
+    # LLM, on the one question class where an ungrounded answer can do the
+    # most harm. The asymmetry settles it: a false refusal costs a mildly
+    # unhelpful "ask a pharmacist"; a false ANSWER about a real interaction
+    # can hurt someone.
+    #
+    # Ordinary food pairings still reach the LLM through NON_DRUG_TERMS,
+    # which carries everyday foods for exactly this reason.
+    try:
+        pair = extract_interaction_query(message)
+        if pair and not all(term.lower() in NON_DRUG_TERMS for term in pair):
+            # Reply with the USER'S OWN terms, not the canonical product
+            # names — a composition match can resolve "ibuprofen" to an
+            # obscure brand, and answering about that brand reads wrong.
+            names: list[str] = list(pair)
+            # Recorded, not gated on: it says how often the refusal is
+            # firing for terms the dataset has never heard of, which is
+            # the number that would justify buying a better one.
+            recognised = False
+            for raw in pair:
+                if raw.lower() in NON_DRUG_TERMS:
+                    continue
+                async with db.begin_nested():
+                    if await find_drug(db, raw) is not None:
+                        recognised = True
+            t("Drug interaction question",
+              f"'{names[0]}' + '{names[1]}' — deterministic "
+              "check-with-pharmacist reply (no interaction data, "
+              "no LLM)")
+            await _write_receipt(
+                db, user_id=user_id, session_id=session_id,
+                message=message, model_name=provider.model_name,
+            )
+            return ChatResult(
+                response_message=build_interaction_reply(*names),
+                risk_level=risk,
+                recommended_action="discuss_with_prescriber",
+                provenance={
+                    "path": "drug_interaction_query",
+                    "drugs": names,
+                    "source": "drug_reference",
+                    "recognised": recognised,
+                },
+                language=lang,
+                trace=trace,
+            )
+    except Exception:  # noqa: BLE001 — must never break a reply
+        logger.warning(
+            "drug interaction check failed; continuing", exc_info=True
+        )
+        record_fail_open("drug_interaction")
+    return None
+
+
 async def _dispatch(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -325,10 +409,23 @@ async def _dispatch(
             trace=trace,
         )
 
+    # 3.4) Drug-combination questions. SHARED across both engines, and it has
+    #      to be: there is no interaction dataset, so a model asked "can I take
+    #      X with Y" would answer from its own weights. This sat inside the
+    #      legacy chain below until two safety evals caught the agentic engine
+    #      answering interaction questions itself — a gap that retiring the
+    #      legacy chain (Task 12) would have made permanent and invisible.
+    combination = await _interaction_refusal(
+        db, user_id, message, provider, session_id, risk, lang, trace, t
+    )
+    if combination is not None:
+        return combination
+
     # 3.5) Engine selection. Everything above — the triage floor, the scope
-    #      guard, the emergency directive and the canned conversational
-    #      replies — is SHARED and has already run, so the agentic engine can
-    #      never see an emergency and the model is never the arbiter of one.
+    #      guard, the emergency directive, the canned conversational replies
+    #      and the drug-combination refusal — is SHARED and has already run,
+    #      so the agentic engine can never see an emergency and the model is
+    #      never the arbiter of one.
     if get_settings().chat_engine == "agentic":
         t("Engine", "agentic — the assistant can look things up for itself")
         return await _dispatch_agentic(
@@ -448,52 +545,6 @@ async def _dispatch(
     #    drug database (never the LLM). Only at NONE risk: any red-flag match
     #    stays on the symptom path so escalation is preserved. Fail-open.
     if risk == NONE:
-        # 5a) Combination questions ("can I take X and Y together") — the drug
-        # dataset has no interaction data, so instead of an ungrounded LLM
-        # answer or the generic fallback, name both items deterministically
-        # and route to a pharmacist. Fires only when at least one term is a
-        # verified medicine (so "honey and lemon" still reaches the LLM).
-        try:
-            pair = extract_interaction_query(message)
-            if pair and not all(t.lower() in NON_DRUG_TERMS for t in pair):
-                # Reply with the USER'S OWN terms, not the canonical product
-                # names — a composition match can resolve "ibuprofen" to an
-                # obscure brand, and answering about that brand reads wrong.
-                # The lookup is only the is-this-a-medicine gate.
-                names: list[str] = list(pair)
-                matched_any = False
-                for raw in pair:
-                    hit = None
-                    if raw.lower() not in NON_DRUG_TERMS:
-                        async with db.begin_nested():
-                            hit = await find_drug(db, raw)
-                    matched_any = matched_any or hit is not None
-                if matched_any:
-                    t("Drug interaction question",
-                      f"'{names[0]}' + '{names[1]}' — deterministic "
-                      "check-with-pharmacist reply (no interaction data, "
-                      "no LLM)")
-                    await _write_receipt(
-                        db, user_id=user_id, session_id=session_id,
-                        message=message, model_name=provider.model_name,
-                    )
-                    return ChatResult(
-                        response_message=build_interaction_reply(*names),
-                        risk_level=risk,
-                        recommended_action="discuss_with_prescriber",
-                        provenance={
-                            "path": "drug_interaction_query",
-                            "drugs": names,
-                            "source": "drug_reference",
-                        },
-                        language=lang,
-                        trace=trace,
-                    )
-        except Exception:  # noqa: BLE001 — must never break a reply
-            logger.warning(
-                "drug interaction check failed; continuing", exc_info=True
-            )
-            record_fail_open("drug_interaction")
         try:
             term = extract_drug_query_term(message)
             drug = None

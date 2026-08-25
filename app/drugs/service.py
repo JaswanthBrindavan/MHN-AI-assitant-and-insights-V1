@@ -72,6 +72,16 @@ NON_DRUG_TERMS: frozenset[str] = frozenset(
         "chemotherapy", "radiation", "radiotherapy", "dialysis", "surgery",
         "vaccination", "pregnancy", "breastfeeding", "menopause",
         "sunlight", "screen time", "junk food", "fast food", "cold drinks",
+        # Everyday foods, added when the interaction gate was hardened (Task
+        # 25). "Can I take honey and lemon together" must still reach the LLM
+        # as an ordinary question; without these, tightening that gate would
+        # have turned every food pairing into a check-with-your-pharmacist
+        # reply. DRAFT — pending clinician sign-off.
+        "lemon", "lime", "ginger", "garlic", "turmeric", "haldi", "curd",
+        "yogurt", "yoghurt", "buttermilk", "banana", "apple", "egg", "eggs",
+        "chicken", "fish", "dal", "roti", "chapati", "bread", "juice",
+        "green tea", "black tea", "lemon water", "warm water", "hot water",
+        "jaggery", "dates", "nuts", "almonds", "cinnamon", "pepper",
     }
 )
 
