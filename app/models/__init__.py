@@ -45,6 +45,7 @@ from app.models.coredata import (
     Vaccination,
     VitalReading,
 )
+from app.models.erasure import ErasureRequest
 from app.models.feedback import TurnFeedback
 from app.models.jobs import JobRun
 from app.models.knowledge import ConditionRegistry, DrugReference
@@ -71,6 +72,7 @@ __all__ = [
     "McpChunk",
     "RagTurnReceipt",
     "ClinicianReviewer",
+    "ErasureRequest",
     "InsightReviewAudit",
     "JobRun",
     "TurnFeedback",

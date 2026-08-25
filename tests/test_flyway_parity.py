@@ -31,6 +31,10 @@ FLYWAY_TABLES = {
     "turn_feedback": "V8__davi_feedback.sql",
     "clinician_reviewers": "V9__davi_clinician_review.sql",
     "insight_review_audit": "V9__davi_clinician_review.sql",
+    "erasure_requests": "V10__davi_erasure_and_actor.sql",
+    # Created in V6, gains actor_user_id in V10 — the case _added_columns
+    # exists for.
+    "job_runs": "V6__davi_ai_tables.sql",
 }
 
 
@@ -64,11 +68,35 @@ def _create_table_columns(sql: str, table: str) -> dict[str, bool]:
     return columns
 
 
+def _added_columns(table: str) -> dict[str, bool]:
+    """Columns a LATER migration bolted on with ALTER TABLE ... ADD COLUMN.
+
+    Without this the check reads only the original CREATE TABLE and reports a
+    column added by a subsequent migration as MISSING from production — or,
+    worse, silently passes a table whose later columns were never checked at
+    all. Scans every Flyway file, because a column can be added by any of them.
+    """
+    added: dict[str, bool] = {}
+    for path in sorted(FLYWAY_DIR.glob("V*.sql")):
+        sql = path.read_text(encoding="utf-8")
+        for match in re.finditer(
+            rf"ALTER TABLE\s+(?:ONLY\s+)?(?:public\.)?{table}\s+"
+            rf"ADD COLUMN(?:\s+IF NOT EXISTS)?\s+(\w+)([^;]*);",
+            sql,
+            re.IGNORECASE,
+        ):
+            name, rest = match.group(1), match.group(2)
+            added[name] = not re.search(r"NOT NULL", rest, re.I)
+    return added
+
+
 @pytest.mark.parametrize(("table", "filename"), sorted(FLYWAY_TABLES.items()))
 def test_flyway_ddl_matches_the_model(table: str, filename: str):
     path = FLYWAY_DIR / filename
     assert path.exists(), f"{filename} is missing — production would not get {table}"
     flyway_columns = _create_table_columns(path.read_text(encoding="utf-8"), table)
+    # A column added by a later migration is just as present in production.
+    flyway_columns.update(_added_columns(table))
 
     model = Base.metadata.tables[table]
     model_columns = {c.name: c.nullable for c in model.columns}

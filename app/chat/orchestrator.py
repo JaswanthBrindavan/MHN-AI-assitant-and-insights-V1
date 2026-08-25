@@ -392,6 +392,20 @@ async def _dispatch(
         else:
             t("Emergency response",
               "deterministic directive — the LLM is never the arbiter of emergencies")
+        # RECORD BEFORE EXITING. An emergency is the single event most worth
+        # remembering, and until now it was the only severity that opened no
+        # episode: this path returns before either engine reaches the normal
+        # recording step, so the top of the range the triage floor decides was
+        # never persisted.
+        #
+        # This runs in the SHARED prologue, so one call covers both engines.
+        # It records the event only — no topics, because retrieval has not run
+        # and must not: emergency handling does NOT continue through the normal
+        # symptom-assessment flow. Fail-open, so remembering can never delay or
+        # displace the directive the reader needs right now.
+        await memory_assembly.record(
+            db, user_id, codes=(), flags=tr.matched_terms, risk=risk
+        )
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
             model_name=provider.model_name,

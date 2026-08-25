@@ -41,7 +41,12 @@ restartPolicyMaxRetries = 5
 #   JWT_ALGORITHM=HS512
 #   JWT_SECRET_BASE64=true
 #   SERVICE_TOKEN         optional, ≥32 chars (server-to-server path)
-#   LLM_PROVIDER=anthropic  LLM_MODEL=claude-haiku-4-5  LLM_API_KEY=…
+#   LLM_PROVIDER=anthropic  LLM_MODEL=claude-sonnet-5  LLM_API_KEY=…
+#     Sonnet 5, decided deliberately over Haiku 4.5: Haiku needs a 4,096-
+#     token cacheable prefix and ours measures ~2,541, so on Haiku prompt
+#     caching does NOTHING and returns no error. Sonnet's minimum is 1,024.
+#     Costs are tracked in project_docs/model-cost.md. Verify the prefix
+#     with: python -m scripts.cache_probe --model claude-sonnet-5
 #   GROUNDING_MODE=enforce
 #   EMBEDDING_BASE_URL / EMBEDDING_MODEL — leave empty on Railway unless a
 #   hosted embedding endpoint is available; retrieval falls back to keyword

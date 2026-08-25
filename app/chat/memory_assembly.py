@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.episodes import open_episodes, open_or_touch
 from app.chat.episodes import render_for_prompt as render_episodes
+from app.chat.erasure import is_pending
 from app.chat.long_term import recall, record_topics
 from app.chat.profile import get_profile
 from app.chat.profile import render_for_prompt as render_profile
@@ -75,6 +76,13 @@ async def assemble(db: AsyncSession, user_id: uuid.UUID) -> UserMemory:
     Independently matters: a failure reading episodes must not also cost the
     reader their profile.
     """
+    # A pending erasure stops the data being USED immediately, even though the
+    # rows are destroyed later. Without this, "we have deleted your data" is
+    # false for the whole grace period — the assistant would keep greeting the
+    # reader with everything it knows about them.
+    if await is_pending(db, user_id):
+        return UserMemory()
+
     profile_text = ""
     try:
         profile_text = render_profile(await get_profile(db, user_id))
@@ -148,6 +156,10 @@ async def record(
     model inferred — an episode's severity must not be something a reply talked
     its way into.
     """
+    # Nothing new is remembered about someone who has asked to be forgotten.
+    if await is_pending(db, user_id):
+        return
+
     topics = await _display_names(db, codes)
     if topics:
         try:

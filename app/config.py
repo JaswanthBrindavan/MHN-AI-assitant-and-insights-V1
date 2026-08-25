@@ -57,6 +57,29 @@ class Settings(BaseSettings):
     # answer with what it has.
     chat_max_clarifying_questions: int = 2
 
+    # --- erasure and retention -------------------------------------------
+    # Days between a "forget me" request and the rows actually being
+    # destroyed. The window exists so an accidental or coerced deletion can be
+    # undone; the data stops being USED immediately either way. Fixed on the
+    # request row at request time, so changing this never moves a promise
+    # already made.
+    erasure_grace_days: int = 30
+
+    # How long chat transcript is kept. This is the bloat: derived, messages
+    # and receipts are 97.5% of Davi-owned per-user bytes, 9.94 TB/yr at 10M
+    # users, with no cap before this existed.
+    message_retention_days: int = 180
+
+    # Receipts are kept LONGER than messages on purpose. They hash the message
+    # rather than storing it, so they carry no PHI, and they are the actual
+    # audit trail — what was asked (as a hash), which model answered, what was
+    # retrieved, whether grounding passed. Keeping the audit while dropping the
+    # content is the whole point of the split.
+    receipt_retention_days: int = 400
+
+    # 0 disables a sweep entirely, for an operator who wants to stage it.
+    retention_batch_size: int = 5000
+
     # Embeddings
     embedding_base_url: str = ""
     embedding_model: str = ""

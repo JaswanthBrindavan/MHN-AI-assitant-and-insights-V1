@@ -299,19 +299,18 @@ async def test_an_unknown_code_falls_back_to_the_code_itself(db_session):
     assert row is not None and row.value == "UNKNOWN_CODE"
 
 
-async def test_an_emergency_does_not_open_an_episode(db_session, monkeypatch):
-    """Pins PRE-EXISTING behaviour, deliberately, rather than leaving it
-    undiscovered.
+@BOTH_ENGINES
+async def test_an_emergency_is_recorded_before_the_path_exits(
+    db_session, monkeypatch, engine_name
+):
+    """The most severe red flags used to be the ONLY ones that opened no episode.
 
-    An emergency returns from the shared prologue before either engine reaches
-    the recording step, so the MOST severe red flags open no episode — the top
-    of the severity range that `record(risk=...)` documents is never exercised.
-    That predates the shared assembly (agentic had the same gap) and is not
-    changed here. It is arguably wrong: an emergency is exactly the thing worth
-    remembering. Reported rather than fixed, because changing what the
-    emergency path does is a safety change, not a refactor.
+    The emergency branch returns from the shared prologue before either engine
+    reaches the normal recording step, so the top of the severity range the
+    triage floor decides was never persisted. Recording now happens inside that
+    branch, before it returns.
     """
-    monkeypatch.setattr(get_settings(), "chat_engine", "legacy")
+    monkeypatch.setattr(get_settings(), "chat_engine", engine_name)
 
     result = await handle_chat(
         db_session, USER, "I can't breathe", FakeProvider(), uuid.uuid4()
@@ -323,8 +322,59 @@ async def test_an_emergency_does_not_open_an_episode(db_session, monkeypatch):
             select(ActiveSymptomState).where(ActiveSymptomState.user_id == USER)
         )
     ).scalars().all()
-    assert rows == [], (
-        "behaviour changed: emergencies now open episodes. That may be an "
-        "improvement, but it is a deliberate safety decision — update this "
-        "test on purpose, not by accident."
+    assert rows, f"the {engine_name} engine did not record the emergency"
+    assert all(r.risk_level == "emergency" for r in rows), (
+        "an emergency must be recorded AT emergency severity"
     )
+
+
+@BOTH_ENGINES
+async def test_an_emergency_still_answers_deterministically(
+    db_session, monkeypatch, engine_name
+):
+    """Recording must not delay, dilute or displace the directive.
+
+    Emergency handling does NOT continue through the normal symptom-assessment
+    flow: no retrieval, no model, no topics recorded — just the deterministic
+    directive and the event on the record.
+    """
+    monkeypatch.setattr(get_settings(), "chat_engine", engine_name)
+
+    result = await handle_chat(
+        db_session, USER, "I can't breathe", FakeProvider(), uuid.uuid4()
+    )
+
+    assert result.risk_level == "emergency"
+    assert result.recommended_action == "call_emergency_services"
+    assert "emergency" in result.response_message.lower()
+    assert result.provenance.get("path") != "symptom_rag"
+
+    # No topics: retrieval never ran, and must not have.
+    topics = (
+        await db_session.execute(
+            select(UserMemory).where(UserMemory.kind == "condition_topic")
+        )
+    ).scalars().all()
+    assert topics == [], "the emergency path ran the normal assessment flow"
+
+
+async def test_a_recording_failure_cannot_swallow_the_emergency_directive(
+    db_session, monkeypatch
+):
+    """Fail-open, on the one path where it matters most.
+
+    If remembering the event ever cost someone the directive telling them to
+    call for help, that would be the worst bug in this codebase.
+    """
+    from app.chat import memory_assembly
+
+    async def _boom(*a, **k):
+        raise RuntimeError("episode table is down")
+
+    monkeypatch.setattr(memory_assembly, "open_or_touch", _boom)
+
+    result = await handle_chat(
+        db_session, USER, "I can't breathe", FakeProvider(), uuid.uuid4()
+    )
+    assert result.risk_level == "emergency"
+    assert "emergency" in result.response_message.lower()

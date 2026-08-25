@@ -146,13 +146,30 @@ async def list_sessions(
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ) -> list[ChatSessionInfo]:
-    """The user's conversation sessions, most recently active first."""
+    """The user's conversation sessions, most recently active first.
+
+    The aggregate is scoped to THIS user's sessions before it groups. The
+    obvious shape -- group the whole table, then outer-join and filter -- makes
+    the database aggregate every message ever sent by anybody before the
+    caller's 50-row limit can apply. The filter sits on the left side of an
+    outer join, so it cannot be pushed into the subquery, and the cost grows
+    with total product traffic rather than with the caller's own history.
+    Derived: at ~100K users that is a timeout on a UI endpoint.
+    """
+    # Which sessions belong to the caller. Small, indexed, and the only thing
+    # the aggregate below is allowed to look at.
+    own_sessions = (
+        select(ConversationSession.id)
+        .where(ConversationSession.user_id == current_user)
+        .scalar_subquery()
+    )
     stats = (
         select(
             ConversationMessage.session_id,
             func.count(ConversationMessage.id).label("n"),
             func.max(ConversationMessage.created_at).label("last_at"),
         )
+        .where(ConversationMessage.session_id.in_(own_sessions))
         .group_by(ConversationMessage.session_id)
         .subquery()
     )

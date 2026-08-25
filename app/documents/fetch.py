@@ -100,7 +100,12 @@ def _spring_base() -> str | None:
 
 
 async def _record(
-    db: AsyncSession, *, status: str, detail: str, resource: str
+    db: AsyncSession,
+    *,
+    status: str,
+    detail: str,
+    resource: str,
+    viewer_id: uuid.UUID,
 ) -> None:
     """Audit row. Never raises — an audit failure must not break a reply, but
     it must also never silently skip the reply itself."""
@@ -117,6 +122,9 @@ async def _record(
             error=detail if status != "success" else None,
             # The resource, never the bytes and never the content.
             input_hash=resource[:64],
+            # WHO read it. A document-access audit without an actor answers
+            # the wrong question.
+            actor_user_id=viewer_id,
         )
         db.add(job)
         await db.flush()
@@ -205,19 +213,26 @@ async def fetch_document_bytes(
     )
     if not allowed:
         logger.warning("document fetch refused by consent gate")
-        await _record(db, status="refused", detail="consent", resource=resource)
+        await _record(
+            db, viewer_id=viewer_id, status="refused",
+            detail="consent", resource=resource,
+        )
         return None
 
     if _spring_base() is None:
         await _record(
-            db, status="skipped", detail="not_configured", resource=resource
+            db, viewer_id=viewer_id, status="skipped",
+            detail="not_configured", resource=resource,
         )
         return None
 
     # 2. Spring mints the URL — and re-checks authorization while doing so.
     signed = await _presigned_url(resource_type, resource_id, viewer_id, client)
     if signed is None:
-        await _record(db, status="failed", detail="no_url", resource=resource)
+        await _record(
+            db, viewer_id=viewer_id, status="failed",
+            detail="no_url", resource=resource,
+        )
         return None
 
     # 3. Bounded read, in memory only.
@@ -245,8 +260,7 @@ async def fetch_document_bytes(
         try:
             async with stream_ctx as resp:
                 if resp.status_code != 200:
-                    await _record(
-                        db, status="failed",
+                    await _record(db, viewer_id=viewer_id, status="failed",
                         detail=f"http_{resp.status_code}", resource=resource,
                     )
                     return None
@@ -255,8 +269,7 @@ async def fetch_document_bytes(
                     resp.headers.get("content-type", "").split(";")[0].strip().lower()
                 )
                 if content_type not in ALLOWED_CONTENT_TYPES:
-                    await _record(
-                        db, status="refused",
+                    await _record(db, viewer_id=viewer_id, status="refused",
                         detail=f"type_{content_type[:64]}", resource=resource,
                     )
                     return None
@@ -266,7 +279,8 @@ async def fetch_document_bytes(
                 declared = resp.headers.get("content-length")
                 if declared and declared.isdigit() and int(declared) > MAX_BYTES:
                     await _record(
-                        db, status="refused", detail="too_large", resource=resource
+                        db, viewer_id=viewer_id, status="refused",
+                        detail="too_large", resource=resource,
                     )
                     return None
 
@@ -275,8 +289,8 @@ async def fetch_document_bytes(
                     buffer += chunk
                     if len(buffer) > MAX_BYTES:
                         await _record(
-                            db, status="refused", detail="too_large",
-                            resource=resource,
+                            db, viewer_id=viewer_id, status="refused",
+                            detail="too_large", resource=resource,
                         )
                         return None
                 body = bytes(buffer)
@@ -285,14 +299,23 @@ async def fetch_document_bytes(
                 await owned_client.aclose()
     except Exception:  # noqa: BLE001 — fail closed
         logger.warning("document byte fetch failed", exc_info=True)
-        await _record(db, status="failed", detail="transport", resource=resource)
+        await _record(
+            db, viewer_id=viewer_id, status="failed",
+            detail="transport", resource=resource,
+        )
         return None
 
     if not body:
-        await _record(db, status="failed", detail="empty", resource=resource)
+        await _record(
+            db, viewer_id=viewer_id, status="failed",
+            detail="empty", resource=resource,
+        )
         return None
 
-    await _record(db, status="success", detail="", resource=resource)
+    await _record(
+        db, viewer_id=viewer_id, status="success",
+        detail="", resource=resource,
+    )
     return FetchedDocument(
         content=body,
         content_type=content_type,
