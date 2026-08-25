@@ -122,3 +122,144 @@ available here.
 
 None block later tasks. Each is one command away once the credential or
 container exists.
+
+---
+
+# Phase 4 decisions (Tasks 22–25)
+
+## D5 — The drug-interaction refusal now fires without a database match
+
+**What changed.** "Can I take X with Y" used to reach the deterministic
+check-with-a-pharmacist reply only when `drug_reference` recognised at least one
+of the two terms. It now fires on the phrasing alone.
+
+**Why.** The old gate sent unrecognised names to the LLM. Unrecognised does not
+mean obscure — it means foreign brands, generic names absent from an
+Indian brand dataset, supplements, and above all **misspellings**, which are
+most likely precisely when the reader is unsure what they are holding.
+
+**The trade, plainly:**
+
+| | Cost |
+|---|---|
+| False refusal | a mildly unhelpful *"ask a pharmacist about that combination"* |
+| False answer | someone combines two medicines that should not be combined |
+
+**Example — changed:**
+
+> **You:** can I take rosuvastatin and clarithromycin together?
+> **Before:** an LLM-composed answer with a `[GK]` marker
+> **Now:** "Whether rosuvastatin and clarithromycin can be taken together
+> depends on things I cannot verify from here — the doses, the timing, your
+> other medicines… please ask a pharmacist or the prescriber."
+
+**Example — unchanged:**
+
+> **You:** can I take honey and lemon together?
+> **Still** the ordinary LLM path. `NON_DRUG_TERMS` grew a list of everyday
+> foods (lemon, ginger, turmeric, curd, banana, dal, roti…) so food pairings
+> are not caught by the tighter gate.
+
+**To reverse:** restore the `if matched_any:` condition in
+`_interaction_refusal` (`app/chat/orchestrator.py`). One line. I would push
+back on it, for the asymmetry above.
+
+---
+
+## D6 — The interaction refusal moved into the shared prologue
+
+**What changed.** It runs before engine selection, so `CHAT_ENGINE=agentic`
+gets it too.
+
+**Why this is not really a choice.** Before the move, the agentic engine
+answered interaction questions from the model's own weights — it dispatches at
+step 3.5 and the drug paths sat at step 5. Two new safety evals caught it
+(agentic scored 15/17 while legacy scored 17/17).
+
+**What you should take from it:** the other ten step-4/step-5 handlers have not
+been audited for the same problem. That audit is now a prerequisite for Task 12
+and is recorded in the handover.
+
+**To reverse:** there is no sensible reverse. A deterministic,
+provider-independent safety rule belongs above the engine branch.
+
+---
+
+## D7 — The drug-interaction dataset: my recommendation is to buy nothing yet
+
+This is the one genuinely open question in Phase 4, and it is a purchasing
+decision rather than an engineering one. Full options table in
+[`task-25-drug-interactions.md`](./task-25-drug-interactions.md) §3.
+
+**Recommendation: keep the refusal.** Three reasons:
+
+1. The refusal is already the right answer to most real questions. Whether two
+   medicines can be combined depends on dose, timing, renal and hepatic
+   function and the rest of the patient's list — a pairwise table answers a
+   narrower question than the one people ask.
+2. **A half-covered dataset is worse than none.** At 60% coverage the other 40%
+   return "no interaction found", which reads as "no interaction exists". That
+   failure is more dangerous than today's, because the pipeline would be
+   working correctly while producing it.
+3. The same money buys more elsewhere — corpus coverage, or clinician review
+   time.
+
+**If you decide to buy:** DrugBank first. The engineering after that is about a
+day, and the "no data for this pair" branch must return today's refusal text
+**verbatim**, so absence never reads as safety.
+
+---
+
+## D8 — `"suppressed"` became a live artifact status
+
+**What changed.** `LIVE_STATUSES` in `app/insights/engine.py` gained
+`"suppressed"`.
+
+**Why.** That tuple is what the hash-supersede check compares against. Without
+it, a clinician's decision to withhold an insight would be undone by the next
+nightly sweep, which would create a fresh `held_for_review` duplicate — the same
+decision demanded of the same reviewer, forever.
+
+**The counterpart:** changed facts still produce a new held artifact. A
+suppression must not become a permanent gag on a condition whose evidence later
+changes.
+
+**Not reversible without breaking the queue.** Both properties are pinned by
+behavioural tests against the real engine
+(`tests/test_review_recompute.py`).
+
+---
+
+## D9 — Clinician membership is a database table, not a token claim
+
+**What changed.** A row in `clinician_reviewers` is what grants cross-user read
+access to sensitive insights.
+
+**Why not a JWT role claim.** Production session JWTs carry `sub` (a user UUID)
+and nothing else, and mhn-spring mints them — we do not control their contents.
+Waiting for a role claim would have meant either shipping nothing or inventing
+a claim Spring does not issue.
+
+**What this costs you.** Granting review access is a deliberate `INSERT` by an
+administrator. There is no self-service path and no UI. That is intentional for
+a first version: this is the only surface in the product where one person reads
+another person's health information.
+
+**Revocation** is `active = false`, which takes effect on the next request. Do
+**not** delete the row — the audit trail references it, and the grant's history
+is part of the record.
+
+---
+
+## D10 — `pytest-randomly` added to dev dependencies
+
+**What changed.** One line in `pyproject.toml`.
+
+**Why.** The CI `ordering` job written in Task 28 runs
+`pytest -p randomly --randomly-seed=1`. The plugin was never a dependency, so
+that job would have failed at startup with `Error importing plugin "randomly"`.
+A CI job that has never executed is a green checkmark for nothing.
+
+**Note:** installing it changes the *default* local test order to shuffled. Every
+command in CI and in the docs passes `-p no:randomly` where deterministic order
+is wanted. The suite is verified clean under seeds 1, 2 and 12345.

@@ -142,8 +142,14 @@ translator/            self-hosted sidecar (own Dockerfile, second Railway
                        submits the mhn-ai processing run (verified contract:
                        POST /v1/document-processing-runs, bearer
                        MHN_SERVICE_TOKEN; fail-open; job_runs bookkeeping)
+  telemetry.py         stdlib Prometheus exposition (/metrics); the metric
+                       registry `_ALL` is HAND-MAINTAINED — a Counter declared
+                       elsewhere renders nowhere
+  models/feedback.py   reader verdicts on turns (no FK: must outlive the chat)
+  models/review.py     clinician roster + append-only access audit
   api/v1/              health, pedigree, insights, chat (+ /chat/upload,
-                       /chat/sessions history endpoints), schemas
+                       /chat/sessions history endpoints), feedback, review,
+                       profile, schemas
 evals/scenarios.json   safety-invariant scenarios (scripts/run_evals.py + pytest)
 scripts/               seed_rules_templates, seed_synthetic, ingest_knowledge,
                        ingest_mcp_corpus, ingest_drugs, nightly_sweep, run_evals
@@ -183,13 +189,39 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
 
 ## Current state
 
-Phases 0–7 complete. Suite green on aiosqlite; the `pg`-marked reversibility +
-coexistence checks pass on a local Postgres 16 with pgvector. Coverage ~91%
-(gate ≥80%). ruff + pyright clean. All clinical content is DRAFT.
+Original build phases 0–7 complete, plus `project_docs/implementation-plan.md`
+phases 0–4 (Tasks 1–11, 13–28). **Task 12 — retiring the legacy regex chain —
+is deliberately blocked**; see `project_docs/handover.md`.
+
+Suite green on aiosqlite (1718 tests, clean under three random seeds); the
+`pg`-marked reversibility + coexistence checks pass on a local Postgres 16 with
+pgvector. `scripts/run_evals` is 17/17 on BOTH engines. ruff + pyright clean.
+All clinical content is DRAFT.
 
 Docker is not available on the original dev machine, so `pg` tests were run
 against a Homebrew Postgres 16 with a source-built pgvector — see the
 `local-dev-postgres` memory for the exact setup.
+
+### Two chat engines
+
+`CHAT_ENGINE=legacy|agentic`, defaulting to **legacy**. Legacy is the regex
+handler chain; agentic lets the model orchestrate the same abilities as tools.
+The triage floor, scope guard, emergency directive, canned conversational
+replies and the drug-combination refusal all run in a **shared prologue** ahead
+of the engine branch, and validation/grounding run behind both.
+
+**If you add a deterministic, safety-relevant handler, put it in the shared
+prologue, not in the legacy chain.** A drug-interaction refusal sat at step 5
+inside the legacy branch and the agentic engine bypassed it entirely — the
+model answered interaction questions from its own weights. The other step-4 and
+step-5 handlers have not been audited for the same problem.
+
+### Documentation for agents
+
+`project_docs/` carries the working record: `handover.md` (resume here),
+`memory.md` (invariants), `implementation-log.md` (what was decided and why),
+`findings.md` + `findings-phase-4.md` (review findings, including refuted
+ones), and `decisions-needed.md` (autonomous calls awaiting review).
 
 ## Gotchas
 
@@ -199,6 +231,14 @@ against a Homebrew Postgres 16 with a source-built pgvector — see the
 - Adding a model column? Autogenerate against a sqlite scratch DB, then hand-fix
   (imports, the embedding false-diff), and re-run the coexistence check.
 - `sqlite` needs `PRAGMA foreign_keys=ON` for cascade tests (set in conftest).
+- A new `db/flyway/V*__davi_*.sql` MUST register its tables in
+  `tests/test_flyway_parity.py::FLYWAY_TABLES` or that test fails. The whole
+  suite runs on Alembic-built schema, so without the parity check a drifted
+  column passes every test here and fails only in production.
+- Prompt caching: `system` is `str | Sequence[str]`, element 0 is the
+  byte-identical cached prefix. Append per-turn text with `append_directive()`,
+  never `system + x`. The prefix is ~2,541 tokens and the system rules ALONE
+  (~850) are under the 1024 minimum — the tool schemas are what carry it over.
 
 ## Task Lifecycle
 

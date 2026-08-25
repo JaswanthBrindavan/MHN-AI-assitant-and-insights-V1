@@ -7,13 +7,17 @@
 > plausible-but-wrong assumption about the repo, and these documents exist to
 > prevent exactly that.**
 
-**State:** Phases 0, 1, 2 and 3 of
-[`implementation-plan.md`](./implementation-plan.md) are complete.
-**Branch:** `praveen-mhn`, merged with `origin/main` (10 commits), **not pushed**.
-**Verified:** 1583 passed · ruff clean · pyright 0 · run_evals 15/15 on both engines.
+**State:** Phases 0–4 of [`implementation-plan.md`](./implementation-plan.md)
+are complete (Tasks 1–11, 13–28). **Task 12 remains deliberately blocked** —
+see below, and note that Phase 4 found a second reason to keep it blocked.
+**Branch:** `praveen-mhn`, merged with `origin/main`, **not pushed**.
+**Verified:** 1718 passed · clean under three random seeds · ruff clean ·
+pyright 0 · run_evals **17/17 on both engines**.
 
 Nothing here changes behaviour for users yet: everything ships behind
-`CHAT_ENGINE`, which still defaults to `legacy`.
+`CHAT_ENGINE`, which still defaults to `legacy`. The one exception is the
+drug-interaction refusal, which now fires more often and on **both** engines —
+deliberately, see Phase 4 below.
 
 ---
 
@@ -22,145 +26,108 @@ Nothing here changes behaviour for users yet: everything ships behind
 | Document | What it holds |
 |---|---|
 | [`memory.md`](./memory.md) | Invariants and surprising facts. **Read before touching anything.** |
-| [`implementation-log.md`](./implementation-log.md) | What was decided, and why |
-| [`findings.md`](./findings.md) | Review findings, including refuted ones |
+| [`implementation-log.md`](./implementation-log.md) | What was decided, and why (now through Phase 4) |
+| [`findings.md`](./findings.md) | Review findings through Phase 3, including refuted ones |
+| [`findings-phase-4.md`](./findings-phase-4.md) | Phase 4 findings + the mutation-check table |
 | [`decisions-needed.md`](./decisions-needed.md) | **Choices made for you — please review** |
+| [`task-23-caching.md`](./task-23-caching.md) | What was and was **not** measured about prompt caching |
+| [`task-25-drug-interactions.md`](./task-25-drug-interactions.md) | The refusal change + the dataset decision that needs you |
 
 ---
 
-## The four things that need you
+## What Phase 4 added (Tasks 22–25)
 
-### 1. Review `decisions-needed.md` (10 minutes)
+| Task | What it is | Where |
+|---|---|---|
+| 22 | Feedback capture + one-command promotion of a bad reply into a regression case | `app/api/v1/feedback.py`, `scripts/promote_feedback.py` |
+| 23 | Prompt-cache breakpoint on the stable prefix + a real token budget | `app/llm/anthropic.py`, `app/rag/prompt.py`, `scripts/cache_probe.py` |
+| 24 | Clinician review queue for `held_for_review` insights, with an audit trail | `app/api/v1/review.py`, `app/models/review.py` |
+| 25 | Interaction refusal hardened and moved into the shared prologue | `app/chat/orchestrator.py`, `app/drugs/service.py` |
 
-Four autonomous calls, each with the reasoning and how to reverse it. The one
-worth your attention is **D1**: `utcnow()` is now strictly increasing, which
-affects every model's `created_at`. It fixed a real bug where compaction folded
-the wrong messages, but it is a shared-helper change and the alternative (a
-sequence column) needs a Flyway migration coordinated with mhn-spring.
+New schema, shipped both ways as usual (Flyway for production, Alembic for
+local/test): `V8__davi_feedback.sql`, `V9__davi_clinician_review.sql`.
 
-### 2. Decide the LLM (blocks Task 12)
-
-`scripts/provider_bakeoff.py` is built and its scoring is tested; it cannot run
-here because there is no API key or self-hosted endpoint. One command once you
-have either:
-
-```bash
-LLM_API_KEY=... CHAT_ENGINE=agentic python -m scripts.provider_bakeoff \
-    --providers anthropic:claude-haiku-4-5,openai_compatible:qwen2.5:14b \
-    --out evals/bakeoff.json
-```
-
-The number that decides it is **tool accuracy**. Open-weight models hallucinate
-tool names and emit malformed arguments far more often than hosted ones, and
-here a wrong tool call means quoting the wrong patient's value.
-
-### 3. Run the agentic engine in staging
-
-Set `CHAT_ENGINE=agentic`. Watch for `degraded` in `provenance` — the reasons
-are `validation`, `fidelity`, `ungrounded_value`, `provider_error`. A week clean
-unlocks Task 12.
-
-### 4. Confirm the CI workflow
-
-`.github/workflows/ci.yml` is written but has never executed — Docker is
-unavailable on this machine, so the `pg` job is unobserved. It is the first
-thing that will tell you whether the hybrid retrieval path actually works,
-since `_hybrid_rank` short-circuits on SQLite and has therefore never run.
+**`tests/test_flyway_parity.py` is new and will fail if you add a
+`V*__davi_*.sql` without registering its tables.** That is intentional — before
+it existed, nothing compared the production DDL to the models.
 
 ---
 
-## Resume here
+## The three things that need you
 
-**Task 12 — retire the regex chain (~1,200 lines deleted).** Gated on:
-1. `CHAT_ENGINE=agentic` passes run_evals — ✅ already true
-2. Task 21's quality suite scores agentic ≥ legacy — ❌ not built
-3. One week in staging with no regression — ❌ not run
+### 1. The drug-interaction change (5 minutes) — the one real behaviour change
 
-Do not skip (3). The legacy engine is what currently answers real users.
+Read [`task-25-drug-interactions.md`](./task-25-drug-interactions.md). Short
+version: the refusal used to require `drug_reference` to recognise a medicine,
+so misspelled and unlisted names fell through to the LLM. It now fires on the
+phrasing.
 
-**Then Phase 4 (measurement).** Task 20 (observability) and Task 21 (quality
-evals) are what tell you whether any of this actually worked, and Task 21 gates
-Task 12.
+**Worked example of what changed:**
 
-Phase 3 is done but three things need a live service before they can be
-trusted: the Spring presigned-GET endpoint, a vision model, and the voice
-sidecar. All three are wired, unit-tested and off by default.
+> "can I take rosuvastatin and clarithromycin together?"
+> **before:** an LLM-composed answer · **now:** the deterministic
+> check-with-a-pharmacist reply
 
----
+> "can I take honey and lemon together?"
+> **unchanged** — still the ordinary LLM path
 
-## How to work on this
+One-line revert if you disagree, but I would push back: a false refusal costs a
+mildly unhelpful reply; a false answer about a real interaction can hurt
+someone.
 
-Follow `.claude/execution-rules.md`. The part that has repeatedly earned its
-keep is **"do not blindly follow the plan if the repository contradicts it"** —
-every task began with an audit of the real files against the plan, and every
-audit found something.
+### 2. The drug-interaction dataset (a purchasing decision, not a coding one)
 
-Then `.claude/review-rules.md` for an independent pass. **Give reviewers
-read-only access.** Agents with write access left scratch files that
-monkeypatched global state; with them present the emergency-ordering tests
-failed, which was pure artifact and the most alarming possible false signal.
+Same document, §3. My recommendation is **keep the refusal for now** — a
+half-covered interaction table returns "no interaction found", which readers
+read as "no interaction exists", and that is a worse failure than an honest
+refusal because the pipeline would be working correctly while producing it.
 
-### The gates
+### 3. Review `decisions-needed.md` (10 minutes)
 
-```bash
-.venv/Scripts/python -m pytest -q -p no:randomly     # 1583 passed
-.venv/Scripts/python -m pytest -q                    # random order, also clean
-.venv/Scripts/python -m ruff check .
-.venv/Scripts/python -m pyright
-.venv/Scripts/python -m scripts.run_evals
-CHAT_ENGINE=agentic .venv/Scripts/python -m scripts.run_evals
-```
-
-Both eval runs must be 15/15. If an agentic scenario fails, **fix the engine,
-never the scenario.**
+Unchanged from Phase 3, plus the Phase 4 entries at the end.
 
 ---
 
-## Known gaps, stated plainly
+## Task 12 is still blocked, and Phase 4 strengthened the case
 
-**Deferred by decision:** WhatsApp (yours), proactive messaging (needs Task 15,
-which now exists, plus a scheduler subsystem).
+The gate was: run_evals ✅, a quality suite ✅ (built in Task 21), and one week
+in staging ❌.
 
-**Deferred deliberately:** the retrieval items (drawbacks §5.1, §5.4, §5.5).
-Tool calling changes what retrieval is *for* — once the model calls
-`get_condition_guidance` deliberately, the keyword-scoping hijacks that
-motivated the stoplists matter far less. Planning them before Phase 1 landed
-would have been planning the wrong fix. They deserve their own plan now.
+**Phase 4 added a fourth reason.** Two new safety evals found that the agentic
+engine never reached the drug-interaction refusal at all — it dispatches at
+step 3.5, and the drug paths sat at step 5 inside the legacy chain. Under
+`CHAT_ENGINE=agentic` the model answered interaction questions from its own
+weights.
 
-**Not engineering:** every clinical constant still ships as **DRAFT — pending
-clinician sign-off**. That is a release blocker no amount of code removes. The
-new prompt rules, the recovery directives and the episode copy all need the same
-review as the phrase tables.
+That is fixed. But **the other ten step-5 handlers have not been audited for
+the same problem.** The comment above the engine branch listed what was shared;
+nobody had checked what *should* be. Before retiring ~1,200 lines of legacy
+chain, walk every step-4 and step-5 handler and ask: *if this is deterministic
+and safety-relevant, is it in the shared prologue or in the legacy branch?*
 
-**Unverified:** the `pg` CI job, the bake-off against a real provider, and the
-Anthropic adapter against the live API. All three are one command away from
-being verified; none is blocked on more code.
-
----
-
-## If something looks broken
-
-Check for stray `tests/test_zz_*.py` or `tests/test_tmp_*.py` first. Review
-agents have left files that monkeypatch global state, and their symptom is
-alarming and unrelated to whatever you just changed.
-
-```bash
-git status --short          # stray files?
-git diff HEAD -- app/       # source touched unexpectedly?
-grep -rn "MUTANT" app/      # a mutation left behind?
-```
+The quality suite cannot answer this for you. It runs against a fake provider,
+which cannot choose a tool — `scripts/quality_eval.py --compare` refuses to
+render a Task 12 verdict from a fake run, and it is right to.
 
 ---
 
-## Phase 3 additions
+## Still unverified, because it needs credentials or infrastructure
 
-Three features, all **off by default**:
-
-| Env | Effect |
+| Thing | How to verify when you can |
 |---|---|
-| `MHN_SPRING_BASE_URL` + `MHN_SPRING_TOKEN` | Davi may read document bytes via a Spring-minted presigned GET. Davi still holds no AWS credentials. |
-| `VISION_ENABLED` (+ optional `VISION_MODEL`) | The model may call `analyze_image` on a document the reader is entitled to. |
-| `VOICE_BASE_URL` | `POST /api/v1/chat/voice` accepts a voice note. |
+| Prompt-cache hit rate | `ANTHROPIC_API_KEY=… python -m scripts.cache_probe --model <model>` — exits non-zero if any turn after the first misses |
+| Exact cacheable prefix size | same command; matters most on **Haiku**, where the estimate is within the margin of error of the 2048 minimum |
+| Provider bake-off | `python -m scripts.provider_bakeoff` against a real provider |
+| Real quality numbers | `python -m scripts.quality_eval --compare --provider anthropic:<model>` |
+| Spring presigned GET | `GET /files/{resource_type}/{id}/url` — contract below |
+| Vision model | needs `VISION_MODEL` + a provider |
+| Voice sidecar | contract below |
+| `pg` CI job | needs the GitHub workflow to actually run |
+
+
+---
+
+## Integration contracts still to be honoured
 
 **Spring must expose** `GET /files/{resource_type}/{id}/url` returning
 `{"url": "https://…"}` and honouring `Authorization: Bearer <MHN_SPRING_TOKEN>`

@@ -485,3 +485,168 @@ And three tests that **could not fail**: the non-http URL test passed with the
 guard removed, the transport test exercised the URL handler rather than the
 byte handler its name claimed, and the vision test would have passed against an
 implementation that dropped the image entirely.
+
+---
+
+# Phase 4 — Feedback, caching, oversight, and the drug refusal
+
+Tasks 22–25. Where Phase 3 added capability, Phase 4 mostly added *ways to
+find out we were wrong*: a loop from a bad reply to a regression test, a probe
+that refuses to claim a cache saving it did not measure, a queue that puts
+sensitive insights in front of a human, and two safety evals that turned up
+two real holes in a path everyone assumed was closed.
+
+## Task 22 — Feedback capture
+
+`drawbacks.md` §8.2: nothing captured whether a reply was any good, so
+improvement was entirely developer-initiated from anecdote.
+
+The architectural decision that mattered was **what NOT to store**. A promoted
+case does *not* carry the down-voted reply. That reply was the defect; freezing
+it into `scripted` would enshrine the defect as the very thing the suite
+protects. The promoter writes the question and a crude `addresses` seed, and a
+human fills in what good looks like.
+
+Two schema decisions, both about survival:
+
+- **No FK from `turn_feedback` to `conversation_messages`.** Feedback must
+  outlive the conversation it judges — otherwise clearing history erases the
+  evidence behind a regression test.
+- **Re-voting CORRECTS rather than duplicates** (unique on `user_id,
+  message_id`). A reader who changes their mind should be able to, and counting
+  both votes would skew the very numbers this exists to produce.
+
+A found bug worth recording: the feedback counter was first declared in the API
+module, where it would have rendered **nowhere**. `telemetry._ALL` is a
+hand-maintained tuple, so any metric not added to it is invisible — a `/metrics`
+page that silently omits a new metric looks exactly like one that includes it.
+A test now fails if a metric is unregistered.
+
+**Also shipped, unplanned:** `tests/test_flyway_parity.py`. CLAUDE.md says
+production schema ships as Flyway while the test suite runs entirely against
+Alembic-built schema. **Nothing compared the two.** A drifted column would pass
+every test here and fail only in production, as a missing column at runtime.
+V7 checked out clean; the guard is for the next one, and it refuses to let a
+new `V*__davi_*.sql` be added without coverage.
+
+## Task 23 — Prompt caching
+
+The plan warned that a prefix under ~1024 tokens silently will not cache. That
+warning turned out to be the crux, and measuring **first** is what caught it:
+
+```
+stable system rules : ~850 tokens   <-- UNDER the minimum on its own
+tool schemas        : ~1691 tokens
+total cacheable     : ~2541 tokens
+```
+
+Anthropic assembles the cacheable prompt as tools → system → messages, so a
+breakpoint on the system block covers the tool schemas too. **It is the tools,
+the larger half, that carry this prefix over the line.** A breakpoint on the
+system prompt alone would have been a no-op indistinguishable from a working
+one — same reply, only the usage numbers differ.
+
+The design: `system` accepts `str | Sequence[str]`; element 0 is the
+byte-identical prefix and carries the breakpoint. A plain string is untouched,
+so no existing caller shifts behaviour, and every non-Anthropic provider joins
+it straight back — **the split changes how tokens are billed, never what the
+model is told.**
+
+The language directive went into the *volatile* half deliberately: it varies
+per reader, and a per-reader prefix caches for nobody.
+
+One test here is a **safety** check rather than a cost check. A cached prefix is
+reused across turns, so PHI in it would be a leak surface;
+`test_patient_data_never_reaches_the_cached_prefix` asserts no name, value or
+condition can land there.
+
+A real bug the suite caught: two paths appended per-turn directives via
+`system + directive` (tool-budget exhaustion, corrective retry). On a split
+prompt both would have written to the **cached prefix**. It surfaced as a
+`TypeError` — loudly, because the split is a list. Had the design used a marker
+string instead, it would have failed *silently* as a permanent cache miss.
+
+**The context budget** replaced count-based caps (top-k chunks, last 6 turns)
+with a token budget. Counting items bounds the number of things, not their
+size; one long chunk could carry more text than the rest of the prompt. Trimming
+happens **before** rendering — truncating rendered text would cut a chunk
+mid-sentence and drop the qualifier that made the fact safe. Chunks go before
+turns (a dropped chunk costs a source; a dropped turn costs the thread), and
+the latest turn and patient context are never dropped.
+
+**What was NOT measured, and is said so plainly:** the exact token count and
+the hit rate both need a live key. `scripts/cache_probe.py` measures them the
+moment one exists and refuses to print a percentage it did not observe. On
+Haiku the estimate sits *within the margin of error* of that model's 2048
+minimum, and the probe says so rather than waving it through. Full finding:
+`project_docs/task-23-caching.md`.
+
+## Task 24 — Clinician review queue
+
+`drawbacks.md` §8.7: `held_for_review` artifacts had been generated since
+Phase 3 and **seen by nobody, ever**. The engine marked them sensitive, the
+read endpoint filtered them out, and there it ended.
+
+This is the only surface in the repo where one person reads **another
+person's** health information, so three properties are enforced rather than
+assumed:
+
+1. **Membership is an explicit Davi-owned table.** There is no role claim in
+   the production JWT (`sub` is a user UUID and nothing else) and we do not
+   control what mhn-spring mints — so the roster lives here as rows an
+   administrator adds deliberately. Revocation bites on the *next request*, not
+   at token expiry.
+2. **Every READ is audited, not just every decision** — by the time a decision
+   exists, the information has already been seen. The audit write happens
+   *before* the content is returned, so a crash in between is not an unlogged
+   disclosure. A refused view writes nothing: nothing was disclosed.
+3. **The queue listing carries no body.** Disclosing every held insight to
+   anyone who opens the page would make the audited `view` step meaningless.
+
+The subtle part was the **engine contract**. `"suppressed"` had to join
+`LIVE_STATUSES`, because that tuple is what the hash-supersede check compares
+against. Without it, every nightly sweep would create a fresh
+`held_for_review` duplicate and the reviewer would decline the same insight
+forever. Changed facts still produce a new held artifact — a suppression must
+not become a permanent gag on a condition whose evidence later changes. Both
+properties are tested against the **real engine**, not by asserting the
+constant; removing `"suppressed"` fails those tests, not just a tautology.
+
+Patients can query their own audit trail. "Who looked at my records?" is a
+question they are entitled to have answered, and it is what makes the audit
+mean something to the person it protects.
+
+## Task 25 — Drug interactions
+
+The plan called this a licensing task, not an engineering one, and said the
+current refusal *"should not be softened"*. It was not softened. It was
+**hardened**, because writing two safety evals for it exposed two real holes.
+
+**Hole 1 — the refusal required a database hit.** If `drug_reference` did not
+recognise either medicine, the question fell through to the LLM. Unrecognised
+names are not exotic: foreign brands, misspellings, supplements, anything
+outside the Indian dataset. People misspell medicine names most when they are
+least sure what they are taking.
+
+It now fires on the **phrasing**. The asymmetry settles it — a false refusal
+costs a mildly unhelpful "ask a pharmacist"; a false *answer* about a real
+interaction can hurt someone. Recognition is still computed but **recorded
+rather than gated on**, because how often the refusal fires for unknown terms
+is exactly the number that would justify buying a dataset. `NON_DRUG_TERMS`
+grew everyday foods so "honey and lemon" still reaches the LLM.
+
+**Hole 2 — the agentic engine never reached the refusal at all.** It dispatches
+at step 3.5; the drug paths lived at step 5, inside the legacy chain. So under
+`CHAT_ENGINE=agentic` the model answered interaction questions from its own
+weights. **Retiring the legacy chain (Task 12) would have made that permanent
+and invisible.** The refusal moved into the shared prologue beside the triage
+floor, where a deterministic, provider-independent safety rule belongs.
+
+This is the strongest argument yet for the Task 12 gate: the "shared prologue"
+was assumed to hold everything safety-critical, and it did not. Every other
+step-5 handler deserves the same audit before the legacy chain is retired.
+
+**Also found:** `pytest-randomly` was missing from dev dependencies, so the CI
+`ordering` job written in Task 28 **could never have run** — it would fail at
+startup with "Error importing plugin randomly". A CI job that has never
+executed is not a gate. Added; the suite is clean under three shuffles.

@@ -147,3 +147,59 @@ with ruff and pyright errors visible in the same terminal output.
 **Verify a claim before repeating it.** The plan asserted things about the repo
 that were not true. The pre-coding audit each task starts with exists for that
 reason and has paid for itself every time.
+
+---
+
+## Phase 4 additions
+
+**`telemetry._ALL` is a hand-maintained tuple.** A `Counter` declared anywhere
+else increments happily and renders **nowhere**. A `/metrics` page missing your
+metric looks exactly like one that includes it. Declare metrics in
+`telemetry.py` and add them to `_ALL`.
+
+**The cacheable prefix is tools + system, in that order.** Anthropic assembles
+tools → system → messages, so a `cache_control` breakpoint on the system block
+covers the tool schemas too. This is load-bearing here: the system rules alone
+are ~850 tokens, **under the 1024-token minimum**. Only the tool schemas
+(~1,691) carry the prefix over the line. Shrink the tool set and caching may
+silently stop working.
+
+**A prompt-cache failure is invisible from inside the application.** The reply
+is byte-identical; only `usage.cache_read_input_tokens` differs. Never claim a
+cache saving without running `scripts/cache_probe.py` against a real key.
+
+**`system` is `str | Sequence[str]`.** Element 0 is the byte-identical prefix
+and carries the breakpoint. Anything appended per-turn must go on the
+**tail** — use `append_directive()` in `app/chat/agent.py`, never `system + x`.
+Only the Anthropic adapter acts on the split; everything else calls
+`join_system()`, so the split changes billing, never what the model is told.
+
+**Nothing but `tests/test_flyway_parity.py` compares `db/flyway/V*.sql` to the
+models.** The whole suite runs on Alembic-built schema. A drifted column passes
+every test here and fails only in production. Adding a new `V*__davi_*.sql`
+without registering its tables in `FLYWAY_TABLES` now fails a test, on purpose.
+
+**`"suppressed"` is a LIVE artifact status.** `LIVE_STATUSES` is what the
+hash-supersede check compares against. Remove it and every nightly sweep
+re-queues an insight a clinician already declined.
+
+**The shared prologue was not as complete as its comment claimed.** It listed
+the triage floor, scope guard, emergency directive and canned replies — but the
+drug-interaction refusal sat at step 5, inside the legacy chain, so
+`CHAT_ENGINE=agentic` bypassed it entirely. **The other ten step-4/step-5
+handlers have not been audited for the same problem.** Do that before Task 12.
+
+**A test can pass because the environment is empty, not because the code is
+right.** Two safety evals for the drug refusal failed against a test database
+with no `drug_reference` rows — and that emptiness is what exposed a gate that
+required a database hit before refusing. Absence of data in tests is sometimes
+the most realistic case, not the least.
+
+**Feedback and audit rows deliberately have no FK to what they describe.** They
+must outlive it. Clearing conversation history would otherwise erase the
+evidence behind a regression test; deleting a retracted insight would erase the
+record of who read it, which is exactly when that record matters most.
+
+**A promoted quality case must never carry the down-voted reply.** That reply
+was the defect. Writing it into `scripted` would make the regression suite
+protect the bug.
