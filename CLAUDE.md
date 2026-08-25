@@ -68,9 +68,14 @@ Rules we follow (do not break these):
   (version table **`davi_alembic_version`**) builds local/test databases only.
   The `"user"` table is in ORM metadata (partial read-only `User` model) but
   **excluded from migrations** via `EXTERNAL_TABLES` + `include_object`.
-- Migrations are verified two ways: reversibility on a fresh DB, and coexistence
-  (apply on top of a full load of `db/existing_schema.sql` — note that dump is
-  the V1 baseline; production has ddl-auto additions like
+- Migrations are verified two ways: reversibility on a fresh DB
+  (`tests/test_migrations.py`), and coexistence — apply Davi's chain on top of
+  a full load of `db/existing_schema.sql` (`tests/test_coexistence.py`, both
+  `pg`-marked). That dump is now composed from mhn-spring V1–V19 by
+  `python -m scripts.build_existing_schema`; regenerate it whenever they add a
+  migration. It used to be the V1 baseline and the coexistence check was
+  manual, which is why V7–V19 went unnoticed. Production also has ddl-auto
+  additions like
   `family_connect.req_read/acc_read` and `file_access_exclusions`, which our
   models map nullable-with-fallback).
 - **Auth**: production session JWTs are **HS512** with the shared `JWT_SECRET`
