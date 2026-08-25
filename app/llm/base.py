@@ -19,7 +19,7 @@ class LLMProvider(Protocol):
 
     model_name: str
 
-    async def generate(self, *, system: str, user: str) -> str: ...
+    async def generate(self, *, system: str | Sequence[str], user: str) -> str: ...
 
 
 @runtime_checkable
@@ -37,7 +37,7 @@ class ToolCallingProvider(LLMProvider, Protocol):
     async def generate_turn(
         self,
         *,
-        system: str,
+        system: str | Sequence[str],
         messages: Sequence[Message],
         tools: Sequence[ToolSpec] = (),
     ) -> LLMTurn: ...

@@ -111,6 +111,49 @@ def _to_anthropic_messages(messages: Sequence[Message]) -> list[dict]:
     return out
 
 
+# Anthropic renders the cacheable prompt in a fixed order: tools, then
+# system, then messages. A breakpoint on the LAST system block therefore
+# covers the tool schemas too — which matters here, because the tool schemas
+# are the larger half of what is stable (see project_docs/task-23-caching.md
+# for the measurement).
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+# Below this, Anthropic silently declines to cache and the request behaves
+# exactly as if no breakpoint were set. Named so the reason is greppable when
+# somebody wonders why the hit rate is zero.
+MIN_CACHEABLE_TOKENS = 1024
+
+
+def _to_system_blocks(system: str | Sequence[str]) -> str | list[dict]:
+    """Render the system prompt, marking a cache breakpoint after the prefix.
+
+    A plain string is passed through untouched — no breakpoint, no behaviour
+    change for the callers that do not separate their prompt.
+
+    A sequence means the caller has split stable from volatile: element 0 is
+    the byte-identical prefix and gets the breakpoint. Everything after it
+    varies per turn and must sit AFTER the mark, or it would invalidate the
+    cache on every single call — the classic way to pay the 25% cache-write
+    premium forever and never once read from it.
+    """
+    if isinstance(system, str):
+        return system
+
+    parts = [p for p in system if p]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        # Nothing volatile to separate; a breakpoint would still be valid but
+        # buys nothing over a plain string.
+        return parts[0]
+
+    blocks: list[dict] = [
+        {"type": "text", "text": parts[0], "cache_control": _CACHE_CONTROL}
+    ]
+    blocks.extend({"type": "text", "text": p} for p in parts[1:])
+    return blocks
+
+
 def _parse_arguments(raw) -> dict:
     """Tool inputs may arrive as a dict or as a JSON string, with
     provider-specific escaping. Never string-match on the serialized form, and
@@ -145,6 +188,13 @@ def _from_anthropic_response(resp) -> LLMTurn:
             "input_tokens": resp.usage.input_tokens,
             "output_tokens": resp.usage.output_tokens,
         }
+        # Cache fields, when the provider reports them. Surfaced because a
+        # cache breakpoint that silently fails to cache looks EXACTLY like one
+        # that works — the reply is identical and only these numbers differ.
+        for field in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+            value = getattr(resp.usage, field, None)
+            if value is not None:
+                usage[field] = value
     return LLMTurn(
         text="".join(text_parts).strip(),
         tool_calls=tuple(calls),
@@ -178,7 +228,7 @@ class AnthropicProvider:
             client_kwargs["base_url"] = base_url
         self._client = AsyncAnthropic(**client_kwargs)
 
-    async def generate(self, *, system: str, user: str) -> str:
+    async def generate(self, *, system: str | Sequence[str], user: str) -> str:
         turn = await self.generate_turn(
             system=system, messages=[UserMessage(user)], tools=()
         )
@@ -187,14 +237,14 @@ class AnthropicProvider:
     async def generate_turn(
         self,
         *,
-        system: str,
+        system: str | Sequence[str],
         messages: Sequence[Message],
         tools: Sequence[ToolSpec] = (),
     ) -> LLMTurn:
         payload: dict = {
             "model": self.model,
             "max_tokens": self._max_tokens,
-            "system": system,
+            "system": _to_system_blocks(system),
             "messages": _to_anthropic_messages(messages),
         }
         if self._thinking == "adaptive":
@@ -209,7 +259,7 @@ class AnthropicProvider:
     async def generate_stream(
         self,
         *,
-        system: str,
+        system: str | Sequence[str],
         messages: Sequence[Message],
     ) -> AsyncIterator[str]:
         """Yield text deltas. Tools are NOT offered here.
@@ -221,7 +271,7 @@ class AnthropicProvider:
         payload: dict = {
             "model": self.model,
             "max_tokens": self._max_tokens,
-            "system": system,
+            "system": _to_system_blocks(system),
             "messages": _to_anthropic_messages(messages),
         }
         if self._thinking == "adaptive":

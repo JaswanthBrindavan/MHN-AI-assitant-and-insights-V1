@@ -86,9 +86,24 @@ def _as_error(call: ToolCall, exc: BaseException) -> ToolResult:
     )
 
 
+def append_directive(system: str | Sequence[str], extra: str) -> str | list[str]:
+    """Add a per-turn instruction WITHOUT disturbing the cached prefix.
+
+    A split system prompt keeps its byte-identical prefix in element 0; the
+    extra goes on the volatile tail. Appending it to element 0 instead would
+    change the one string that must never change, turning every corrected or
+    budget-exhausted turn into a cache miss for everything after it.
+    """
+    if isinstance(system, str):
+        return system + extra
+    parts = list(system)
+    parts[-1] = (parts[-1] + extra) if parts[-1] else extra.lstrip("\n")
+    return parts
+
+
 async def run_agent(
     provider,
-    system: str,
+    system: str | Sequence[str],
     messages: Sequence[Message],
     tools: Sequence[ToolSpec],
     executor: Executor,
@@ -152,7 +167,9 @@ async def run_agent(
         ", ".join(sorted(set(outcome.tool_names))),
     )
     final = await provider.generate_turn(
-        system=system + _FORCE_ANSWER, messages=history, tools=()
+        system=append_directive(system, _FORCE_ANSWER),
+        messages=history,
+        tools=(),
     )
     _accumulate_usage(outcome.usage, final)
     outcome.text = final.text
@@ -229,7 +246,7 @@ def correction_for(reason: str, detail: str = "") -> str:
 
 async def recover(
     provider,
-    system: str,
+    system: str | Sequence[str],
     messages: Sequence[Message],
     reason: str,
     detail: str = "",
@@ -241,9 +258,21 @@ async def recover(
     keeps failing the guards must not be allowed to keep spending the reader's
     time.
     """
+    correction = correction_for(reason, detail)
+    if isinstance(system, str):
+        corrected: str | list[str] = system + "\n\n" + correction
+    else:
+        # Append to the VOLATILE tail, never the cached prefix. Appending to
+        # element 0 would change the one string that must stay byte-identical
+        # and silently turn every recovery into a cache miss for the turns
+        # that follow.
+        parts = list(system)
+        parts[-1] = (parts[-1] + "\n\n" + correction) if parts[-1] else correction
+        corrected = parts
+
     try:
         turn = await provider.generate_turn(
-            system=system + "\n\n" + correction_for(reason, detail),
+            system=corrected,
             messages=messages,
             tools=(),
         )

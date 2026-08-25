@@ -8,6 +8,26 @@ from __future__ import annotations
 
 from app.rag.retrieval import RetrievedChunk
 
+# Rough characters per token for English prose. Deliberately conservative:
+# over-estimating tokens trims a little early, under-estimating overflows the
+# context window, and only one of those two failures is recoverable.
+#
+# ponytail: a ratio, not a tokenizer. The Anthropic SDK's count_tokens is an
+# API round-trip per call, which is the wrong price for a trimming decision
+# made on every turn. Swap in a local tokenizer if one ships.
+CHARS_PER_TOKEN = 3.5
+
+# What the volatile suffix may spend. The existing caps were COUNT-based
+# (top-k chunks, last 6 turns), which bounds the number of items and not
+# their size — one long retrieved chunk could carry more text than the whole
+# rest of the prompt. This bounds the bytes.
+DEFAULT_VOLATILE_BUDGET_TOKENS = 6000
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count. See CHARS_PER_TOKEN — an estimate, never a promise."""
+    return int(len(text) / CHARS_PER_TOKEN) + 1
+
 _SAFETY_RULES = (
     "You are Davi, a careful health assistant offering general, educational "
     "information and decision support. You are NOT a doctor and you never "
@@ -152,25 +172,76 @@ _CLARIFY_RULES = (
 )
 
 
+def _fit_budget(
+    chunks: list[RetrievedChunk] | None,
+    recent_turns: list[dict] | None,
+    patient_context: str,
+    compacted_context_json: str | None,
+    budget_tokens: int,
+) -> tuple[list[RetrievedChunk] | None, list[dict] | None]:
+    """Drop the lowest-value material until the suffix fits.
+
+    Chunks go first (lowest-ranked first — retrieval already ordered them),
+    then the OLDEST conversation turns. The most recent turn is never dropped:
+    a follow-up fragment is meaningless without the turn it follows.
+    """
+    fixed = estimate_tokens(patient_context) + estimate_tokens(
+        compacted_context_json or ""
+    )
+    remaining = budget_tokens - fixed
+
+    kept_chunks = list(chunks or [])
+    kept_turns = list(recent_turns or [])
+
+    def _cost() -> int:
+        return sum(
+            estimate_tokens(c.content) for c in kept_chunks
+        ) + sum(estimate_tokens(str(t.get("message", ""))) for t in kept_turns)
+
+    while _cost() > remaining and kept_chunks:
+        kept_chunks.pop()
+    while _cost() > remaining and len(kept_turns) > 1:
+        kept_turns.pop(0)
+
+    return (kept_chunks or None), (kept_turns or None)
+
+
 def build_agentic_system_prompt(
     patient_context: str,
     compacted_context_json: str | None = None,
     recent_turns: list[dict] | None = None,
     chunks: list[RetrievedChunk] | None = None,
     allow_questions: bool = True,
+    budget_tokens: int = DEFAULT_VOLATILE_BUDGET_TOKENS,
 ) -> tuple[str, str]:
     """Return ``(stable_prefix, volatile_suffix)``.
 
-    The prefix is byte-identical across turns so it can later carry a
-    prompt-cache breakpoint (Task 23); everything that varies per turn goes in
-    the suffix. Keeping them separate now costs nothing and makes that change
-    a one-liner.
+    The prefix is byte-identical across turns and carries the prompt-cache
+    breakpoint (see ``app/llm/anthropic.py``); everything that varies per turn
+    goes in the suffix, where it would break the cache on every call.
+
+    ``budget_tokens`` bounds the SUFFIX only. The prefix is never trimmed:
+    trimming it would change it, which is the one thing it must not do.
+
+    What gets dropped first, and why: retrieved chunks before conversation
+    turns. A dropped chunk costs the model one source it can cite; a dropped
+    turn costs it the thread of the conversation, and a follow-up like "is
+    that serious?" becomes unanswerable. Patient context and the compacted
+    summary are never dropped — they are small and they are the reader's own
+    situation.
     """
     stable_parts = [_SAFETY_RULES, _GROUNDING_RULES, _TOOL_RULES]
     if allow_questions:
         stable_parts.append(_CLARIFY_RULES)
     stable_parts.append(_PERSONALIZATION_RULES)
     stable = "\n\n".join(stable_parts)
+
+    # Trim to the budget BEFORE rendering, not after. Rendering then truncating
+    # would cut a chunk mid-sentence and hand the model a fact with its
+    # qualifier missing — worse than not having the chunk at all.
+    chunks, recent_turns = _fit_budget(
+        chunks, recent_turns, patient_context, compacted_context_json, budget_tokens
+    )
 
     volatile: list[str] = []
     if recent_turns:

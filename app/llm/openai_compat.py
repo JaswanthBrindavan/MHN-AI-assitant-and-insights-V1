@@ -27,6 +27,7 @@ from app.llm.tools import (
     ToolResultMessage,
     ToolSpec,
     UserMessage,
+    join_system,
 )
 
 logger = logging.getLogger("davi.llm")
@@ -202,7 +203,7 @@ class OpenAICompatibleProvider:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
-    async def generate(self, *, system: str, user: str) -> str:
+    async def generate(self, *, system: str | Sequence[str], user: str) -> str:
         turn = await self.generate_turn(
             system=system, messages=[UserMessage(user)], tools=()
         )
@@ -211,7 +212,7 @@ class OpenAICompatibleProvider:
     async def generate_turn(
         self,
         *,
-        system: str,
+        system: str | Sequence[str],
         messages: Sequence[Message],
         tools: Sequence[ToolSpec] = (),
     ) -> LLMTurn:
@@ -219,7 +220,7 @@ class OpenAICompatibleProvider:
             "model": self.model,
             # Unlike Anthropic, the system prompt is a message, not a field.
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": join_system(system)},
                 *_to_openai_messages(messages),
             ],
             "temperature": 0,
@@ -240,14 +241,14 @@ class OpenAICompatibleProvider:
     async def generate_stream(
         self,
         *,
-        system: str,
+        system: str | Sequence[str],
         messages: Sequence[Message],
     ) -> AsyncIterator[str]:
         """Yield text deltas from an SSE /chat/completions stream."""
         payload: dict = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": system},
+                {"role": "system", "content": join_system(system)},
                 *_to_openai_messages(messages),
             ],
             "temperature": 0,

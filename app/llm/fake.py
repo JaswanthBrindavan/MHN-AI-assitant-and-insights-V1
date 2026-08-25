@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 
-from app.llm.tools import LLMTurn, Message, ToolSpec
+from app.llm.tools import LLMTurn, Message, ToolSpec, join_system
 
 
 class FakeProvider:
@@ -44,10 +44,10 @@ class FakeProvider:
         self._raises = raises
         self.calls: list[dict] = []
 
-    async def generate(self, *, system: str, user: str) -> str:
+    async def generate(self, *, system: str | Sequence[str], user: str) -> str:
         # Record BEFORE raising: `provider.calls == []` must keep meaning
         # "the model was never reached", so an outage still records that it was.
-        self.calls.append({"system": system, "user": user})
+        self.calls.append({"system": join_system(system), "user": user})
         # Script FIRST, then raise: that makes responses= and raises= compose
         # into "answer N times, then the provider dies", which is what a
         # mid-conversation outage actually looks like. Checking raises= first
@@ -62,13 +62,13 @@ class FakeProvider:
     async def generate_turn(
         self,
         *,
-        system: str,
+        system: str | Sequence[str],
         messages: Sequence[Message],
         tools: Sequence[ToolSpec] = (),
     ) -> LLMTurn:
         self.calls.append(
             {
-                "system": system,
+                "system": join_system(system),
                 "messages": list(messages),
                 "tools": [t.name for t in tools],
             }
@@ -88,12 +88,12 @@ class FakeProvider:
     async def generate_stream(
         self,
         *,
-        system: str,
+        system: str | Sequence[str],
         messages: Sequence[Message],
     ) -> AsyncIterator[str]:
         """Stream the next scripted turn word by word."""
         self.calls.append(
-            {"system": system, "messages": list(messages), "stream": True}
+            {"system": join_system(system), "messages": list(messages), "stream": True}
         )
         if self._raises is not None:
             raise self._raises

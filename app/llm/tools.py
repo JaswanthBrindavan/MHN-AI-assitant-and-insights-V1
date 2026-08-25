@@ -9,6 +9,7 @@ Keep this module free of I/O, httpx, and vendor SDK imports.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -93,3 +94,15 @@ class LLMTurn:
     @property
     def wants_tools(self) -> bool:
         return self.stop_reason == "tool_use" and bool(self.tool_calls)
+
+
+def join_system(system: str | Sequence[str]) -> str:
+    """Flatten a split system prompt back to one string.
+
+    Only the Anthropic adapter can act on the split (there it becomes a cache
+    breakpoint). Every other provider joins it back — the split must never
+    change what the model is TOLD, only how the tokens are billed.
+    """
+    if isinstance(system, str):
+        return system
+    return "\n\n".join(part for part in system if part)

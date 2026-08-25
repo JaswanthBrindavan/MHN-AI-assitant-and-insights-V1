@@ -1027,7 +1027,14 @@ async def _dispatch_agentic(
         allow_questions=allow_questions,
     )
     directive = language_directive("en" if lang != "en" else lang)
-    system = "\n\n".join(p for p in (stable, volatile, directive) if p)
+    # Split, not joined: element 0 is byte-identical across every turn and
+    # carries the prompt-cache breakpoint in the Anthropic adapter. Every
+    # other provider joins it straight back, so the model is told exactly the
+    # same thing either way — only the billing differs.
+    #
+    # The language directive belongs in the VOLATILE half: it changes with the
+    # reader's language, and a per-reader prefix caches for nobody.
+    system: list[str] = [stable, "\n\n".join(p for p in (volatile, directive) if p)]
 
     async def _executor(call):
         return await execute_tool(db, user_id, call, session_id)
