@@ -8,14 +8,15 @@
 >
 > **Closed:** A1 (Sonnet 5), A5 (memory document BUILT), A6 (emergency
 > recording), A8 (job_runs actor), A9/D1 (monotonic clock), C1 (complete
-> deferred erasure), C2 (session-list scan), C3 (retention), C6 (memo leak —
-> superseded by the document), plus period data and adherence.
+> deferred erasure), C2 (session-list scan), C3 (retention), plus period data
+> and adherence.
 >
 > **Found and fixed since:** mhn-spring's V18 silently made three
 > patient-facing answers wrong; a drug reply ignored the reader's allergies;
 > Davi's V7–V10 collided with mhn-spring's Flyway chain.
 >
-> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, C7–C10, and
+> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, **C6**, C7–C11,
+> and
 > everything in section B. See [`handover.md`](./handover.md) for the ordered
 > pick-up list.
 
@@ -68,7 +69,7 @@ found", which reads as "no interaction exists" — a worse failure than today's
 honest refusal, because the pipeline would be working correctly while producing
 it. Full options table in `task-25-drug-interactions.md` §3.
 
-### A5 — Build the per-user memory document? ✅ AGREED — not yet built
+### A5 — Build the per-user memory document? ✅ AGREED — and BUILT
 And if yes, five sub-decisions (`per-user-memory.md` §8): how many past
 documents to hold (rec: last 5 + trends), freshness tolerance (rec: 1 hour),
 reuse `chat_personalization` consent (rec: yes), show the user what Davi
@@ -87,7 +88,7 @@ accident.
 Consistent with the production listing filter, but the consequence is now
 document *bytes* rather than a listing row. Worth a deliberate ruling.
 
-### A8 — `job_runs` has no actor column ✅ FIXED (V10)
+### A8 — `job_runs` has no actor column ✅ FIXED (V21)
 You learn a document was read, never by whom — the one field an access-control
 audit exists for. `job_runs` is Flyway-owned, so this needs a migration adopted
 into mhn-spring plus a coexistence re-check. Worth doing; not worth doing
@@ -162,8 +163,12 @@ buffers, so every matching row crosses the wire to keep one. Cost scales with
 **user tenure** — it worsens over exactly the period a user base grows. Sites
 named in `per-user-memory.md` §7 rung 0.
 
-### C6 — `clear_patient_context_memo` has zero production callers
-**Verified:** `app/chat/context.py:45` defines it; the only callers are in
+### C6 — `clear_patient_context_memo` is barely called — STILL OPEN
+> Previously listed as closed ("superseded by the document"). It is not: the
+> memory document did not replace `_context_memo`, and the leak is unchanged.
+
+**Verified:** `app/chat/context.py` defines it; `request_erasure` is now its
+ONE production caller (added with the erasure fix), and the rest are in
 `tests/test_turn_efficiency.py`. The comment at line 41 says it is "cleared
 explicitly by `recompute_insights`' callers" — it is not.
 
@@ -187,6 +192,24 @@ See A2. This is the Task 12 prerequisite.
 `_record` writes inside the caller's transaction, so a tool failure after a
 successful fetch rolls the audit row back while **the read already happened**.
 Fixing it properly means a separate short-lived session — the same shape as C7.
+
+### C11 — Receipts are not PHI-free, and two docs say they are
+**Verified.** `RagTurnReceipt.grounding` is a JSON column holding
+`GroundingReport.to_dict()`, whose `violations[]` entries each carry
+`"sentence"` — the offending **generated** sentence, verbatim
+(`app/grounding/claims.py:168, 175, 181`). A grounding violation is exactly the
+case where the model restated the reader's own numbers, so the stored text can
+contain PHI.
+
+Two places assert otherwise: `RagTurnReceipt`'s docstring ("Stores hashes,
+never raw text") and CLAUDE.md's invariant, now annotated.
+
+**Your call, because it changes what the audit trail holds.** Options: drop
+`sentence` and keep `type`/`marker` (the audit signal survives, debugging gets
+harder); hash it; or accept it and correct the two claims. I did not change
+receipt contents unilaterally — that is an audit contract.
+
+Retention limits the exposure either way: receipts are purged at 400 days.
 
 ### C10 — Two low-severity items, deliberately left
 - `clinician_reviewers` carries both a unique and a plain index on `user_id`.

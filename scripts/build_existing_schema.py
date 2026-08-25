@@ -51,7 +51,7 @@ header = f"""-- db/existing_schema.sql
 -- tests/conftest.py builds its schema from Davi's OWN partial mappings, so a
 -- column Davi does not map does not exist in any test database.
 --
--- The DATA inserts (V17 drinks, V18 the 192-parameter reference catalogue,
+-- The DATA inserts (V17 drinks, V18 the 193-parameter reference catalogue,
 -- V19 the drug merge) are kept deliberately. They are not decoration: the V18
 -- catalogue is precisely what broke the value-check matcher, and a schema file
 -- without it would let the same class of bug through again.

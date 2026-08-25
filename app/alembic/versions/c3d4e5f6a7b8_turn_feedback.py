@@ -2,7 +2,8 @@
 
 Closes drawbacks.md 8.2: nothing captured whether a reply was any good.
 
-Production adoption ships as db/flyway/V8__davi_feedback.sql; this revision
+Production adoption ships in mhn-spring's V21__davi_chat_platform.sql, which
+consolidates every Davi migration after V6; this revision
 builds local and test databases only (davi_alembic_version).
 
 Revision ID: c3d4e5f6a7b8

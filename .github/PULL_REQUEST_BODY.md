@@ -16,7 +16,7 @@ blocking step, and it is done.
 **unanchored substring**, from a query with no `ORDER BY`. That was harmless
 while `traditional_health_parameters` was empty — Davi fell back to its own
 correct constants. **V18 is the first migration in the chain that populates
-that table**, with 192 parameters whose names contain each other. And the
+that table**, with 193 parameters whose names contain each other. And the
 backend band beats Davi's constants unconditionally.
 
 Reproduced against V18's real rows, in V18's own insert order:
@@ -128,10 +128,23 @@ with a commit-placement change worth **120× the headroom**.
   tables; it now reaches all of them, on a 30-day cancellable window — and the
   assistant **stops using the data immediately**, which is what makes the
   deferral honest.
+  - That last part was **not true when this PR was first written**, and an
+    adversarial pass over these very claims caught it. `is_pending` gated only
+    `memory_assembly`; `build_patient_context` is a separate read over
+    `pedigree_conditions` and `insight_artifacts` and ran *before* that gate on
+    both engines — so the turn after a "forget me" still carried the reader's
+    **family history** into the prompt, while the API response told them
+    "Davi has stopped using your information already". Now gated at the shared
+    choke point, mutation-checked, on both engines. The nightly sweep also
+    stopped rebuilding the memory document through the grace window.
 - **Retention**: messages 180 days, receipts 400. Receipts hash the message
-  rather than storing it, so they are the audit trail without the PHI — keep
-  the evidence, drop the content. Previously **nothing deleted either**
-  (~9.94 TB/yr at 10M).
+  rather than storing it — the row keeps the hash, the model, the retrieved
+  chunks and the grounding verdict. Previously **nothing deleted either**.
+  - One caveat, found by the same pass and **not** fixed here because it
+    changes what the audit trail holds: `grounding.violations[].sentence`
+    stores the offending *generated* sentence verbatim, which can echo the
+    reader's own numbers. Receipts are therefore not yet literally PHI-free.
+    Registered as open item **C11** with the options; your call.
 - **`job_runs.actor_user_id`** — you could learn a document was read, never by
   whom.
 - **Cycle data** is in, gated the way mhn-spring gated it: own-data-only, no
@@ -142,7 +155,7 @@ with a commit-placement change worth **120× the headroom**.
 
 ## The per-user memory document (A5)
 
-One row per user, assembled on write, read with a single lookup. **Measured**:
+One row per user, read with a single lookup. **Measured**:
 
 | | |
 |---|---|
@@ -153,6 +166,12 @@ One row per user, assembled on write, read with a single lookup. **Measured**:
 Only the reader's **own** data — family permission is checked live, and a
 document that absorbed a relative's result would survive the revocation that
 should have removed it. Falling back to live assembly is always safe.
+
+**Honest about the write side:** today the only writer is the nightly sweep, so
+with a 1-hour freshness window the document path engages for about an hour a
+day and every other turn falls back to live assembly — correct, just not yet
+the saving. Rebuild-on-write is open item **D2**; the measured numbers above
+are what the document delivers once it is fresh.
 
 ---
 

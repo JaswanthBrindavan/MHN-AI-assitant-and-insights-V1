@@ -31,7 +31,7 @@ logger = logging.getLogger("davi.health")
 #
 # This was a substring match ("ldl" in the name), which is wrong in a
 # catalogue where parameter names contain each other. Against the backend's
-# real 192-row catalogue it produced three silently wrong answers:
+# real 193-row catalogue it produced three silently wrong answers:
 #
 #   ldl        -> "HDL/LDL Ratio"                (range 0.4-999, status DRAFT)
 #                 an LDL of 190 -- statin territory -- graded NORMAL

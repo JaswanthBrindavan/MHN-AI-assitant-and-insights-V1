@@ -72,7 +72,8 @@ def utcnow() -> datetime:
 
 Revert `app/models/common.py` and delete `tests/test_clock_monotonic.py`. Then
 the correct fix is a monotonic sequence column on `conversation_messages`,
-shipped as `db/flyway/V11__conversation_message_seq.sql` and adopted into
+shipped as a new Flyway migration numbered above mhn-spring's head (V11 is
+long since taken; check their chain first) and adopted into
 mhn-spring — larger, slower, and strictly more correct.
 
 ---

@@ -45,9 +45,16 @@ columns are invisible to it.
 
 ---
 
-## 2. The version collision — **done, nothing to renumber**
+## 2. The version collision — **done, and since adopted as V21**
 
-VERIFIED: `ls db/flyway/` returns exactly two files —
+> **Outcome (2026-08-25):** merged into mhn-spring's `main` as
+> `V21__davi_chat_platform.sql`; the tables are in the staging database. It was
+> renumbered once more first — staged here as V20, Spring added
+> `V20__staff_sessions.sql`, and the guard written in this very section caught
+> it. `db/` is now gitignored; Spring owns the files. Every "V20" below is the
+> historical record of how it got there.
+
+VERIFIED: `ls db/flyway/` returned exactly two files —
 `V6__davi_ai_tables.sql` (adopted long ago) and `V20__davi_chat_platform.sql`.
 Commit `9b19e03 fix(flyway): Davi's V7-V10 collided with mhn-spring's chain —
 consolidate to V20`. Working tree clean. `tests/test_flyway_parity.py` maps all
@@ -67,12 +74,14 @@ Collision re-check against every object in V1–V19 (VERIFIED): zero table, inde
 constraint or type collisions. `actor_user_id` appears nowhere in Spring's chain.
 V20's only foreign `ALTER` is on `job_runs`, Davi's own table from V6.
 
-**Action:** copy `db/flyway/V20__davi_chat_platform.sql` into
-`D:/mhn-spring-main/src/main/resources/db/migration/`. Nothing else.
+**Action — DONE.** It is in
+`D:/mhn-spring-main/src/main/resources/db/migration/` as
+`V21__davi_chat_platform.sql`, and merged to their `main`.
 
-Two notes for next time: V20 must land after V14 (fine by number), and Spring
-burned V10→V19 in four days — pick the *next* Davi number against a fresh
-`ls` of Spring's migration directory, not `V20+1`.
+The note for next time proved itself within a day: *pick the next Davi number
+against a fresh `ls` of Spring's migration directory, not `V20+1`.* Spring
+burned V10→V19 in four days and took V20 one day later. The guard now does that
+`ls` automatically.
 
 ---
 
@@ -198,7 +207,7 @@ if hint in hay:                        # unanchored substring
     if best is None or rank < best[0]: # strict < → first row seen wins
 ```
 
-MEASURED against V18's real 192-row catalogue:
+MEASURED against V18's real 193-row catalogue:
 
 | Hint | Rank-0 collisions (insert order) | Winner today | Band it applies |
 |---|---|---|---|
@@ -469,7 +478,7 @@ Two supporting notes:
 |---|---|---|
 | 1 | **Gate `scripts/ingest_drugs.py:113`** (3 lines: refuse if any `medicine_master.drug_reference_id IS NOT NULL`, override flag to bypass) | It damages *another team's* data, irreversibly, on a command Davi's own docs tell you to run. Blast radius outside our repo, and a one-command mistake. Cheapest thing on the list. |
 | 2 | **Rewrite `_match_thp` as a curated name map** + `status='approved' AND visible AND deleted_at IS NULL` + `.limit(1)`, and map `ThpAgeRange.sex` in the same edit | One function is actively reassuring patients about dangerous LDL values and routing every normal HDL to urgent care. Fixes 4.1, the draft-row exposure, 4.5 and 4.6 in one diff. Do it before 4.4 — the danger-tier fix is moot while the wrong parameter is being matched. |
-| 3 | **Hand `db/flyway/V20__davi_chat_platform.sql` to the Spring team** | Zero engineering left; it is pure coordination latency, and Spring is burning version numbers fast. Start it early, it runs in parallel with everything else. |
+| 3 | ~~**Hand the migration to the Spring team**~~ **DONE** — adopted as `V21__davi_chat_platform.sql` | Zero engineering left; it is pure coordination latency, and Spring is burning version numbers fast. Start it early, it runs in parallel with everything else. |
 | 4 | **Refresh `db/existing_schema.sql`** from a V1–V19 database | The single cheapest change that makes the rest testable, and the only reason none of this was caught. Do it before writing any new partial mapping, or the mapping is untested against production shape (CLAUDE.md's own gotcha). |
 | 5 | **Add one pg-marked test** that loads Spring's real V1–V19 chain and asserts, per mapped model, that every column exists with a compatible type | One test replaces 21 hand-written table tests and would have caught six of these findings. Depends on #4. |
 | 6 | **Drop the consent fallback** at `service.py:67-79` to `Boolean.TRUE.equals` semantics; invert `test_prod_adaptation.py:191-194`. Ask Spring for a `V2x` adding the four grant columns to Flyway | Privacy-relevant and permanently wrong-direction, but it needs a decision with the Spring team about legacy rows, so it cannot be a same-day fix. |

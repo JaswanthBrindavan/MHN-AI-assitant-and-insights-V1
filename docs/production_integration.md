@@ -70,9 +70,13 @@ Flyway in `mhn-spring` owns **all** production schema — since 2026-08-06 even
 the `ai_*` tables (mhn-ai's Alembic is frozen at `b6d1f8a3c209` and builds
 local/test DBs only). Davi follows the same rule:
 
-- **Adopt [`db/flyway/V6__davi_ai_tables.sql`](../db/flyway/V6__davi_ai_tables.sql)**
-  into `mhn-spring/src/main/resources/db/migration/` — it creates all 17 Davi
-  tables (uuid `user_id`, no FK to `"user"`, pgvector for `mcp_chunks`).
+- **Both Davi Flyway files are already adopted** into
+  `mhn-spring/src/main/resources/db/migration/`: `V6__davi_ai_tables.sql`
+  (17 tables — uuid `user_id`, no FK to `"user"`, pgvector for `mcp_chunks`)
+  and `V21__davi_chat_platform.sql` (the rest — `user_profiles`,
+  `turn_feedback`, `clinician_reviewers`, `insight_review_audit`,
+  `erasure_requests`, `user_memory_document`, `job_runs.actor_user_id`).
+  `db/` is gitignored here; mhn-spring owns those files.
 - Davi's Alembic chain (version table **`davi_alembic_version`**, mirroring
   `ai_alembic_version`) is for local/test databases only from now on.
 

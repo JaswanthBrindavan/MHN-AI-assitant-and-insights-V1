@@ -45,7 +45,9 @@ This backend shares the **MHN production database**. The production stack is
 three repos (see `docs/production_integration.md` for verified contracts):
 `mhn-spring` (Java API, **Flyway owns ALL schema** — including the `ai_*`
 tables since V4; our `V6__davi_ai_tables.sql` is ADOPTED, and teammates have
-added V7–V10 after it — V10 is the ai name-check columns), `mhn-ai`
+added V7–V20 after it — V10 is the ai name-check columns, V18 the
+193-row reference catalogue, V20 staff sessions, with our
+`V21__davi_chat_platform.sql` above them), `mhn-ai`
 (per-document AI: classify → file → extract → insights; writes `content.ai`
 envelopes into `reports.content` etc.; its Alembic chain is frozen,
 `ai_alembic_version`; since its PR #4 it also runs a NAME CHECK — a document
@@ -180,7 +182,11 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
 - **One vocabulary**: compaction detects flags with the SAME triage tables.
 - **Fail open**: grounding/validation/receipts/compaction/provider crashes →
   safe reply + WARNING, never an exception to the caller.
-- **No PHI in logs / receipts**: receipts store SHA-256 of the message only.
+- **No PHI in logs / receipts**: receipts store SHA-256 of the message only —
+  with ONE known exception, `grounding.violations[].sentence`, which stores the
+  offending GENERATED sentence verbatim and can echo the reader's own numbers.
+  See open item C11; the `RagTurnReceipt` docstring's "never raw text" is
+  therefore not yet literally true.
 - **Identity privacy**: the underlying model/provider is never disclosed.
   Model/provider questions route to the canned identity reply (no LLM); the
   system prompt forbids naming providers; the validator bans provider names in
@@ -204,7 +210,7 @@ Suite green on aiosqlite (1,863 tests, clean under shuffled seeds).
 `scripts/run_evals` is 17/17 on BOTH engines. ruff + pyright clean. All
 clinical content is DRAFT.
 
-**Branch `praveen-mhn` is ahead of main and awaiting a PR.** Its schema is
+**Branch `praveen-mhn` is ahead of main, with PR #22 open.** Its schema is
 already adopted into mhn-spring as `V21__davi_chat_platform.sql`. Read
 `project_docs/handover.md` before continuing.
 

@@ -2,7 +2,8 @@
 
 Local/test databases only. On the shared production database Flyway owns ALL
 schema — the production DDL for this table ships as
-``db/flyway/V7__davi_user_profile.sql`` for adoption into mhn-spring's chain.
+``V21__davi_chat_platform.sql``, adopted into mhn-spring's chain (``db/`` is
+gitignored here — mhn-spring owns the file).
 
 Follows the house convention: ``user_id`` is a plain uuid with NO foreign key
 to ``"user"``; the only FK is to our own ``consent_ledger``.

@@ -6,7 +6,7 @@ otherwise run on every turn.
 
 Derived and rebuildable — losing this table costs a rebuild, never data.
 
-Production adoption is in db/flyway/V20__davi_chat_platform.sql alongside the
+Production adoption is in mhn-spring's V21__davi_chat_platform.sql alongside the
 rest of Davi's pending schema. This revision builds local and test databases
 only (davi_alembic_version).
 

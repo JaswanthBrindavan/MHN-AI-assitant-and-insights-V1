@@ -7,7 +7,7 @@ was harmless while the table was empty — `_match_thp` returned None and
 constants in `app/health/ranges.py`.
 
 mhn-spring's `V18__thp_catalogue.sql` is the first migration in the chain that
-POPULATES that table — 192 parameters, including several whose names contain
+POPULATES that table — 193 parameters, including several whose names contain
 each other. And `data_handlers.py` prefers the backend band **unconditionally**
 over Davi's constants.
 
