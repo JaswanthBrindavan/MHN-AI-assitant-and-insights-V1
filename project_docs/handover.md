@@ -96,7 +96,7 @@ failed, which was pure artifact and the most alarming possible false signal.
 ### The gates
 
 ```bash
-.venv/Scripts/python -m pytest -q -p no:randomly     # 1489 passed
+.venv/Scripts/python -m pytest -q -p no:randomly     # 1583 passed
 .venv/Scripts/python -m pytest -q                    # random order, also clean
 .venv/Scripts/python -m ruff check .
 .venv/Scripts/python -m pyright
