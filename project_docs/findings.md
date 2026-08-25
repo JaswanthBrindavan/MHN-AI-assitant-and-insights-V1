@@ -122,3 +122,83 @@ Findings from the implementation and review of Phase 0, Phase 1 and Phase 2.
   debatable for OpenAI-compatible gateways, which return `finish_reason: "stop"`
   with a populated `tool_calls` array. Pinning it now would cement a possible
   adapter bug as intended behaviour.
+
+---
+
+## Phase 3 — Tasks 17, 18, 19
+
+**Review:** 17 agents, four lenses (access control, vision, voice,
+adapters/tests), each finding put through adversarial refutation. **58 findings
+raised, 3 survived refutation as stated** — but the verdict pass upgraded
+several the per-finding verifiers had softened, and all of the below were
+confirmed against the real code before being fixed.
+
+**Reviewers were read-only this round.** No scratch files, no mutations, no
+false signals.
+
+### Critical
+
+| # | File | Finding |
+|---|---|---|
+| C1 | `app/api/v1/chat.py` | **The low-confidence voice branch returned a reply without running the triage floor, and hardcoded `risk_level=NONE`.** Verified live: `triage("I can't breathe")` → emergency, `triage("I want to kill myself")` → emergency; both returned HTTP 200 with `risk_level="none"`, no escalation copy, and the Tele-MANAS helpline withheld. This was the only path in the codebase producing a user-visible reply with the floor unrun — and hardcoding NONE is not "the floor did not run", it is *lowering* it. The asymmetry ran the wrong way: ASR confidence collapses on breathless, slurred, panicked or pained speech, so the gate fired hardest on the population it most needed to protect. **Fixed:** the floor runs on what was heard, always; a red flag escalates first and the confirmation is appended after. |
+
+### High
+
+| # | File | Finding |
+|---|---|---|
+| H1 | `app/api/v1/chat.py` | The confirmation prompt quoted raw ASR output to the reader without `validate_reply`. Verified: a transcript of "you probably have dengue" and one naming a provider both shipped verbatim. ASR output is a model's guess — untrusted from the same direction as vision output, which this same work routes through the validator. **Fixed.** |
+| H2 | `app/chat/conversation.py` | `ensure_session` returned any existing row by id **without checking who owned it**. Passing another user's `session_id` loaded their history into your prompt and appended your turn to it. Pre-existing since Task 16, widened by Phase 3's third caller. **Fixed once in the shared function** — smaller than four endpoint guards, and covers `/chat`, `/chat/stream`, `/chat/upload`, `/chat/voice`. |
+| H3 | `app/chat/agent.py` | Vision text flowed into `sources` for the numeric-fidelity guard, so an OCR misread would be **authorised** by the one guard that exists to catch it. Also: nothing told the vision model that text inside an image is data rather than instruction, and the transcript lands in a tool result the main model reads — a model that can call tools. **Fixed:** `ToolResult.trusted_values`, and an explicit injection rule in the prompts. |
+
+### Medium
+
+| # | Finding |
+|---|---|
+| M1 | The transcript bypassed the 4000-char bound every other text entry point enforces. 10 MB of Opus is 50+ minutes of speech, persisted whole and injected whole into the prompt. **Fixed.** |
+| M2 | `audio` was an unbounded string; the 10 MB cap was consulted *after* decoding. **Fixed at the schema**, with the post-decode check kept as the exact backstop. |
+| M3 | `confirmed` was an unbound client boolean that **disabled the gate entirely** when sent on the first request — and confirming re-ran a sampling ASR decoder, so the text acted on need not be the text the reader saw. **Removed the field and the branch**; a client that agrees posts the text to `/chat`. |
+| M4 | `MAX_BYTES` was enforced *after* httpx buffered the whole body — a ceiling on what was returned, not what was read. The module comment claimed otherwise. **Fixed by streaming** with an incremental check; a lying `content-length` gets no free pass. |
+| M5 | `VISION_MODEL` was read in exactly one place, a truthiness gate. Pointing it at a multimodal endpoint did nothing but flip a boolean. **Fixed:** it now selects a real provider. |
+| M8 | **The family branch of the consent gate had zero coverage** across 1559 tests — every test used `viewer == owner`, which short-circuits on the first line of `can_view_document`. The four-condition gate that is the entire reason the module is careful was never exercised. **Five tests added**, including the wrong-side grant and the per-file exclusion. |
+
+### Low
+
+| # | Finding |
+|---|---|
+| L4 | A remote header went unbounded into the audit column. **Fixed** with `[:64]`. |
+| L5 | An attachment message with no text emitted an invalid empty text block. The sibling branch fifteen lines below already guarded this. **Fixed in both adapters.** |
+| L6 | `VoiceSidecar.synthesize` has no caller and `ChatResponse` has no audio field. **Documented honestly** rather than left implying it is wired. |
+| L7 | **Three tests that could not fail.** The non-http URL test passed with the guard removed (the stub raised on the next call, the bare except caught it, and the function returned `None` — the exact assertion). The transport test raised on the *first* call, exercising the URL handler rather than the byte handler its name claimed. And the only test inspecting what `describe_image` sends asserted the text alone — an implementation that dropped the image passed all 20 tests in the file. **All three now pin what they claim.** |
+| — | `startswith("http")` also accepts `"httpfoo://"`. Tightened to an exact scheme check. |
+
+### Refuted (verified as *not* defects — do not re-litigate)
+
+- **`owner_id`/`is_private` are caller-asserted, so any id passes** — the
+  `analyze_image` wiring resolves both from the row via `document_owner()`
+  before the fetch. Keep it that way.
+- **The `kind` fallback defeats per-file exclusions** — `_RESOURCE_TYPE`'s six
+  values are exactly the enum members, so every resolvable value maps to itself.
+- **`startswith("http")` is an SSRF primitive** — no attacker-controlled input
+  reaches the signed URL, the byte fetch sends no headers, and redirects are off
+  by default. Tightened anyway as free hardening.
+- **Sharing the injected client leaks the Spring token to the storage host** —
+  every production path opens a fresh client per leg; the token is a
+  per-request header, never a client default.
+- **`_record`'s bare except poisons the session** — mechanically true in
+  isolation, but `execute_tool` wraps executors in a SAVEPOINT that neutralises
+  it. The proposed `await db.rollback()` would have discarded the whole turn.
+- **`UserMessage` frozen-with-mutable-dict** — nothing hashes it and nothing
+  mutates an attachment; both adapters serialise immediately.
+
+### Deferred, deliberately
+
+- **`job_runs` has no actor column.** You learn a document was read, never by
+  whom — the one field an access-control audit exists for. `job_runs` is
+  Flyway-owned, so adding `user_id` needs a migration adopted into mhn-spring
+  plus a coexistence re-check. Worth doing; not worth doing quietly.
+- **Audit durability.** `_record` writes inside the caller's transaction, so a
+  tool failure after a successful fetch rolls the audit row back while the read
+  already happened. Fixing it properly means a separate short-lived session.
+- **`is_private=None` is treated as shareable.** Consistent with the listing
+  filter and documented production semantics, but worth a deliberate decision
+  now that the consequence is bytes rather than a listing row.

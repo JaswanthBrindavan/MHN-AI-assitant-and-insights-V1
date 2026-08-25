@@ -1,9 +1,9 @@
 # Handover
 
-**State:** Phase 0, Phase 1 and Phase 2 of
+**State:** Phases 0, 1, 2 and 3 of
 [`implementation-plan.md`](./implementation-plan.md) are complete.
 **Branch:** `praveen-mhn`, merged with `origin/main` (10 commits), **not pushed**.
-**Verified:** 1489 passed · ruff clean · pyright 0 · run_evals 15/15 on both engines.
+**Verified:** 1583 passed · ruff clean · pyright 0 · run_evals 15/15 on both engines.
 
 Nothing here changes behaviour for users yet: everything ships behind
 `CHAT_ENGINE`, which still defaults to `legacy`.
@@ -71,9 +71,13 @@ since `_hybrid_rank` short-circuits on SQLite and has therefore never run.
 
 Do not skip (3). The legacy engine is what currently answers real users.
 
-**Then Phase 3 (multimodal) or Phase 4 (measurement).** Phase 4 first is the
-better order: Task 20 (observability) and Task 21 (quality evals) are what tell
-you whether Phase 1 actually worked, and Task 21 gates Task 12 anyway.
+**Then Phase 4 (measurement).** Task 20 (observability) and Task 21 (quality
+evals) are what tell you whether any of this actually worked, and Task 21 gates
+Task 12.
+
+Phase 3 is done but three things need a live service before they can be
+trusted: the Spring presigned-GET endpoint, a vision model, and the voice
+sidecar. All three are wired, unit-tested and off by default.
 
 ---
 
@@ -138,3 +142,40 @@ git status --short          # stray files?
 git diff HEAD -- app/       # source touched unexpectedly?
 grep -rn "MUTANT" app/      # a mutation left behind?
 ```
+
+---
+
+## Phase 3 additions
+
+Three features, all **off by default**:
+
+| Env | Effect |
+|---|---|
+| `MHN_SPRING_BASE_URL` + `MHN_SPRING_TOKEN` | Davi may read document bytes via a Spring-minted presigned GET. Davi still holds no AWS credentials. |
+| `VISION_ENABLED` (+ optional `VISION_MODEL`) | The model may call `analyze_image` on a document the reader is entitled to. |
+| `VOICE_BASE_URL` | `POST /api/v1/chat/voice` accepts a voice note. |
+
+**Spring must expose** `GET /files/{resource_type}/{id}/url` returning
+`{"url": "https://…"}` and honouring `Authorization: Bearer <MHN_SPRING_TOKEN>`
+plus `X-User-Id`. See `docs/production_integration.md`.
+
+**The voice sidecar must expose** `POST /transcribe` returning
+`{text, language, confidence}` and `POST /speak` returning `{audio}` (base64).
+A sidecar that does not report a confidence pins every transcript at 0.0, which
+routes everything through the confirmation path — safe, but useless. Check that
+before deploying.
+
+**Synthesis is implemented but not wired** — `ChatResponse` has no audio field.
+Wire it when a client can play audio back.
+
+## One thing worth reading before touching the voice endpoint
+
+The first version of it returned the low-confidence confirmation question with
+`risk_level=NONE`, which meant a spoken "I can't breathe" at poor ASR
+confidence got a chatty clarification instead of an emergency directive. ASR
+confidence collapses on exactly the speech that signals an emergency —
+breathless, panicked, pained — so the gate fired hardest on the people it most
+needed to protect.
+
+The floor now runs on the transcript unconditionally, and a red flag escalates
+*before* the confirmation is appended. Do not reorder that.

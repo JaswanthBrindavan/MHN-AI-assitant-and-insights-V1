@@ -75,6 +75,19 @@ PostgreSQL returns aware ones. Comparing them raises. See `episodes._aware`.
 hybrid retrieval path is skipped under the default SQLite test suite. It has
 never run in CI until the Task 28 workflow.
 
+**Voice transcription runs BEFORE the triage floor, and the floor runs even
+when the transcript is not trusted.** Returning the low-confidence confirmation
+with `risk_level=NONE` was a real breach — that is *lowering* the floor, not
+skipping it, and ASR confidence collapses on exactly the breathless, panicked
+speech that signals an emergency.
+
+**Vision output is not a numeric source.** `ToolResult.trusted_values` is False
+for `analyze_image`, so an OCR misread cannot be authorised by the
+numeric-fidelity guard. Anything a MODEL produced belongs on the same footing.
+
+**`ensure_session` checks ownership.** It did not until the Phase 3 review;
+passing another user's `session_id` loaded their history into your prompt.
+
 **Windows cp1252 vs UTF-8.** `Path.read_text()` without `encoding=` crashes on
 the em-dashes in `scenarios.json`. This made the safety eval gate completely
 unrunnable on Windows for some time. Always pass `encoding="utf-8"`.
@@ -112,6 +125,9 @@ app/chat/episodes.py      symptom episodes
 app/chat/summarize.py     prose alongside deterministic compaction
 app/grounding/fidelity.py numeric fidelity guards (pure)
 app/api/v1/profile.py     see / change / erase what is remembered
+app/documents/fetch.py    Spring-minted presigned GET, two-sided consent
+app/vision/service.py     read an image; output is untrusted text
+app/voice/service.py      self-hosted ASR/TTS sidecar
 scripts/provider_bakeoff.py  Anthropic vs self-hosted, with numbers
 .github/workflows/ci.yml  the gate that did not exist
 ```

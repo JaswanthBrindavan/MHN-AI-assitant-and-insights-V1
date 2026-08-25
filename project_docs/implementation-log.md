@@ -38,6 +38,9 @@ review pass under `.claude/review-rules.md`, fix findings, re-verify.
 | 14 | User profile store | ✅ done | `7514b0a` |
 | 15 | Episode tracking | ✅ done | `7514b0a` |
 | 16 | Hybrid compaction | ✅ done | `801ca7c` |
+| 17 | Scoped document fetch | ✅ done | `5b6f4c7`, `335540c` |
+| 18 | Vision | ✅ done | `5b6f4c7`, `d29cffe`, `335540c` |
+| 19 | Voice | ✅ done | `5b6f4c7`, `335540c` |
 
 ---
 
@@ -371,3 +374,114 @@ verified it never reached a commit.
 
 **Reviewers must be read-only.** A reviewer that mutates the tree it is
 reviewing can make working code look broken and broken code look fine.
+
+---
+
+## Phase 3 — Tasks 17, 18, 19 (vision and voice)
+
+All three ship **off by default**. An empty base URL or `vision_enabled=false`
+means the chat behaves exactly as before.
+
+### Task 17 — the narrow exception to "no S3"
+
+The security posture in `docs/production_integration.md` says Davi holds **no
+AWS credentials**, and that is preserved rather than abandoned. Davi asks
+*Spring* — which owns the bucket and already authorises file reads — to mint a
+short-lived presigned GET, then reads those bytes in memory for one turn.
+
+Three guards, in order:
+
+1. **Davi checks consent itself**, with the same four-condition gate as every
+   other family read, *before anything leaves the process*. A test asserts the
+   stub client recorded zero calls for a refused document.
+2. **Spring mints the URL** and re-checks while doing so. Both checks are
+   deliberate: a bug in either alone cannot widen what the AI can read.
+3. **Bounded and never persisted.** Streamed with an incremental size cap,
+   content type rejected from the headers before any body arrives, nothing
+   written to disk or to a table.
+
+Every fetch writes a `job_runs` row, so *which documents the AI read* is
+answerable from the database rather than from logs.
+
+PDFs are deliberately excluded — mhn-ai already extracts those into
+`content.ai`, and re-reading the raw file would duplicate its job with a worse
+tool.
+
+### Task 18 — vision, wired as a tool
+
+Vision enters as a **tool** rather than an automatic step, for the same reason
+every ability did in Phase 1: the model decides when it is relevant, and the
+result lands in a tool result, which already flows through the validator, the
+fidelity guard and the grounding verifier.
+
+Two properties make it safe rather than reckless:
+
+- **It inherits the consent gate.** `analyze_image` goes through
+  `fetch_document_bytes`, so there is no path from a chat message to an image
+  the family gate would deny.
+- **Its output is untrusted text.** A vision model describing a photo is a
+  generator like any other. A test asserts a vision reply claiming "you
+  probably have dengue" fails the validator.
+
+The prompts **refuse** rather than merely omit, because the failure mode is not
+a model that says nothing — it is one that confidently identifies a rash, a
+loose tablet, or a diagnosis from a photograph. The skin prompt forbids naming
+a condition; the medicine prompt forbids identifying a loose tablet by colour
+and shape; every prompt makes "I can't read that clearly" an acceptable answer,
+or the model guesses instead.
+
+`UserMessage` gained `attachments`, translated by both adapters. A data URI
+rather than the presigned link — pointing a third party at that link would hand
+out access this service was careful to keep scoped.
+
+### Task 19 — voice, and the ordering rule
+
+Transcription happens first and the transcript enters the **same** pipeline as
+a typed message. There is no separate voice path, so a spoken red flag cannot
+bypass the safety design by virtue of the input method.
+
+Below HIGH, a low-confidence transcript is offered back for confirmation and
+the pipeline is not run: "I can breathe" and "I can't breathe" differ by one
+phoneme and by everything else.
+
+---
+
+## What the Phase 3 review caught
+
+The review was **read-only this time**, after the Phase 1–2 round left scratch
+files that made the emergency tests fail spuriously. It found a genuine safety
+breach.
+
+**The critical one was mine, and it was subtle.** The low-confidence voice
+branch returned a reply *without running the triage floor*, hardcoding
+`risk_level=NONE`. That is not "the floor did not run" — it is **lowering** it,
+the one thing a floor forbids. A spoken "I can't breathe" at 0.22 confidence
+got a chatty clarification question; a spoken "I want to kill myself" got one
+too, with the Tele-MANAS helpline withheld.
+
+The asymmetry ran exactly the wrong way. **ASR confidence collapses on
+breathless, slurred, panicked or pained speech and in noisy places** — so the
+gate fired hardest on precisely the people who most needed the escalation. And
+the test written to cover that branch used *"I can breathe"*, the safe half of
+the phoneme pair the module's own docstring names.
+
+That is the shape of the mistake worth remembering: the code did what the
+comment said, the test passed, and the design was still wrong.
+
+Three more that the suite passed straight through:
+
+- **Vision text was becoming an authorised numeric source.** An OCR misread
+  (INR 1.0 read as 10.0) would have been *authorised* by the numeric-fidelity
+  guard — the one guard that exists to catch exactly that.
+- **`ensure_session` never checked ownership.** Passing another user's
+  `session_id` loaded their history into your prompt. Pre-existing since Task
+  16; Phase 3 added a third caller. Fixed once, in the shared function.
+- **The family branch of the consent gate had zero test coverage** across 1559
+  tests, because every test used `viewer == owner`, which short-circuits on the
+  first line. The four-condition gate that is the entire reason that module is
+  careful was never exercised.
+
+And three tests that **could not fail**: the non-http URL test passed with the
+guard removed, the transport test exercised the URL handler rather than the
+byte handler its name claimed, and the vision test would have passed against an
+implementation that dropped the image entirely.
