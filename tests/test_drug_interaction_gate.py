@@ -166,16 +166,17 @@ async def test_both_engines_refuse_interaction_questions(
 async def test_recognised_is_true_when_the_dataset_does_know_the_drug(db_session):
     """The positive direction, so the field is not just a hard-coded False.
 
-    Every other assertion on `recognised` runs against an empty drug_reference,
+    Every other assertion on `recognised` runs against an empty medicine_master,
     where False is guaranteed by the fixture rather than by the code.
     """
-    from app.models.knowledge import DrugReference
+    from app.models.coredata import MedicineMaster
 
     db_session.add(
-        DrugReference(
+        MedicineMaster(
             name="Warfarin 5mg Tablet",
             name_normalized="warfarin 5mg tablet",
             is_discontinued=False,
+            status="approved",
         )
     )
     await db_session.flush()

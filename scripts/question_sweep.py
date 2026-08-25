@@ -31,7 +31,8 @@ from app.chat.orchestrator import handle_chat
 from app.chat.validation import find_banned
 from app.db import get_sessionmaker
 from app.llm.fake import FakeProvider
-from app.models.knowledge import ConditionRegistry, DrugReference
+from app.models.coredata import MedicineMaster
+from app.models.knowledge import ConditionRegistry
 from scripts.seed_demo_users import DEEPA, FARAH
 
 CONDITION_TEMPLATES = [
@@ -147,9 +148,13 @@ async def build_questions(db, limit: int) -> list[tuple[str, str, str | None]]:
 
     drugs = (
         await db.execute(
-            select(DrugReference)
-            .where(DrugReference.is_discontinued.is_(False))
-            .order_by(DrugReference.name_normalized)
+            select(MedicineMaster)
+            .where(
+                MedicineMaster.status == "approved",
+                MedicineMaster.deleted_at.is_(None),
+                MedicineMaster.is_discontinued.is_(False),
+            )
+            .order_by(MedicineMaster.name_normalized)
             .limit(3000)
         )
     ).scalars().all()

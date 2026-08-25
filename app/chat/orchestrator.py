@@ -75,6 +75,7 @@ from app.drugs.service import (
     extract_drug_query_term,
     extract_interaction_query,
     find_drug,
+    find_substitutes,
 )
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
 from app.grounding.fidelity import unit_values, values_traceable
@@ -266,7 +267,7 @@ async def _interaction_refusal(
     # one that names both items and routes to a pharmacist — never an
     # ungrounded LLM answer, and never the generic safe fallback.
     #
-    # This fires on the PHRASING, not on whether drug_reference recognised
+    # This fires on the PHRASING, not on whether medicine_master recognised
     # the terms. Requiring a database hit (as this did originally) meant an
     # unrecognised medicine name — a foreign brand, a misspelling, a
     # supplement, anything outside the Indian dataset — fell through to the
@@ -331,7 +332,7 @@ async def _interaction_refusal(
         provenance={
             "path": "drug_interaction_query",
             "drugs": names,
-            "source": "drug_reference",
+            "source": "medicine_master",
             "recognised": recognised,
         },
         language=lang,
@@ -582,10 +583,13 @@ async def _dispatch(
         try:
             term = extract_drug_query_term(message)
             drug = None
+            substitutes: list[str] = []
             if term:
                 # SAVEPOINT: a lookup failure must leave the session usable.
                 async with db.begin_nested():
                     drug = await find_drug(db, term)
+                    if drug is not None:
+                        substitutes = await find_substitutes(db, drug)
             if term:
                 if drug is not None:
                     t("Drug lookup",
@@ -606,7 +610,9 @@ async def _dispatch(
                             "allergy lookup failed; continuing", exc_info=True
                         )
                         record_fail_open("allergy_lookup")
-                    reply = build_drug_reply(drug, allergy_warning=warning)
+                    reply = build_drug_reply(
+                        drug, substitutes, allergy_warning=warning
+                    )
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
@@ -618,7 +624,7 @@ async def _dispatch(
                         provenance={
                             "path": "drug_query",
                             "drug": drug.name,
-                            "source": "drug_reference",
+                            "source": "medicine_master",
                         },
                         language=lang,
                         trace=trace,

@@ -56,6 +56,7 @@ COREDATA_TABLES = {
     "traditional_health_parameters",
     "thp_age_range",
     "medical_condition",
+    "medicine_master",
     "period_settings",
     "period_status",
     "period_tracking",
@@ -392,6 +393,43 @@ class TraditionalHealthParameter(Base):
     )
     visible: Mapped[bool | None] = mapped_column(
         sa.Boolean, nullable=True, default=True
+    )
+
+
+class MedicineMaster(Base):
+    """The core app's medicine catalogue (Flyway V19). Read-only here.
+
+    Partial mapping — only the columns the chat drug path reads. In PG,
+    ``name_normalized`` and ``composition_normalized`` are trigger-maintained
+    (lowercased, punctuation collapsed to single spaces); sqlite test fixtures
+    must set them explicitly with the same formulas.
+    """
+
+    __tablename__ = "medicine_master"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    name_normalized: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    generic_name: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    composition1: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    composition2: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    composition_normalized: Mapped[str | None] = mapped_column(
+        sa.String(512), nullable=True
+    )
+    # Comma-joined list (", " separator), unlike drug_reference's JSON list.
+    side_effects: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    used_for: Mapped[list | None] = mapped_column(
+        sa.ARRAY(sa.String).with_variant(sa.JSON(), "sqlite"), nullable=True
+    )
+    habit_forming: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    is_discontinued: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
+    status: Mapped[str] = mapped_column(
+        _pg_enum("reference_status_enum", "draft", "pending", "approved",
+                 "rejected", "archived", "merged"),
+        nullable=False,
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
     )
 
 

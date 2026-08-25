@@ -3,9 +3,11 @@
 Covers app/drugs/service.py:
   * extract_drug_query_term — every intent pattern, noise trimming, punctuation,
     non-drug questions, term length bounds.
-  * find_drug — exact → prefix → composition strategy order, whole-word salt
-    matching (the clove/love trap), single-ingredient and non-discontinued
-    preferences, deterministic tie-breaks, and the <3-char guard.
+  * find_drug — exact → prefix → composition strategy order over the
+    medicine_master catalogue, whole-word salt matching (the clove/love trap),
+    single-ingredient and non-discontinued preferences, deterministic
+    tie-breaks, and the <3-char guard.
+  * find_substitutes — same-composition alternatives, deterministic order.
   * build_drug_reply — mandatory medication note, validator-safety, list caps,
     habit-forming / discontinued variants.
   * orchestrator integration — drug_query path with no LLM call, fall-through
@@ -15,7 +17,9 @@ Covers app/drugs/service.py:
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
+from datetime import datetime
 
 import pytest
 from sqlalchemy import select
@@ -29,22 +33,31 @@ from app.drugs.service import (
     extract_drug_query_term,
     extract_interaction_query,
     find_drug,
+    find_substitutes,
 )
 from app.llm.fake import FakeProvider
 from app.models.chat import RagTurnReceipt
-from app.models.knowledge import DrugReference
+from app.models.coredata import MedicineMaster
 from app.triage.red_flags import EMERGENCY_DIRECTIVE
 
 USER = uuid.UUID("22222222-2222-2222-2222-222222222222")
 
 
-def _drug(name: str, **kw) -> DrugReference:
-    kw.setdefault("name_normalized", name.lower())
+def _trigger_norm(name: str) -> str:
+    # medicine_master's name_normalized trigger:
+    # lower(regexp_replace(name, '[^a-zA-Z0-9]+', ' ', 'g')).
+    # PG maintains it; sqlite fixtures must apply the same formula.
+    return re.sub(r"[^a-zA-Z0-9]+", " ", name).lower()
+
+
+def _drug(name: str, **kw) -> MedicineMaster:
+    kw.setdefault("name_normalized", _trigger_norm(name))
     kw.setdefault("is_discontinued", False)
-    return DrugReference(name=name, **kw)
+    kw.setdefault("status", "approved")
+    return MedicineMaster(name=name, **kw)
 
 
-async def _seed(db, *rows: DrugReference) -> None:
+async def _seed(db, *rows: MedicineMaster) -> None:
     db.add_all(rows)
     await db.flush()
 
@@ -384,30 +397,98 @@ async def test_find_unknown_term_returns_none(db_session):
     assert await find_drug(db_session, "zorbofloxacin") is None
 
 
+async def test_find_ignores_unapproved_and_deleted_rows(db_session):
+    await _seed(
+        db_session,
+        _drug("Dolo 650", status="pending"),
+        _drug("Dolo 650 NF", deleted_at=datetime(2026, 1, 1)),
+    )
+    assert await find_drug(db_session, "dolo 650") is None
+
+
+async def test_find_punctuated_query_matches_trigger_normalization(db_session):
+    # The trigger collapses punctuation to spaces; the query normalizer must
+    # do the same ("co-trimoxazole" → "co trimoxazole").
+    await _seed(db_session, _drug("Co-Trimoxazole 480 Tablet"))
+    hit = await find_drug(db_session, "co-trimoxazole")
+    assert hit is not None and hit.name == "Co-Trimoxazole 480 Tablet"
+
+
+# --------------------------------------------------------------------------- #
+# find_substitutes — same-composition alternatives
+# --------------------------------------------------------------------------- #
+_COMP = "amoxycillin (500mg) + clavulanic acid (125mg)"
+
+
+async def test_find_substitutes_deterministic_and_filtered(db_session):
+    main = _drug("Augmentin 625 Duo Tablet", composition_normalized=_COMP)
+    await _seed(
+        db_session,
+        main,
+        _drug("Moxikind-CV 625", composition_normalized=_COMP),
+        _drug("Clavam 625", composition_normalized=_COMP),
+        # Excluded: discontinued, unapproved, deleted, different composition.
+        _drug("Advent 625", composition_normalized=_COMP, is_discontinued=True),
+        _drug("Draft 625", composition_normalized=_COMP, status="draft"),
+        _drug(
+            "Gone 625",
+            composition_normalized=_COMP,
+            deleted_at=datetime(2026, 1, 1),
+        ),
+        _drug("Other Tab", composition_normalized="paracetamol (650mg)"),
+    )
+    # ORDER BY length(name), name — never the insert order.
+    assert await find_substitutes(db_session, main) == [
+        "Clavam 625", "Moxikind-CV 625",
+    ]
+
+
+async def test_find_substitutes_capped_at_five(db_session):
+    comp = "paracetamol (650mg)"
+    main = _drug("Main Tab", composition_normalized=comp)
+    await _seed(
+        db_session,
+        main,
+        *[_drug(f"Sub{i} Tab", composition_normalized=comp) for i in range(7)],
+    )
+    assert await find_substitutes(db_session, main) == [
+        f"Sub{i} Tab" for i in range(5)
+    ]
+
+
+async def test_find_substitutes_empty_without_composition(db_session):
+    row = _drug("Mystery Tab")
+    await _seed(db_session, row)
+    assert await find_substitutes(db_session, row) == []
+
+
 # --------------------------------------------------------------------------- #
 # build_drug_reply
 # --------------------------------------------------------------------------- #
-def _full_drug() -> DrugReference:
+_SUBSTITUTES = [
+    "Moxikind-CV 625", "Clavam 625", "Advent 625", "Mega-CV 625",
+    "Warclav 625", "Novamox CV 625", "Extraclav 625",
+]
+
+
+def _full_drug() -> MedicineMaster:
     return _drug(
         "Augmentin 625 Duo Tablet",
-        manufacturer="GSK Pharmaceuticals Ltd",
         composition1="Amoxycillin (500mg)",
         composition2="Clavulanic Acid (125mg)",
         composition_normalized="amoxycillin (500mg) + clavulanic acid (125mg)",
-        uses=["Treatment of Bacterial infections", "Type 2 diabetes mellitus"],
-        side_effects=[
-            "Vomiting", "Nausea", "Diarrhoea", "Mouth ulcer", "Headache",
-            "Skin rash", "Dizziness",
+        used_for=[
+            "Treatment of Bacterial infections", "Type 2 diabetes mellitus",
         ],
-        substitutes=[
-            "Moxikind-CV 625", "Clavam 625", "Advent 625", "Mega-CV 625",
-            "Warclav 625", "Novamox CV 625", "Extraclav 625",
-        ],
-        habit_forming="No",
+        side_effects=(
+            "Vomiting, Nausea, Diarrhoea, Mouth ulcer, Headache, "
+            "Skin rash, Dizziness"
+        ),
+        habit_forming=False,
     )
 
 
-def _minimal_drug() -> DrugReference:
+def _minimal_drug() -> MedicineMaster:
     return _drug("Mystery Tab")
 
 
@@ -440,15 +521,15 @@ def test_reply_minimal_drug_exact_text():
     )
 
 
-def test_reply_intro_composition_and_manufacturer():
+def test_reply_intro_composition():
     reply = build_drug_reply(_full_drug())
     assert (
         "Augmentin 625 Duo Tablet contains Amoxycillin (500mg), "
         "Clavulanic Acid (125mg)."
     ) in reply
-    # The manufacturer is deliberately omitted — patients cannot act on it.
+    # No manufacturer talk — the reply reads like drug information, not a
+    # product listing.
     assert "manufactured" not in reply
-    assert "GSK" not in reply
 
 
 def test_reply_composition2_only():
@@ -478,7 +559,7 @@ def test_reply_side_effects_capped_at_five_and_lowercased():
 
 
 def test_reply_substitutes_capped_at_five():
-    reply = build_drug_reply(_full_drug())
+    reply = build_drug_reply(_full_drug(), substitutes=_SUBSTITUTES)
     assert (
         "Moxikind-CV 625; Clavam 625; Advent 625; Mega-CV 625; Warclav 625"
         in reply
@@ -489,36 +570,28 @@ def test_reply_substitutes_capped_at_five():
 
 
 def test_reply_falsy_list_entries_filtered():
-    drug = _drug(
-        "Filter Tab",
-        uses=["", None],
-        side_effects=[None, ""],
-        substitutes=["", None],
-    )
-    reply = build_drug_reply(drug)
+    drug = _drug("Filter Tab", used_for=["", None], side_effects="")
+    reply = build_drug_reply(drug, substitutes=["", None])
     assert "generally used for" not in reply
     assert "side effects" not in reply
     assert "alternatives" not in reply.lower()
 
 
-@pytest.mark.parametrize("value", ["Yes", "yes", "  YES  "])
-def test_reply_habit_forming_yes(value: str):
-    reply = build_drug_reply(_drug("Alzolam 0.5", habit_forming=value))
+def test_reply_habit_forming_yes():
+    reply = build_drug_reply(_drug("Alzolam 0.5", habit_forming=True))
     assert "medicine is listed as habit-forming" in reply
     assert "exactly as prescribed" in reply
     assert validate_reply(reply, "none").ok
 
 
-@pytest.mark.parametrize("value", ["No", "no", " NO "])
-def test_reply_habit_forming_no(value: str):
-    reply = build_drug_reply(_drug("Dolo 650", habit_forming=value))
+def test_reply_habit_forming_no():
+    reply = build_drug_reply(_drug("Dolo 650", habit_forming=False))
     assert "medicine is not listed as habit-forming" in reply
     assert validate_reply(reply, "none").ok
 
 
-@pytest.mark.parametrize("value", [None, "", "Unknown"])
-def test_reply_habit_forming_absent_or_unrecognized(value):
-    reply = build_drug_reply(_drug("Dolo 650", habit_forming=value))
+def test_reply_habit_forming_absent():
+    reply = build_drug_reply(_drug("Dolo 650", habit_forming=None))
     assert "habit-forming" not in reply
     assert validate_reply(reply, "none").ok
 
@@ -546,7 +619,7 @@ async def test_orchestrator_drug_query_deterministic_no_llm(db_session):
     assert result.provenance == {
         "path": "drug_query",
         "drug": "Augmentin 625 Duo Tablet",
-        "source": "drug_reference",
+        "source": "medicine_master",
     }
     assert result.risk_level == "none"
     assert result.recommended_action == "discuss_with_prescriber"
@@ -560,6 +633,20 @@ async def test_orchestrator_drug_query_deterministic_no_llm(db_session):
         db_session, USER, "side effects of augmentin 625 duo tablet", provider
     )
     assert again.response_message == result.response_message
+    assert provider.calls == []
+
+
+async def test_orchestrator_drug_reply_includes_fetched_substitutes(db_session):
+    row = _full_drug()
+    await _seed(
+        db_session, row, _drug("Clavam 625", composition_normalized=_COMP)
+    )
+    provider = FakeProvider()
+    result = await handle_chat(
+        db_session, USER, "substitutes for augmentin 625 duo", provider
+    )
+    assert result.provenance["path"] == "drug_query"
+    assert "Clavam 625" in result.response_message
     assert provider.calls == []
 
 

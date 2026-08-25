@@ -1,9 +1,9 @@
 """A drug question must not ignore the reader's medication allergies.
 
 The drug-information handler returns from the orchestrator BEFORE
-`build_patient_context` runs (`app/chat/orchestrator.py`: the handler returns
-around :598, the `[P]` block is built at :615), and it sits AFTER the engine
-branch at :462 — so it is legacy-only, and `CHAT_ENGINE` defaults to legacy.
+`build_patient_context` runs, and it sits AFTER the engine branch — so it is
+legacy-only, and `CHAT_ENGINE` defaults to legacy. (Deliberately not citing
+line numbers: they moved once already, in the medicine_master merge.)
 
 `build_drug_reply(drug)` took no user and no session, so the reader's allergies
 were not merely unread there: they were unreachable.
@@ -15,6 +15,7 @@ engine bypassed. Same shape, opposite direction.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import pytest
@@ -23,8 +24,7 @@ from app.chat.orchestrator import handle_chat
 from app.config import get_settings
 from app.coredata.service import allergy_warning, medication_allergies
 from app.llm.fake import FakeProvider
-from app.models.coredata import MedicalCondition
-from app.models.knowledge import DrugReference
+from app.models.coredata import MedicalCondition, MedicineMaster
 
 USER = uuid.UUID("00000000-0000-0000-0000-00000000a11e")
 
@@ -33,12 +33,16 @@ BOTH_ENGINES = pytest.mark.parametrize("engine_name", ["legacy", "agentic"])
 
 async def _seed_drug(db, name: str = "Amoxicillin 500mg Capsule"):
     db.add(
-        DrugReference(
+        MedicineMaster(
             name=name,
-            name_normalized=name.lower(),
+            # medicine_master's name_normalized trigger, applied by hand for
+            # the sqlite fixture: lower(regexp_replace(name,'[^a-zA-Z0-9]+',' ')).
+            name_normalized=re.sub(r"[^a-zA-Z0-9]+", " ", name).lower(),
             is_discontinued=False,
-            uses=["bacterial infections"],
-            side_effects=["nausea", "rash"],
+            status="approved",
+            used_for=["bacterial infections"],
+            # A ", "-joined TEXT column since V19, not a list.
+            side_effects="Nausea, Rash",
         )
     )
     await db.flush()

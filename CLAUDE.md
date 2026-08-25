@@ -123,8 +123,10 @@ app/
     mcp_parser.py      docx → sections → chunks (512 Master Condition Profiles)
     registry.py        cached keyword index (word-boundary, stoplist), engine-
                        code map T2DM→MC001 / HTN→MC051 / CAD→MC052, fail-open
-  drugs/service.py     drug-info intent extraction + lookup over drug_reference
-                       (250K medicines); deterministic validator-safe replies
+  drugs/service.py     drug-info intent extraction + lookup over the Flyway-
+                       owned medicine_master catalogue (V19; drug_reference
+                       stays only as the ingest target); deterministic
+                       validator-safe replies
   llm/                 LLMProvider + ToolCallingProvider protocols, tools.py
                        (provider-neutral tool vocabulary), FakeProvider,
                        agnostic providers
@@ -185,7 +187,7 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
   generated text (`provider-leak`) — word-boundaried so SGPT/claudication and
   "what model of BP monitor" stay on their normal paths.
 - **Drug path is deterministic**: drug-information questions are answered from
-  drug_reference (never the LLM), only at NONE risk (the triage floor wins),
+  medicine_master (never the LLM), only at NONE risk (the triage floor wins),
   gated by NON_DRUG_TERMS, with ordered candidate windows for reproducibility.
 - **Registry keyword matching is guarded**: word boundaries, plural tolerance,
   ≥4-char keywords (3-char only for ALL-CAPS abbreviations, matched

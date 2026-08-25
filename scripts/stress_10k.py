@@ -56,7 +56,8 @@ from app.db import get_sessionmaker  # noqa: E402
 from app.insights.engine import recompute_insights  # noqa: E402
 from app.llm.fake import FakeProvider  # noqa: E402
 from app.models.core import PedigreeCondition  # noqa: E402
-from app.models.knowledge import ConditionRegistry, DrugReference  # noqa: E402
+from app.models.coredata import MedicineMaster  # noqa: E402
+from app.models.knowledge import ConditionRegistry  # noqa: E402
 from app.triage.red_flags import EMERGENCY, HIGH  # noqa: E402
 from scripts.seed_demo_users import DEEPA, FARAH  # noqa: E402
 
@@ -206,9 +207,13 @@ async def build_chat_questions(db, limit: int) -> list[tuple[str, str, str | Non
 
     drugs = (
         await db.execute(
-            select(DrugReference.name)
-            .where(DrugReference.is_discontinued.is_(False))
-            .order_by(DrugReference.name_normalized)
+            select(MedicineMaster.name)
+            .where(
+                MedicineMaster.status == "approved",
+                MedicineMaster.deleted_at.is_(None),
+                MedicineMaster.is_discontinued.is_(False),
+            )
+            .order_by(MedicineMaster.name_normalized)
             .limit(900)
         )
     ).scalars().all()

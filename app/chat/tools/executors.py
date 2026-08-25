@@ -34,7 +34,7 @@ from app.chat.data_handlers import (
     handle_value_check,
 )
 from app.coredata.service import document_owner
-from app.drugs.service import build_drug_reply, find_drug
+from app.drugs.service import build_drug_reply, find_drug, find_substitutes
 
 # Keys a handler may return that the model can use directly.
 _PASSTHROUGH = ("documents", "visual", "citations")
@@ -166,12 +166,20 @@ async def lookup_medicine(
     drug = await find_drug(db, name)
     if drug is None:
         return None
+    # medicine_master (Flyway V19) reshaped these: `uses` became `used_for`,
+    # and side_effects became a ", "-joined TEXT column. Slicing that string
+    # like the old list would hand the model a truncated WORD as a fact
+    # ("nausea, vomiting"[:5] == "nause") — valid Python, so nothing but a
+    # test catches it.
+    substitutes = await find_substitutes(db, drug)
     return {
-        "deterministic_reply": build_drug_reply(drug),
+        "deterministic_reply": build_drug_reply(drug, substitutes),
         "name": drug.name,
         "composition": [c for c in (drug.composition1, drug.composition2) if c],
-        "uses": (drug.uses or [])[:5],
-        "side_effects": (drug.side_effects or [])[:5],
+        "uses": list(drug.used_for or [])[:5],
+        "side_effects": [
+            s for s in (drug.side_effects or "").split(", ") if s
+        ][:5],
         "habit_forming": drug.habit_forming,
         # Stated explicitly so the model cannot infer that silence means safe.
         "has_interaction_data": False,
