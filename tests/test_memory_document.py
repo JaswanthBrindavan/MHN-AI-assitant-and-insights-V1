@@ -318,3 +318,59 @@ async def test_the_token_estimate_matches_the_block(db_session):
     await _seed(db_session)
     built = await memory_document.build(db_session, USER)
     assert built.token_estimate == estimate_tokens(built.prompt_block)
+
+
+async def test_documents_actually_reach_the_document(db_session):
+    """A regression test for a bug the fail-open hid completely.
+
+    `_gather` passed TABLE names ("reports", "scans_imaging") where
+    `latest_documents` wanted DOCUMENT_KINDS keys ("report", "scan"). That is a
+    KeyError — swallowed by the surrounding fail-open, logged, and the section
+    silently omitted. Every other test passed because none of them seeded a
+    document.
+    """
+    from app.coredata.service import DOCUMENT_KINDS
+    from app.models.coredata import Report
+
+    await _seed(db_session)
+    db_session.add(
+        Report(
+            user_id=USER,
+            filepath="s3://x/report.pdf",
+            content={"ai": {"classification": {"title": "Lipid Profile"}}},
+            private=False,
+        )
+    )
+    await db_session.flush()
+
+    built = await memory_document.build(db_session, USER)
+    assert "recent_documents" in built.document, (
+        "documents never reached the memory document"
+    )
+    assert "Lipid Profile" in built.prompt_block
+
+    # And the kinds the builder asks for must be real ones.
+    import inspect
+
+    source = inspect.getsource(memory_document._gather)
+    for kind in ("report", "scan"):
+        assert f'"{kind}"' in source
+    assert set(DOCUMENT_KINDS) >= {"report", "scan"}
+
+
+async def test_a_private_document_stays_out(db_session):
+    from app.models.coredata import Report
+
+    await _seed(db_session)
+    db_session.add(
+        Report(
+            user_id=USER,
+            filepath="s3://x/private.pdf",
+            content={"ai": {"classification": {"title": "Private Report"}}},
+            private=True,
+        )
+    )
+    await db_session.flush()
+
+    built = await memory_document.build(db_session, USER)
+    assert "Private Report" not in built.prompt_block

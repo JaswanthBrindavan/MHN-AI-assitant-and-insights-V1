@@ -171,7 +171,9 @@ async def _gather(db: AsyncSession, user_id: uuid.UUID) -> dict:
         docs = await latest_documents(
             db,
             user_id,
-            ["reports", "scans_imaging"],
+            # DOCUMENT_KINDS keys, not table names — "reports" is a
+            # KeyError, and the fail-open would swallow it silently.
+            ["report", "scan"],
             include_private=False,
             limit=MAX_DOCUMENTS,
             viewer_id=user_id,

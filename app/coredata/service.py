@@ -408,6 +408,12 @@ async def latest_documents(
     )
     hits: list[DocumentHit] = []
     for kind in kinds:
+        if kind not in DOCUMENT_KINDS:
+            # A caller passing a TABLE name instead of a kind is a bug in
+            # the caller, and callers wrap this in a fail-open, so a bare
+            # KeyError disappears. Say so and carry on.
+            logger.warning("unknown document kind %r; skipping", kind)
+            continue
         model, _label = DOCUMENT_KINDS[kind]
         query = select(model).where(model.user_id == owner_id)  # type: ignore[attr-defined]
         if not include_private:
