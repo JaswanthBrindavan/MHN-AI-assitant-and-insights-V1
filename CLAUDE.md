@@ -235,6 +235,15 @@ ones), and `decisions-needed.md` (autonomous calls awaiting review).
   `tests/test_flyway_parity.py::FLYWAY_TABLES` or that test fails. The whole
   suite runs on Alembic-built schema, so without the parity check a drifted
   column passes every test here and fails only in production.
+- **Flyway version numbers are a SHARED namespace with mhn-spring, and nothing
+  in this repo can see their chain.** Davi staged V7-V10 while mhn-spring used
+  those same numbers for `medical_history`, `medical_history_date_order`,
+  `period_pause_and_pregnancy` and `ai_name_check` — four migrations that could
+  never have been applied. Everything after V6 is now consolidated into
+  `V20__davi_chat_platform.sql`. Before adding another, check mhn-spring's head
+  and go above it; `test_davi_migrations_do_not_collide_with_mhn_spring` does
+  this automatically when the sibling checkout exists (or set
+  `MHN_SPRING_PATH`), and skips where it does not.
 - Prompt caching: `system` is `str | Sequence[str]`, element 0 is the
   byte-identical cached prefix. Append per-turn text with `append_directive()`,
   never `system + x`. The prefix is ~2,541 tokens and the system rules ALONE

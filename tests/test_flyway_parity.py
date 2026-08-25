@@ -15,6 +15,7 @@ one that needs a live PostgreSQL.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 
@@ -26,13 +27,18 @@ FLYWAY_DIR = pathlib.Path(__file__).resolve().parent.parent / "db" / "flyway"
 
 # Davi tables that ship as Flyway DDL, mapped to the migration that creates
 # them. V6 predates this check and is covered by the coexistence test.
+# Every Davi migration after V6 is consolidated into V20. The numbers V7-V10
+# are TAKEN in mhn-spring's chain by other work (medical_history,
+# medical_history_date_order, period_pause_and_pregnancy, ai_name_check), and
+# none of Davi's post-V6 tables appear anywhere in V1-V19 — so nothing had been
+# adopted and all of it was still pending when the collision was found.
 FLYWAY_TABLES = {
-    "user_profiles": "V7__davi_user_profile.sql",
-    "turn_feedback": "V8__davi_feedback.sql",
-    "clinician_reviewers": "V9__davi_clinician_review.sql",
-    "insight_review_audit": "V9__davi_clinician_review.sql",
-    "erasure_requests": "V10__davi_erasure_and_actor.sql",
-    # Created in V6, gains actor_user_id in V10 — the case _added_columns
+    "user_profiles": "V20__davi_chat_platform.sql",
+    "turn_feedback": "V20__davi_chat_platform.sql",
+    "clinician_reviewers": "V20__davi_chat_platform.sql",
+    "insight_review_audit": "V20__davi_chat_platform.sql",
+    "erasure_requests": "V20__davi_chat_platform.sql",
+    # Created in V6, gains actor_user_id in V20 — the case _added_columns
     # exists for.
     "job_runs": "V6__davi_ai_tables.sql",
 }
@@ -144,4 +150,78 @@ def test_no_davi_flyway_file_is_left_unchecked():
     assert not unchecked, (
         f"unchecked Flyway files: {sorted(unchecked)} — add each table to "
         "FLYWAY_TABLES so parity with the model is verified"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Version collision with mhn-spring's chain
+# --------------------------------------------------------------------------- #
+# Flyway version numbers are a SHARED namespace. Davi stages DDL that another
+# team applies into their chain, so a number Davi picks is only free until
+# somebody there picks it too — and nothing in this repository can see that.
+#
+# It happened: Davi staged V7-V10 while mhn-spring used those same numbers for
+# medical_history, medical_history_date_order, period_pause_and_pregnancy and
+# ai_name_check. Four migrations that could never have been applied, discovered
+# only by opening the other repository.
+_SPRING_MIGRATIONS = "src/main/resources/db/migration"
+
+
+def _spring_dir() -> pathlib.Path | None:
+    """mhn-spring's migration directory, if this machine has the repo."""
+    override = os.environ.get("MHN_SPRING_PATH")
+    candidates = [pathlib.Path(override)] if override else []
+    # The usual sibling checkouts.
+    root = FLYWAY_DIR.parent.parent.parent
+    candidates += [root / "mhn-spring-main", root / "mhn-spring"]
+    for base in candidates:
+        directory = base / _SPRING_MIGRATIONS
+        if directory.is_dir():
+            return directory
+    return None
+
+
+def _versions(directory: pathlib.Path) -> dict[int, str]:
+    found: dict[int, str] = {}
+    for path in directory.glob("V*__*.sql"):
+        match = re.match(r"V(\d+)__", path.name)
+        if match:
+            found[int(match.group(1))] = path.name
+    return found
+
+
+def test_davi_migration_numbers_are_unique_among_themselves():
+    """Cheap, and runs everywhere."""
+    numbers = _versions(FLYWAY_DIR)
+    files = sorted(p.name for p in FLYWAY_DIR.glob("V*__*.sql"))
+    assert len(numbers) == len(files), f"duplicate version number among {files}"
+
+
+def test_davi_migrations_do_not_collide_with_mhn_spring():
+    """The check that would have caught it. Skips where the repo is absent.
+
+    Set MHN_SPRING_PATH to run this against a checkout elsewhere.
+    """
+    spring_dir = _spring_dir()
+    if spring_dir is None:
+        pytest.skip(
+            "mhn-spring not found; set MHN_SPRING_PATH to check for collisions"
+        )
+
+    spring = _versions(spring_dir)
+    davi = _versions(FLYWAY_DIR)
+
+    collisions = {
+        version: (davi[version], spring[version])
+        for version in sorted(set(davi) & set(spring))
+        # V6 IS the adopted Davi file — the same number and the same file.
+        if davi[version] != spring[version]
+    }
+    assert not collisions, (
+        "Davi migration numbers already used in mhn-spring's chain: "
+        + "; ".join(
+            f"V{v}: davi has {d!r}, spring has {s!r}"
+            for v, (d, s) in collisions.items()
+        )
+        + ". Renumber above mhn-spring's head."
     )

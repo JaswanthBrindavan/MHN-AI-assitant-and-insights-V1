@@ -1,7 +1,9 @@
 """deferred erasure requests + job_runs actor attribution + retention indexes
 
-Production adoption ships as db/flyway/V10__davi_erasure_and_actor.sql; this
-revision builds local and test databases only (davi_alembic_version).
+Production adoption ships as db/flyway/V20__davi_chat_platform.sql, which
+consolidates every Davi migration after V6 -- the numbers V7-V10 are taken in
+mhn-spring's chain by other work. This revision builds local and test
+databases only (davi_alembic_version).
 
 Revision ID: e5f6a7b8c9d0
 Revises: d4e5f6a7b8c9
