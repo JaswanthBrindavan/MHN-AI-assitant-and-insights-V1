@@ -55,6 +55,13 @@ jobs:
           python -m scripts.run_evals
           CHAT_ENGINE=agentic python -m scripts.run_evals
 
+      # Quality is measured, not assumed. Against the deterministic fake this
+      # covers retrieval scope and degradation only — tool choice and answer
+      # quality need a real model, so the harness leaves them unscored rather
+      # than reporting a confident number about something it did not measure.
+      - name: Quality evals (fake provider — routing and retrieval only)
+        run: python -m scripts.quality_eval --compare --min-overall 85
+
   ordering:
     name: random-order tests
     runs-on: ubuntu-latest

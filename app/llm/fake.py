@@ -77,6 +77,12 @@ class FakeProvider:
             return self._turns.pop(0)
         if self._raises is not None:
             raise self._raises
+        # Fall back to the TEXT script before the default: a caller that
+        # scripted `responses` wants that text whichever path runs, and
+        # silently substituting the default makes a test look like it
+        # exercised the engine when it measured the fake.
+        if self._responses:
+            return LLMTurn(text=self._responses.pop(0), stop_reason="end_turn")
         return LLMTurn(text=self.DEFAULT, stop_reason="end_turn")
 
     async def generate_stream(
