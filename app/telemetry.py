@@ -168,6 +168,13 @@ document_reads = Counter(
     "Document byte fetches, by outcome. 'refused' is the consent gate working.",
 )
 
+db_commit_failures = Counter(
+    "davi_db_commit_failures_total",
+    "Commits that failed while releasing the connection before a model call. "
+    "The call site relabels these as provider errors on the way out, so this "
+    "counter is the only place that says the DATABASE is what is down.",
+)
+
 review_actions = Counter(
     "davi_review_actions_total",
     "Clinician review-queue actions, by action. Cross-user access to health "
@@ -190,6 +197,7 @@ _ALL = (
     document_reads,
     feedback_received,
     review_actions,
+    db_commit_failures,
 )
 
 

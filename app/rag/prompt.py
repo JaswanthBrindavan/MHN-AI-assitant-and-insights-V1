@@ -96,12 +96,44 @@ def build_system_prompt(
     patient_context: str,
     compacted_context_json: str | None = None,
     recent_turns: list[dict] | None = None,
-) -> str:
+) -> tuple[str, str]:
+    """Return ``(stable_prefix, volatile_suffix)`` for the legacy engine.
+
+    Split for the same reason the agentic builder is: element 0 is the rules,
+    which are identical for every reader and every turn, so it can carry a
+    prompt-cache breakpoint. Until this split existed the legacy engine passed
+    ONE string to ``provider.generate``, `_to_system_blocks` returned it
+    untouched, and the DEFAULT engine set no breakpoint at all.
+
+    **This is correct plumbing, not yet a saving — say so rather than claiming
+    one.** Measured: this prefix is ~267 tokens without the personalization
+    rules and ~560 with them, because legacy offers no tools and so has no
+    1,691-token schema block to carry it. Against the per-model minimums
+    (Opus 5 512, Sonnet 5 1024, Haiku 4.5 4096) only the personalized variant
+    on Opus 5 currently caches anything at all. The breakpoint costs nothing,
+    makes both engines consistent, and starts paying the moment the prefix
+    grows — a per-user memory block before the mark would add ~700 tokens.
+    Verify with ``python -m scripts.cache_probe`` before quoting a number.
+
+    The personalization rules stay CONDITIONAL, as before. Note WHY that is
+    tolerable, because the obvious reason is wrong: the condition keys off
+    `build_health_snapshot` output, which the orchestrator only requests for a
+    PERSONAL-health question -- so the variant flips per MESSAGE, not per
+    reader. One session can alternate A/B/A across three turns. It is still
+    fine, but for a different reason: two variants are two cache entries, each
+    with its own TTL, and under alternation both stay warm. The cost is one
+    extra cache write per variant per idle window, not one per turn. Making
+    them unconditional would change what the model is told on every
+    general-education turn, which is a bigger change than this fix is entitled
+    to make.
+    """
     parts = [_SAFETY_RULES, _GROUNDING_RULES]
     # Only spend the personalization budget when personal data is actually
     # present in [P] (the snapshot line is unmistakable).
     if patient_context and "own recorded data" in patient_context:
         parts.append(_PERSONALIZATION_RULES)
+    stable = "\n\n".join(parts)
+    parts = []
     # Recent verbatim turns let the model resolve follow-ups ("is it serious?",
     # "what about for children?") and refer back to its own earlier answers.
     if recent_turns:
@@ -137,7 +169,7 @@ def build_system_prompt(
         )
     if patient_context:
         parts.append("Patient context block [P]:\n" + patient_context)
-    return "\n\n".join(parts)
+    return stable, "\n\n".join(parts)
 
 
 def build_correction_directive(violations: list[dict]) -> str:

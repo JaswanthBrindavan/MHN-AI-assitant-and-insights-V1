@@ -16,6 +16,7 @@ from app.llm.tools import join_system
 from app.rag.prompt import (
     DEFAULT_VOLATILE_BUDGET_TOKENS,
     build_agentic_system_prompt,
+    build_system_prompt,
     estimate_tokens,
 )
 from app.rag.retrieval import RetrievedChunk
@@ -243,8 +244,9 @@ def test_the_default_budget_leaves_room_for_the_answer():
 # --------------------------------------------------------------------------- #
 # The wire between the orchestrator and the adapter
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("chat_engine", ["legacy", "agentic"])
 async def test_the_orchestrator_actually_ships_a_split_prompt(
-    db_session, monkeypatch
+    db_session, monkeypatch, chat_engine
 ):
     """The mechanism the whole feature rests on, tested end to end.
 
@@ -262,11 +264,15 @@ async def test_the_orchestrator_actually_ships_a_split_prompt(
     seen: dict = {}
 
     class SplitSpy(FakeProvider):
+        async def generate(self, *, system, user):
+            seen.setdefault("system", system)
+            return "Tiredness has many ordinary causes [GK]."
+
         async def generate_turn(self, *, system, messages, tools=()):
             seen.setdefault("system", system)
             return LLMTurn(text="Tiredness has many ordinary causes [GK].")
 
-    monkeypatch.setattr(get_settings(), "chat_engine", "agentic")
+    monkeypatch.setattr(get_settings(), "chat_engine", chat_engine)
     await handle_chat(
         db_session,
         _uuid.UUID("00000000-0000-0000-0000-0000000000dd"),
@@ -277,6 +283,9 @@ async def test_the_orchestrator_actually_ships_a_split_prompt(
 
     system = seen.get("system")
     assert system is not None, "the provider was never asked for a turn"
+    # Both engines must split. The LEGACY engine -- the default -- passed a
+    # plain string until this was fixed, so it set no breakpoint at all and
+    # paid full price for the rules on every turn.
     assert not isinstance(system, str), (
         "the orchestrator joined the prompt into one string — the cache "
         "breakpoint has nothing to mark and caching is silently dead"
@@ -321,3 +330,56 @@ async def test_the_shipped_prefix_is_the_same_one_the_probe_measures(
 
     shipped_prefix = seen["system"][0]
     assert len(shipped_prefix) == measure_prefix()["system_chars"]
+
+
+# --------------------------------------------------------------------------- #
+# The LEGACY split — the default engine, and the one with a conditional prefix
+# --------------------------------------------------------------------------- #
+def test_the_legacy_prefix_carries_no_patient_data():
+    """The safety half. A cached prefix is reused; PHI in it would leak."""
+    stable, volatile = build_system_prompt(
+        [_chunk("Kidney function is assessed with several markers.")],
+        "Patient: Ramesh, 61, creatinine 1.8. The reader's own recorded data "
+        "(cite as [P]): steps 3000",
+        '{"conditions": ["CKD"]}',
+        recent_turns=[{"role": "user", "message": "my creatinine is 1.8"}],
+    )
+    for leaked in ("Ramesh", "1.8", "CKD", "3000"):
+        assert leaked not in stable, f"{leaked!r} leaked into the cached prefix"
+    assert "Ramesh" in volatile
+
+
+def test_the_legacy_prefix_is_identical_for_different_readers():
+    """Same variant, different people — the prefix must not vary by reader."""
+    one, _ = build_system_prompt([], "Patient: A, 30", None, None)
+    two, _ = build_system_prompt(
+        [_chunk("something")], "Patient: B, 70", '{"x": 1}',
+        recent_turns=[{"role": "user", "message": "hello"}],
+    )
+    assert one == two
+
+
+def test_the_legacy_prefix_has_exactly_two_variants():
+    """Documented and bounded: with and without the personalization rules.
+
+    The variant is chosen by whether the health snapshot ran, which follows the
+    MESSAGE not the reader — so one session can alternate. Two entries stay
+    warm; more than two would not.
+    """
+    lean, _ = build_system_prompt([], "Patient: A", None, None)
+    rich, _ = build_system_prompt(
+        [], "The reader's own recorded data (cite as [P]): steps 3000", None, None
+    )
+    assert lean != rich
+    assert lean in rich, "the personalized variant should EXTEND the lean one"
+
+
+def test_the_legacy_split_says_the_same_thing_as_before():
+    """The split is a billing change. It must not alter the prompt."""
+    stable, volatile = build_system_prompt(
+        [_chunk("content")], "Patient ctx", '{"a": 1}',
+        recent_turns=[{"role": "user", "message": "hi"}],
+    )
+    joined = join_system([stable, volatile])
+    assert joined.startswith(stable)
+    assert volatile in joined

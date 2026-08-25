@@ -14,11 +14,13 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chat.agent import recover, run_agent
+from app.chat import memory_assembly
+from app.chat.agent import append_directive, recover, run_agent
 from app.chat.context import (
     build_health_snapshot,
     build_patient_context,
@@ -44,11 +46,7 @@ from app.chat.data_handlers import (
     handle_tracker_add,
     handle_value_check,
 )
-from app.chat.episodes import open_episodes, open_or_touch
-from app.chat.episodes import render_for_prompt as render_episodes
-from app.chat.long_term import recall, record_topics
-from app.chat.profile import get_profile
-from app.chat.profile import render_for_prompt as render_profile
+from app.chat.db_release import ReleasingProvider
 from app.chat.replies import (
     GREETING_REPLIES,
     HIGH_ESCALATION,
@@ -183,7 +181,7 @@ async def _write_receipt(
 
 async def _apply_grounding(
     provider: LLMProvider,
-    system: str,
+    system: str | Sequence[str],
     message: str,
     answer: str,
     chunks: list[RetrievedChunk],
@@ -207,7 +205,12 @@ async def _apply_grounding(
 
     # enforce: ONE corrective retry against the SAME retrieved context.
     directive = build_correction_directive(report.violations)
-    retry = await provider.generate(system=system + "\n\n" + directive, user=message)
+    # append_directive, not `system + x`: on a split prompt the naive form
+    # writes into the cached prefix, which is the one string that must not
+    # change.
+    retry = await provider.generate(
+        system=append_directive(system, "\n\n" + directive), user=message
+    )
     retry_report = analyze_grounding(
         retry,
         num_chunks=len(chunks),
@@ -612,6 +615,10 @@ async def _dispatch(
             logger.warning("health snapshot failed; continuing", exc_info=True)
             record_fail_open("health_snapshot")
 
+    # Per-user memory (profile, open episodes, past topics), read once through
+    # the SHARED assembly so both engines see all of it.
+    _memory = await memory_assembly.assemble(db, user_id)
+
     # Short-term memory: recent verbatim turns drive follow-up resolution. The
     # last entry is the current message (already persisted) — the PRIOR turns
     # are the conversational context.
@@ -655,18 +662,14 @@ async def _dispatch(
         _names = []
         _idx = None
 
-    # Long-term memory: record the topics discussed (code → display) and any
-    # red-flag terms, and recall past topics into the [P] context for this and
-    # future sessions. Fail-open — never breaks a reply.
-    if codes:
-        topics = {
-            c: (_idx.by_code[c].display_name if _idx and c in _idx.by_code else c)
-            for c in codes
-        }
-        await record_topics(db, user_id, topics, flags=tr.matched_terms)
-    recalled = await recall(db, user_id)
-    if recalled:
-        patient_text = f"{patient_text}\n\n{recalled}" if patient_text else recalled
+    # Per-user memory: profile, open episodes, and past topics. Read through
+    # the SHARED assembly so both engines see all of it — legacy used to read
+    # only the topic recall, so a reader's consent-gated profile never reached
+    # the prompt on the default engine. See app/chat/memory_assembly.py.
+    await memory_assembly.record(
+        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk
+    )
+    patient_text = _memory.append_to(patient_text)
     if _names:
         t("Knowledge scope", "matched conditions: " + ", ".join(_names[:4]))
     elif codes:
@@ -763,7 +766,7 @@ async def _dispatch(
     # COMPACTED_CONTEXT_JSON (summary) + recent verbatim turns (both fetched
     # above) give the model long-window and short-window conversational memory.
     compacted_json = json.dumps(compacted_summary) if compacted_summary else None
-    system = build_system_prompt(
+    stable_rules, volatile_context = build_system_prompt(
         chunks, patient_text, compacted_json, recent_turns=prior_turns[-6:]
     )
     # The reply language always follows the LATEST message. With an active
@@ -775,7 +778,16 @@ async def _dispatch(
     directive = language_directive(
         "en" if (pivot is not None and pivot.active) else lang
     )
-    system = system + "\n\n" + directive
+    # Split, not joined: element 0 is byte-identical across turns and carries
+    # the prompt-cache breakpoint in the Anthropic adapter. Every other
+    # provider joins it straight back, so the model is told exactly the same
+    # thing either way. The language directive belongs in the VOLATILE half --
+    # it changes with the reader's language, and a per-reader prefix caches
+    # for nobody.
+    system: list[str] = [
+        stable_rules,
+        "\n\n".join(p for p in (volatile_context, directive) if p),
+    ]
 
     # A provider outage must degrade to the deterministic safe reply, never
     # crash a patient-facing endpoint.
@@ -956,6 +968,11 @@ async def handle_chat(
     whole pipeline see English) and the reply is translated back.
     """
     message = _sanitize_message(message)
+    # Commit before every model call, so a pooled connection is not pinned for
+    # the seconds the provider spends on the network. See app/chat/db_release.py
+    # -- this is the binding constraint on concurrency, and it is invisible
+    # from reading the endpoint.
+    provider = ReleasingProvider(provider, db)
     if translator is None:
         translator = get_translator()
     pivot = await pivot_inbound(message, translator)
@@ -1052,36 +1069,26 @@ async def _dispatch_agentic(
             logger.warning("health snapshot failed; continuing", exc_info=True)
             record_fail_open("health_snapshot")
 
-    # Phase 2 memory: what the reader told us about themselves (consent-gated)
-    # and what they have already raised and not said is better. Both fail open —
-    # neither may cost someone an answer.
-    try:
-        profile_text = render_profile(await get_profile(db, user_id))
-        if profile_text:
-            patient_text = (
-                f"{patient_text}\n\n{profile_text}" if patient_text else profile_text
-            )
-    except Exception:  # noqa: BLE001
-        logger.warning("profile context failed; continuing", exc_info=True)
-        record_fail_open("profile")
-
-    episodes: list = []
-    try:
-        episodes = await open_episodes(db, user_id)
-        episode_text = render_episodes(episodes)
-        if episode_text:
-            patient_text = (
-                f"{patient_text}\n\n{episode_text}" if patient_text else episode_text
-            )
-    except Exception:  # noqa: BLE001
-        logger.warning("episode context failed; continuing", exc_info=True)
-        record_fail_open("episodes")
+    # Per-user memory, through the SHARED assembly. Agentic used to read the
+    # profile and episodes but never the long-term topic recall, and never
+    # recorded topics at all. See app/chat/memory_assembly.py.
+    _memory = await memory_assembly.assemble(db, user_id)
+    patient_text = _memory.append_to(patient_text)
 
     compacted, recent = await assemble_context(db, session_id)
     prior_turns = recent[:-1] if recent else []
 
     codes = await resolve_scope(db, message, user_codes)
     chunks = await retrieve_chunks(db, codes, message)
+
+    # Remember what was raised, at the severity the FLOOR decided — never a
+    # severity the model inferred. Placed HERE, before generation, to match
+    # legacy: what the reader raised does not depend on whether the reply
+    # succeeded. Recording it after the guards (as this used to) meant an
+    # agent-loop failure silently forgot the symptom they just described.
+    await memory_assembly.record(
+        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk
+    )
 
     asked = await questions_asked(db, session_id)
     allow_questions = asked < settings.chat_max_clarifying_questions
@@ -1229,12 +1236,6 @@ async def _dispatch_agentic(
         retrieved=[c.to_dict() for c in chunks] if chunks else None,
         grounding_status="agentic", used_rag=bool(chunks),
     )
-
-    # Remember what was raised, at the severity the FLOOR decided — never a
-    # severity the model inferred.
-    if tr.matched_terms:
-        for term in tr.matched_terms[:3]:
-            await open_or_touch(db, user_id, term, risk)
 
     provenance: dict = {
         "path": "agentic",
