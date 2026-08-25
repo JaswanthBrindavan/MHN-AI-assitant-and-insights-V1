@@ -1,5 +1,15 @@
 # Open items — decisions, blocked work, and unfixed findings
 
+> **Updated after your decisions.** Closed: A1 (Sonnet 5), A6 (emergency
+> recording), A8 (job_runs actor), A9/D1 (monotonic clock ratified), C1
+> (complete deferred erasure), C2 (session-list scan), C3 (retention).
+> Costs are tracked in [`model-cost.md`](./model-cost.md). All outstanding
+> schema ships as ONE file: `db/flyway/V10__davi_erasure_and_actor.sql`.
+>
+> **Still open:** A2 (Task 12 — you are running staging), A3, A4, A5 (agreed,
+> not yet built), A7, C4–C10, and everything in section B.
+
+
 Everything outstanding, in one place. Three sections: **what needs your
 decision**, **what is blocked on something I do not have**, and **findings that
 are real and not yet fixed**.
@@ -11,7 +21,7 @@ source), or **derived**. Nothing here is a guess presented as a fact.
 
 ## A. Waiting on your decision
 
-### A1 — Which production model? 🔴 highest leverage
+### A1 — Which production model? ✅ DECIDED: Sonnet 5
 `railway.toml:44` documents `claude-haiku-4-5`. **Verified:** its minimum
 cacheable prefix is 4,096 tokens; ours measures ~2,541. On Haiku 4.5 prompt
 caching does nothing at all and returns no error.
@@ -49,14 +59,14 @@ found", which reads as "no interaction exists" — a worse failure than today's
 honest refusal, because the pipeline would be working correctly while producing
 it. Full options table in `task-25-drug-interactions.md` §3.
 
-### A5 — Build the per-user memory document?
+### A5 — Build the per-user memory document? ✅ AGREED — not yet built
 And if yes, five sub-decisions (`per-user-memory.md` §8): how many past
 documents to hold (rec: last 5 + trends), freshness tolerance (rec: 1 hour),
 reuse `chat_personalization` consent (rec: yes), show the user what Davi
 remembers (rec: yes, eventually), and whether 20% DAU / 6 turns per day is
 realistic — every number scales linearly with that.
 
-### A6 — Emergencies open no symptom episode 🩺 clinical call
+### A6 — Emergencies open no symptom episode ✅ FIXED
 **Verified:** an emergency returns from the shared prologue before either engine
 reaches the recording step, so the *most severe* red flags open no episode.
 Pre-existing, on both engines. Arguably wrong — an emergency is exactly what is
@@ -68,13 +78,13 @@ accident.
 Consistent with the production listing filter, but the consequence is now
 document *bytes* rather than a listing row. Worth a deliberate ruling.
 
-### A8 — `job_runs` has no actor column
+### A8 — `job_runs` has no actor column ✅ FIXED (V10)
 You learn a document was read, never by whom — the one field an access-control
 audit exists for. `job_runs` is Flyway-owned, so this needs a migration adopted
 into mhn-spring plus a coexistence re-check. Worth doing; not worth doing
 quietly.
 
-### A9 — Ratify the autonomous calls
+### A9 — Ratify the autonomous calls ✅ D1 ratified
 `decisions-needed.md` D1–D10. The one worth your time is **D1**: `utcnow()` is
 now strictly increasing. It fixed a real bug (compaction folding the wrong
 turns, because 1,000 consecutive calls returned one distinct value and the
@@ -106,7 +116,7 @@ None of these are decisions. Each is one command away once the thing exists.
 
 Ordered by when they bite.
 
-### C1 — `forget_everything` covers 3 of 11 stores 🔴
+### C1 — `forget_everything` covers 3 of 11 stores ✅ FIXED
 **Verified** (`app/chat/profile.py:223,227,235`): it deletes `user_profiles`,
 `user_memories` and `turn_feedback`. Episodes, insights, pedigree, sessions,
 messages, summaries and receipts all survive a "forget me".
@@ -118,14 +128,14 @@ land before any memory document exists — otherwise a rebuild reconstructs the
 memory from sources the erasure never touched, and erasure becomes cache
 invalidation.
 
-### C2 — `list_sessions` scans the whole message table 🔴
+### C2 — `list_sessions` scans the whole message table ✅ FIXED
 **Verified** (`app/api/v1/chat.py:150-158`): a `GROUP BY session_id` over the
 entire `conversation_messages` table with **no user predicate**, before
 `LIMIT 50` can apply. It is a left outer join, so the filter cannot be pushed
 into the aggregate. **Derived:** at ~100K users this times out on a UI endpoint.
 Fix is a `LATERAL … ORDER BY created_at DESC LIMIT 1`. No migration.
 
-### C3 — No retention on the transcript or the audit log 🔴
+### C3 — No retention on the transcript or the audit log ✅ FIXED
 **Derived:** 9.94 TB/year at 10M users — 97.5% of Davi's per-user bytes — with
 no cap, no retention and no delete path. `rag_turn_receipts` is 4.38B rows/year
 and **no code path reads it**. A 180-day policy halves the pile.
@@ -193,3 +203,32 @@ Fixing it properly means a separate short-lived session — the same shape as C7
 
 C7 and C9 are the same fix (a short-lived session for out-of-band writes) and
 are worth doing together, whenever a connection-pressure symptom appears.
+
+
+---
+
+## What changed after your decisions
+
+| Item | Outcome |
+|---|---|
+| A1 | **Sonnet 5.** Haiku 4.5 could not cache at all — at 10M users caching is worth ~$1.97M/month, so the cheaper token price was the more expensive choice. `model-cost.md` |
+| A6 | Emergency events are recorded **before** the emergency path exits, at the triage floor's severity, on both engines. No retrieval, no topics — emergency handling does not continue through the normal assessment flow. |
+| A8 | `job_runs.actor_user_id`, nullable (scheduled work has no actor; NULL means "the system"). No FK, so it outlives the account it attributes. |
+| A9/D1 | Ratified, with the coverage you asked for: context assembly, compaction's `covers_through_message_id` under a same-tick burst, and thread safety. |
+| C1 | Complete **deferred** erasure — all 11 tables, 30-day cancellable window, and the data stops being *used* immediately. |
+| C2 | The aggregate is scoped to the caller before it groups. |
+| C3 | Two windows: messages 180 days, receipts 400. Keep the evidence, drop the content. |
+
+### Still to build for A5
+
+The per-user memory document itself. `per-user-memory.md` stages it; stages 1
+and 2 (history into `messages`, second cache breakpoint) are worth doing first
+and are independent of the document.
+
+### One decision this work surfaced
+
+`insight_review_audit` currently **survives** an erasure, on the reasoning that
+it records which clinician read whose data and exists to protect the subject.
+That is defensible and it is also the subject's own data. If you would rather
+it be erased with everything else, it is one line in
+`app/chat/erasure.py::_ERASE_IN_ORDER`.
