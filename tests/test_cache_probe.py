@@ -27,11 +27,72 @@ def test_an_unmeasured_exact_count_says_so():
     assert "estimate is not a measurement" in report
 
 
-def test_haiku_needs_twice_the_prefix():
-    """Getting this wrong makes caching silently do nothing on Haiku."""
-    assert cache_probe._min_for("claude-haiku-4-5") == 2048
-    assert cache_probe._min_for("claude-sonnet-5") == 1024
-    assert cache_probe._min_for("claude-opus-5") == 1024
+@pytest.mark.parametrize(
+    ("model", "minimum"),
+    [
+        # Verified against platform.claude.com prompt-caching docs, Aug 2026.
+        ("claude-opus-5", 512),
+        ("claude-fable-5", 512),
+        ("claude-opus-4-8", 1024),
+        ("claude-opus-4-7", 2048),
+        ("claude-opus-4-6", 4096),
+        ("claude-sonnet-5", 1024),
+        ("claude-sonnet-4-6", 1024),
+        ("claude-haiku-4-5", 4096),
+        ("claude-haiku-3-5", 2048),
+    ],
+)
+def test_the_minimum_is_per_model(model, minimum):
+    """These span nearly an order of magnitude.
+
+    A single constant was wrong, and wrong in the dangerous direction: the
+    probe hard-coded 2048 for "any haiku", which is the RETIRED Haiku 3.5
+    number. Haiku 4.5 needs 4096, so a 2,541-token prefix that the probe
+    called borderline is in fact definitively too short there.
+    """
+    assert cache_probe._min_for(model) == minimum
+
+
+def test_an_unknown_model_assumes_the_WORST_minimum():
+    """Guessing low would report a prefix as cacheable when it is not.
+
+    A new model id must fail loudly in the probe rather than quietly claiming
+    a saving that is not being made.
+    """
+    from app.llm.anthropic import DEFAULT_MIN_CACHEABLE_TOKENS
+
+    assert cache_probe._min_for("claude-model-that-does-not-exist-yet") == (
+        DEFAULT_MIN_CACHEABLE_TOKENS
+    )
+    assert DEFAULT_MIN_CACHEABLE_TOKENS == max(
+        m for _, m in __import__(
+            "app.llm.anthropic", fromlist=["_MIN_CACHEABLE_BY_MODEL"]
+        )._MIN_CACHEABLE_BY_MODEL
+    )
+
+
+def test_a_prefix_clearly_under_the_minimum_is_called_a_no_op_not_borderline():
+    """"Clearly under" and "too close to call" are different answers.
+
+    Only one of them is a reason to go and measure; calling a definitive
+    failure "borderline" invites someone to assume it is probably fine.
+    """
+    prefix = cache_probe.measure_prefix()
+    report = cache_probe.render(prefix, "claude-haiku-4-5", None, None)
+    assert "NO-OP" in report
+    assert "TOO CLOSE TO CALL" not in report
+
+
+def test_a_prefix_near_the_line_says_go_and_measure():
+    near = {
+        "system_chars": 100,
+        "tools_chars": 100,
+        "system_tokens_estimated": 500,
+        "tools_tokens_estimated": 500,
+        "total_tokens_estimated": 1000,
+    }
+    report = cache_probe.render(near, "claude-sonnet-5", None, None)
+    assert "TOO CLOSE TO CALL" in report
 
 
 def test_a_prefix_near_the_minimum_is_flagged_not_waved_through():
@@ -44,7 +105,7 @@ def test_a_prefix_near_the_minimum_is_flagged_not_waved_through():
         "total_tokens_estimated": 1200,
     }
     report = cache_probe.render(near, "claude-sonnet-5", None, None)
-    assert "WITHIN THE MARGIN OF ERROR" in report
+    assert "TOO CLOSE TO CALL" in report
 
 
 def test_an_exact_count_under_the_minimum_is_called_a_no_op():

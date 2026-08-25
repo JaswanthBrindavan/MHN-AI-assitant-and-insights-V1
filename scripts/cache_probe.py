@@ -9,6 +9,12 @@ cache produces a byte-identical reply; nothing in the application can tell the
 difference. Only `usage.cache_read_input_tokens` can, and only a live API call
 returns it.
 
+The plan said "~1024". The real minimum is PER MODEL and spans nearly an order
+of magnitude -- 512 on Opus 5, 1024 on Sonnet 5, 4096 on Haiku 4.5. Our
+~2,541-token prefix clears the first two and does NOT clear Haiku 4.5, where
+the breakpoint caches nothing and reports no error. See
+app/llm/anthropic.py::min_cacheable_tokens.
+
     python -m scripts.cache_probe --measure        # offline: prefix size only
     python -m scripts.cache_probe --model claude-haiku-4-5   # live: real hits
 
@@ -25,17 +31,24 @@ import os
 import sys
 
 from app.chat.tools.definitions import TOOL_SPECS
-from app.llm.anthropic import MIN_CACHEABLE_TOKENS
+from app.llm.anthropic import min_cacheable_tokens
 from app.rag.prompt import build_agentic_system_prompt, estimate_tokens
 
-# Haiku models need twice the prefix before anything caches. Getting this
-# wrong is the difference between "caching works" and "caching silently does
-# nothing", which is why it is checked per model rather than assumed.
-HAIKU_MIN_CACHEABLE_TOKENS = 2048
+# How wrong the chars-per-token ratio could plausibly be, in either direction.
+# Used to decide whether an estimate is close enough to the minimum that the
+# honest answer is "go and measure" rather than a verdict.
+ESTIMATE_ERROR = 0.25
 
 
 def _min_for(model: str) -> int:
-    return HAIKU_MIN_CACHEABLE_TOKENS if "haiku" in model.lower() else MIN_CACHEABLE_TOKENS
+    """Delegates to the per-model table in app/llm/anthropic.py.
+
+    This used to hard-code 2048 for "any haiku", which was the retired Haiku
+    3.5 number. Haiku 4.5 needs 4096 -- so the probe would have called a
+    2,541-token prefix "within the margin of error" when it is in fact
+    definitively too short to cache on that model.
+    """
+    return min_cacheable_tokens(model)
 
 
 def measure_prefix() -> dict:
@@ -159,11 +172,23 @@ def render(prefix: dict, model: str, exact: int | None, live: dict | None) -> st
             "is a characters-per-token ratio, not a tokenizer."
         )
         # Say which way the uncertainty cuts, rather than implying it is fine.
+        # Three verdicts, not two: "clearly under" and "too close to call" are
+        # different answers and only one of them warrants going and measuring.
         est = prefix["total_tokens_estimated"]
-        if est < minimum * 1.3:
+        if est * (1 + ESTIMATE_ERROR) < minimum:
+            # Even if the ratio under-counts by ESTIMATE_ERROR, it does not
+            # reach the minimum. This is a finding, not an uncertainty.
             lines.append(
-                "  -> WITHIN THE MARGIN OF ERROR of the minimum. Do not assume "
-                "caching works until this is measured against a real key."
+                f"  -> UNDER the minimum by a wide margin. Even allowing "
+                f"{ESTIMATE_ERROR:.0%} estimate error the prefix reaches only "
+                f"~{est * (1 + ESTIMATE_ERROR):.0f} tokens. The breakpoint is a "
+                f"NO-OP on {model}: it caches NOTHING and returns no error."
+            )
+        elif est * (1 - ESTIMATE_ERROR) < minimum:
+            lines.append(
+                "  -> TOO CLOSE TO CALL. Within the estimate's margin of error "
+                "of the minimum. Do not assume caching works until this is "
+                "measured against a real key."
             )
         else:
             lines.append(

@@ -122,10 +122,61 @@ def _to_anthropic_messages(messages: Sequence[Message]) -> list[dict]:
 # tail, and marking it would rewrite the cache on every single turn.
 _CACHE_CONTROL = {"type": "ephemeral"}
 
-# Below this, Anthropic silently declines to cache and the request behaves
-# exactly as if no breakpoint were set. Named so the reason is greppable when
-# somebody wonders why the hit rate is zero.
+# Minimum cacheable prefix, PER MODEL. Below it Anthropic silently declines to
+# cache: no error is returned and the request behaves exactly as if no
+# breakpoint were set, so a too-short prefix is indistinguishable from a
+# working one except in `usage`.
+#
+# These vary by nearly an order of magnitude between model families, which is
+# why a single constant was wrong. Verified against
+# platform.claude.com/docs/en/build-with-claude/prompt-caching (Aug 2026).
+_MIN_CACHEABLE_BY_MODEL: tuple[tuple[str, int], ...] = (
+    # Longest/most specific match first -- "claude-opus-4-5" must not match
+    # the "claude-opus-4" style prefix of another entry.
+    ("claude-opus-5", 512),
+    ("claude-fable-5", 512),
+    ("claude-mythos-5", 512),
+    ("claude-opus-4-8", 1024),
+    ("claude-opus-4-7", 2048),
+    ("claude-opus-4-6", 4096),
+    ("claude-opus-4-5", 4096),
+    ("claude-sonnet-5", 1024),
+    ("claude-sonnet-4-6", 1024),
+    ("claude-sonnet-4-5", 1024),
+    ("claude-haiku-4-5", 4096),
+    ("claude-haiku-3-5", 2048),
+)
+
+# What to assume for an unrecognised model id. The HIGHEST known minimum, not
+# the lowest: guessing low would report a prefix as cacheable when it is not,
+# which is the failure this whole constant exists to make visible.
+DEFAULT_MIN_CACHEABLE_TOKENS = 4096
+
+# Kept as the Sonnet-class value for callers that want one number. Prefer
+# min_cacheable_tokens(model).
 MIN_CACHEABLE_TOKENS = 1024
+
+
+def min_cacheable_tokens(model: str) -> int:
+    """The shortest prefix this model will actually cache.
+
+    An unknown model gets the WORST known minimum, so a new model id fails
+    loudly in the probe rather than quietly claiming a saving it is not making.
+    """
+    name = model.lower()
+    for prefix, minimum in _MIN_CACHEABLE_BY_MODEL:
+        if name.startswith(prefix):
+            return minimum
+    return DEFAULT_MIN_CACHEABLE_TOKENS
+
+
+# Anthropic allows up to FOUR cache breakpoints per request, and each one
+# caches the CUMULATIVE prefix ending at that block -- not the segment between
+# breakpoints. That is what makes a second breakpoint after a per-user memory
+# block worthwhile: it caches tools + system + that reader's memory as one
+# prefix, so a returning reader pays 0.1x for all of it instead of 1x.
+# See project_docs/per-user-memory.md.
+MAX_CACHE_BREAKPOINTS = 4
 
 
 def _to_system_blocks(system: str | Sequence[str]) -> str | list[dict]:
