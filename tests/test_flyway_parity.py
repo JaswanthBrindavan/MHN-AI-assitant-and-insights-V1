@@ -25,20 +25,36 @@ from app.db import Base
 
 FLYWAY_DIR = pathlib.Path(__file__).resolve().parent.parent / "db" / "flyway"
 
+# `db/` is gitignored, so a fresh clone does not have these files and this
+# whole guard has nothing to check. Skipping is honest; failing would just
+# teach people to ignore a red build.
+#
+# NOTE THE COST, because it is real: this guard is what caught Davi's V7-V10
+# colliding with mhn-spring's chain, and what catches a Flyway file drifting
+# from the models. Wherever the DDL actually lives, run this there — the
+# migrations must be checked SOMEWHERE.
+pytestmark = pytest.mark.skipif(
+    not FLYWAY_DIR.is_dir(),
+    reason="db/flyway is not in this checkout (gitignored); nothing to verify",
+)
+
 # Davi tables that ship as Flyway DDL, mapped to the migration that creates
 # them. V6 predates this check and is covered by the coexistence test.
-# Every Davi migration after V6 is consolidated into V20. The numbers V7-V10
-# are TAKEN in mhn-spring's chain by other work (medical_history,
-# medical_history_date_order, period_pause_and_pregnancy, ai_name_check), and
-# none of Davi's post-V6 tables appear anywhere in V1-V19 — so nothing had been
-# adopted and all of it was still pending when the collision was found.
+# Every Davi migration after V6 is consolidated into ONE file, now ADOPTED into
+# mhn-spring as V21__davi_chat_platform.sql. It was staged here as V7-V10, then
+# V20 — both collided, because Flyway version numbers are a shared namespace
+# and this repo cannot see the other team's chain. The collision test below is
+# what caught the second one, a day after it caught the first.
+#
+# db/ is gitignored: mhn-spring owns these files now. What remains here is a
+# staging copy, and this guard exists to stop it drifting from the model.
 FLYWAY_TABLES = {
-    "user_profiles": "V20__davi_chat_platform.sql",
-    "turn_feedback": "V20__davi_chat_platform.sql",
-    "clinician_reviewers": "V20__davi_chat_platform.sql",
-    "insight_review_audit": "V20__davi_chat_platform.sql",
-    "erasure_requests": "V20__davi_chat_platform.sql",
-    "user_memory_document": "V20__davi_chat_platform.sql",
+    "user_profiles": "V21__davi_chat_platform.sql",
+    "turn_feedback": "V21__davi_chat_platform.sql",
+    "clinician_reviewers": "V21__davi_chat_platform.sql",
+    "insight_review_audit": "V21__davi_chat_platform.sql",
+    "erasure_requests": "V21__davi_chat_platform.sql",
+    "user_memory_document": "V21__davi_chat_platform.sql",
     # Created in V6, gains actor_user_id in V20 — the case _added_columns
     # exists for.
     "job_runs": "V6__davi_ai_tables.sql",

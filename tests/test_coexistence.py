@@ -29,7 +29,23 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
 
-pytestmark = pytest.mark.pg
+SCHEMA_PRESENT = (
+    pathlib.Path(__file__).resolve().parent.parent / "db" / "existing_schema.sql"
+).is_file()
+
+pytestmark = [
+    pytest.mark.pg,
+    # `db/` is gitignored. Regenerate the dump with
+    # `python -m scripts.build_existing_schema` (it needs the mhn-spring
+    # checkout) before running this.
+    pytest.mark.skipif(
+        not SCHEMA_PRESENT,
+        reason=(
+            "db/existing_schema.sql absent (gitignored); regenerate with "
+            "python -m scripts.build_existing_schema"
+        ),
+    ),
+]
 
 PG_URL = os.environ.get("TEST_ALEMBIC_URL")
 SCHEMA = pathlib.Path(__file__).resolve().parent.parent / "db" / "existing_schema.sql"

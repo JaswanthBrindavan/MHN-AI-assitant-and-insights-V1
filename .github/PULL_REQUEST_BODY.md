@@ -1,7 +1,9 @@
 # Davi: safety fixes, mhn-spring V19 integration, and the per-user memory document
 
-59 commits. **Apply `db/flyway/V20__davi_chat_platform.sql` into mhn-spring
-first** — nothing here can be validated end-to-end until that exists.
+60 commits. **The schema is already applied** — adopted into mhn-spring as
+`V21__davi_chat_platform.sql`, byte-identical to what this branch produced.
+Nothing else here can be validated end-to-end without it, so that is the
+unblocking step and it is done.
 
 ---
 
@@ -61,10 +63,20 @@ Those numbers were already taken by `medical_history`,
 `medical_history_date_order`, `period_pause_and_pregnancy` and
 `ai_name_check`. Four migrations that could never have applied.
 
-None had been adopted, so this is a renumbering rather than an incident.
-**Everything is now one file: `V20__davi_chat_platform.sql`**, idempotent
-throughout. `tests/test_flyway_parity.py` now checks Davi's numbers against
-mhn-spring's actual migration directory when the sibling checkout exists.
+None had been adopted, so this was a renumbering rather than an incident.
+Everything became one idempotent file, now **adopted into mhn-spring as
+`V21__davi_chat_platform.sql`**.
+
+`tests/test_flyway_parity.py` now checks Davi's numbers against mhn-spring's
+actual migration directory when the sibling checkout is present — and **it
+earned its place within a day**: the file was staged here as V20, mhn-spring
+added its own `V20__staff_sessions.sql`, and the guard caught the second
+collision before it shipped.
+
+`db/` is gitignored on this branch. mhn-spring owns these files now; what
+remains here is a staging copy, and the parity guard is what stops it drifting
+from the models. Both it and the coexistence check skip cleanly when the
+directory is absent rather than failing a fresh clone.
 
 ---
 

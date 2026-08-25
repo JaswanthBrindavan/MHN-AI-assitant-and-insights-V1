@@ -12,25 +12,31 @@ pyright 0 · `run_evals` **17/17 on both engines** · coverage ~91%.
 
 ---
 
-## ⚠️ The one thing to do first
+## The schema is applied
 
-**Apply `db/flyway/V20__davi_chat_platform.sql` into mhn-spring.**
-
-It is a single idempotent file containing every outstanding Davi schema change:
+Adopted into mhn-spring as **`V21__davi_chat_platform.sql`** — byte-identical
+to what this branch produced. One idempotent file containing every outstanding
+Davi schema change:
 `user_profiles`, `turn_feedback`, `clinician_reviewers`,
 `insight_review_audit`, `erasure_requests`, `user_memory_document`,
 `job_runs.actor_user_id`, and the retention indexes.
 
-It is V20 because **Davi's old V7–V10 collided with mhn-spring's chain** — those
-numbers were already taken by `medical_history`,
+**It has been renumbered twice, both times because of a collision.** Davi's
+original V7–V10 were already taken by `medical_history`,
 `medical_history_date_order`, `period_pause_and_pregnancy` and `ai_name_check`.
-None of Davi's post-V6 migrations had ever been adopted, so this was a
-renumbering rather than an incident. Before adding another, check mhn-spring's
-head; `tests/test_flyway_parity.py` now does this automatically when the
-sibling checkout exists.
+It was then staged as V20 — and mhn-spring added its own
+`V20__staff_sessions.sql`, which `tests/test_flyway_parity.py` caught a day
+after that guard was written.
 
-Nothing else on this branch can be validated end-to-end until that file is
-applied.
+**Flyway version numbers are a shared namespace this repo cannot see.** Before
+adding another, check mhn-spring's head. The guard does it automatically when
+the sibling checkout is present.
+
+`db/` is now **gitignored** — mhn-spring owns these files. What remains here is
+a staging copy; the parity guard stops it drifting from the models, and both it
+and the coexistence check skip cleanly when the directory is absent rather than
+failing a fresh clone. Regenerate the schema dump with
+`python -m scripts.build_existing_schema`.
 
 ---
 
