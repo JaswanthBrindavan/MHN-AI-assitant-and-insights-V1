@@ -71,6 +71,20 @@ class ConversationSession(Base, UUIDPrimaryKey, CreatedAt):
 
 class ConversationMessage(Base, UUIDPrimaryKey, CreatedAt):
     __tablename__ = "conversation_messages"
+    __table_args__ = (
+        # assemble_context reads the newest few messages of a session on every
+        # turn: WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT n.
+        # Without this the planner is free to walk the created_at index
+        # backward across the WHOLE table and filter by session_id, because a
+        # LIMIT makes that look cheap. It is not: one session is a small slice
+        # of a multi-tenant table.
+        sa.Index(
+            "ix_conversation_messages_session_recent",
+            "session_id",
+            sa.text("created_at DESC"),
+            sa.text("id DESC"),
+        ),
+    )
 
     session_id: Mapped[uuid.UUID] = mapped_column(
         sa.ForeignKey("conversation_sessions.id", ondelete="CASCADE"),
