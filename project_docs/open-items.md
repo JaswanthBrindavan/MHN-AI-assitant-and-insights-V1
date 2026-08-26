@@ -15,7 +15,7 @@
 > patient-facing answers wrong; a drug reply ignored the reader's allergies;
 > Davi's V7–V10 collided with mhn-spring's Flyway chain.
 >
-> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, **C6**, C7–C13,
+> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, **C6**, C7–C14,
 > and
 > everything in section B. See [`handover.md`](./handover.md) for the ordered
 > pick-up list.
@@ -210,6 +210,29 @@ harder); hash it; or accept it and correct the two claims. I did not change
 receipt contents unilaterally — that is an audit contract.
 
 Retention limits the exposure either way: receipts are purged at 400 days.
+
+### C14 — `_context_memo` can serve a dead session's answer
+**Found while fixing the same bug elsewhere, and left deliberately.**
+
+`app/chat/context.py::_context_memo` is a module dict keyed `(id(db), user_id)`.
+Python reuses `id()` after an object is collected, so a later session for the
+SAME user can hit an entry belonging to a session that no longer exists. The
+comment there reasons that a recycled id "can only ever return that same user's
+entry" — true, and not sufficient: that user's *stale* entry is still wrong.
+
+This is not theoretical. The identical pattern in `is_pending` was caught by
+`test_a_pending_erasure_stops_the_memory_reaching_the_prompt[agentic]`, which
+read the legacy parametrisation's cached "not pending" and kept using data the
+reader had asked to have forgotten. That one now lives on `Session.info`, which
+dies with its session, so a stale hit is not expressible.
+
+`_context_memo` should move the same way. **Not done here** because
+`clear_patient_context_memo(None)` clears globally and is relied on by test
+fixtures and `recompute_insights` callers, so it is a small refactor rather
+than a one-line change — not something to do at the end of a long session.
+
+Severity is lower than the erasure case: a stale `[P]` block is the reader's
+own data, one turn out of date, not data they asked to have forgotten.
 
 ### C13 — The two Flyway chains now INTERLEAVE — needs a decision
 **Measured against a real PostgreSQL** (pgvector/pgvector:pg16, the CI image),

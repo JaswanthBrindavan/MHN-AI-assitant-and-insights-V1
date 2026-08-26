@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models.common import utcnow
 from app.models.core import User
@@ -455,6 +457,15 @@ class MetricPoint:
     unit: str | None = None
 
 
+def _vital_point(row: VitalReading) -> MetricPoint:
+    return MetricPoint(
+        at=row.recorded_at,
+        value=float(row.value_primary),
+        secondary=float(row.value_secondary) if row.value_secondary is not None else None,
+        unit=row.unit,
+    )
+
+
 async def latest_vital(
     db: AsyncSession, user_id: uuid.UUID, vital_type: str
 ) -> MetricPoint | None:
@@ -466,16 +477,57 @@ async def latest_vital(
                 VitalReading.vital_type == vital_type,
             )
             .order_by(VitalReading.recorded_at.desc(), VitalReading.id.desc())
+            # `.first()` without this read EVERY reading of that type for the
+            # user and threw all but one away — a reader with years of daily
+            # blood-pressure entries transferred the lot, four times a turn.
+            .limit(1)
         )
     ).scalars().first()
-    if row is None:
-        return None
-    return MetricPoint(
-        at=row.recorded_at,
-        value=float(row.value_primary),
-        secondary=float(row.value_secondary) if row.value_secondary is not None else None,
-        unit=row.unit,
+    return None if row is None else _vital_point(row)
+
+
+async def latest_vitals(
+    db: AsyncSession, user_id: uuid.UUID, vital_types: Sequence[str]
+) -> dict[str, MetricPoint]:
+    """Latest reading for each of `vital_types`, in ONE round trip.
+
+    The health snapshot wants four (blood pressure, sugar, heart rate, SpO2)
+    and asked for them one at a time. Locally that is four cheap queries; on a
+    shared database reached over a network it is four times the latency, on the
+    path that runs for every personal question.
+
+    ROW_NUMBER() OVER (PARTITION BY ...) keeps it exact rather than fetching a
+    window and hoping every type appears in it — one type with far more
+    readings than the others cannot crowd the rest out. Supported by both
+    PostgreSQL and SQLite (3.25+).
+    """
+    if not vital_types:
+        return {}
+    ranked = (
+        select(
+            VitalReading,
+            func.row_number()
+            .over(
+                partition_by=VitalReading.vital_type,
+                order_by=(
+                    VitalReading.recorded_at.desc(),
+                    VitalReading.id.desc(),
+                ),
+            )
+            .label("rn"),
+        )
+        .where(
+            VitalReading.user_id == user_id,
+            VitalReading.vital_type.in_(list(vital_types)),
+        )
+        .subquery()
     )
+    rows = (
+        await db.execute(
+            select(aliased(VitalReading, ranked)).where(ranked.c.rn == 1)
+        )
+    ).scalars().all()
+    return {r.vital_type: _vital_point(r) for r in rows}
 
 
 async def vital_series(

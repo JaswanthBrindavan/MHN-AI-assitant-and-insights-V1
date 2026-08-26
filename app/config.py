@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://davi:davi@localhost:5432/davi"
     alembic_database_url: str = "postgresql+psycopg2://davi:davi@localhost:5432/davi"
+    # Connection pool. SQLAlchemy's defaults are 5 + 10 overflow = 15 — the
+    # figure the scaling note derived ~167 concurrent connections at 1M users
+    # against. Kept as the default so nothing changes without a decision, but
+    # settable, because the database is shared with mhn-spring and mhn-ai and
+    # the right number is an operational call, not a code change.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30
 
     # Auth — aligned with the mhn-spring production backend:
     #   * session JWTs are signed HS512 with the SAME JWT_SECRET Spring uses,

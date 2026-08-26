@@ -30,12 +30,20 @@ def get_engine():
         # period never lands on a connection the server already dropped
         # (hosted Postgres closes idle connections; without this the first
         # post-idle chat request 500s and only the retry succeeds).
-        _engine = create_async_engine(
-            get_settings().database_url,
-            future=True,
-            pool_pre_ping=True,
-            pool_recycle=300,
-        )
+        settings = get_settings()
+        kwargs: dict = {
+            "future": True,
+            "pool_pre_ping": True,
+            "pool_recycle": 300,
+        }
+        # SQLite (tests) uses a pool that takes none of these.
+        if not settings.database_url.startswith("sqlite"):
+            kwargs.update(
+                pool_size=settings.db_pool_size,
+                max_overflow=settings.db_max_overflow,
+                pool_timeout=settings.db_pool_timeout,
+            )
+        _engine = create_async_engine(settings.database_url, **kwargs)
     return _engine
 
 

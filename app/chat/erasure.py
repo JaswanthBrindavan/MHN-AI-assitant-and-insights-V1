@@ -100,6 +100,7 @@ async def request_erasure(
     from app.chat.context import clear_patient_context_memo
 
     clear_patient_context_memo(db)
+    clear_pending_memo(db)
     # No user id, no free text: this log line is operational, and the erasure
     # path is the last place to start writing identifiers into logs.
     logger.info("erasure scheduled in %d days", grace_days)
@@ -119,6 +120,28 @@ async def pending_request(
     ).scalars().first()
 
 
+# Per-session memo for `is_pending`. Three callers ask per turn —
+# build_patient_context and memory_assembly's assemble and record — and within
+# one session the answer cannot change: a forget-me request and a chat turn are
+# separate HTTP requests with separate sessions.
+#
+# Stored on `Session.info`, NOT in a module dict keyed on `id(db)`. That is the
+# pattern `_context_memo` uses and it is wrong for this: id() is reused after a
+# session is collected, so a later session for the SAME user can hit a dead
+# session's entry. The suite caught exactly that — the agentic parametrisation
+# read the legacy run's cached "not pending" and kept using data the reader had
+# asked to have forgotten. `Session.info` dies with its session, so a stale hit
+# is not expressible.
+_MEMO_KEY = "davi_erasure_pending"
+
+
+def clear_pending_memo(db: AsyncSession | None = None) -> None:
+    """Drop the memo. `db=None` is a no-op kept for symmetry with the context
+    memo — there is no global state left to clear."""
+    if db is not None:
+        db.info.pop(_MEMO_KEY, None)
+
+
 async def is_pending(db: AsyncSession, user_id: uuid.UUID) -> bool:
     """True while an erasure is scheduled but not yet executed.
 
@@ -126,12 +149,22 @@ async def is_pending(db: AsyncSession, user_id: uuid.UUID) -> bool:
     check itself errors we behave as though an erasure is pending and withhold
     the memory, because wrongly remembering someone who asked to be forgotten
     is the worse of the two mistakes.
+
+    Memoised per session — see `_pending_memo`. A failure is NOT memoised: a
+    transient error must not pin the reader into "forgotten" for the rest of
+    the turn, and re-asking is one cheap query.
     """
+    memo: dict[uuid.UUID, bool] = db.info.setdefault(_MEMO_KEY, {})
+    cached = memo.get(user_id)
+    if cached is not None:
+        return cached
     try:
-        return await pending_request(db, user_id) is not None
+        answer = await pending_request(db, user_id) is not None
     except Exception:  # noqa: BLE001
         logger.warning("erasure-pending check failed; withholding memory")
         return True
+    memo[user_id] = answer
+    return answer
 
 
 async def cancel_erasure(
