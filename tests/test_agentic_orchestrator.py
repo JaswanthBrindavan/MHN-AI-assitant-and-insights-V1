@@ -306,8 +306,16 @@ async def test_the_turn_is_persisted_and_a_receipt_written(db_session):
     msgs = (
         (
             await db_session.execute(
-                select(ConversationMessage).where(
-                    ConversationMessage.session_id == result.session_id
+                select(ConversationMessage)
+                .where(ConversationMessage.session_id == result.session_id)
+                # The codebase's ordering contract. Without it this asserted on
+                # whatever physical order the planner happened to return: it
+                # passed for a long time, then a new composite index on
+                # (session_id, created_at DESC, id DESC) changed the plan and it
+                # read assistant-then-user. Under pytest-randomly it would have
+                # been flaky rather than reliably broken, which is worse.
+                .order_by(
+                    ConversationMessage.created_at, ConversationMessage.id
                 )
             )
         )

@@ -60,6 +60,14 @@ FLYWAY_TABLES = {
     "job_runs": "V6__davi_ai_tables.sql",
 }
 
+# Migrations that create no table, so there is nothing for the column-parity
+# check to compare. Listed explicitly rather than skipped by pattern: a file
+# lands here only by a deliberate edit, so a new TABLE can never slip through
+# by being named like an index migration.
+INDEX_ONLY_FILES = {
+    "V23__davi_conversation_message_index.sql",
+}
+
 
 def _create_table_columns(sql: str, table: str) -> dict[str, bool]:
     """Column name -> nullable, parsed from a CREATE TABLE block.
@@ -161,7 +169,11 @@ def test_no_davi_flyway_file_is_left_unchecked():
     Without this, the parity check silently stops covering new tables — the
     same way V6 and V7 shipped with no check at all.
     """
-    known = set(FLYWAY_TABLES.values()) | {"V6__davi_ai_tables.sql"}
+    known = (
+        set(FLYWAY_TABLES.values())
+        | {"V6__davi_ai_tables.sql"}
+        | INDEX_ONLY_FILES
+    )
     on_disk = {p.name for p in FLYWAY_DIR.glob("V*__davi_*.sql")}
     unchecked = on_disk - known
     assert not unchecked, (
