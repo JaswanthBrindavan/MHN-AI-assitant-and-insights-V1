@@ -45,6 +45,7 @@ from app.chat.data_handlers import (
     handle_suggestion_query,
     handle_summary_query,
     handle_tracker_add,
+    handle_tracker_query,
     handle_value_check,
 )
 from app.chat.db_release import ReleasingProvider
@@ -513,6 +514,11 @@ async def _dispatch(
                 ability = await handle_value_check(db, user_id, message, session_id)
                 if ability is None:
                     ability = await handle_tracker_add(db, user_id, message)
+                if ability is None:
+                    # AFTER tracker_add: "log 2 glasses of water" and "how much
+                    # water did I drink" share every noun and differ only in
+                    # framing, so the WRITE must get first refusal.
+                    ability = await handle_tracker_query(db, user_id, message)
                 if ability is None:
                     # AI-result requests outrank the document LISTING — "get
                     # insights for this report" must fetch the pipeline's

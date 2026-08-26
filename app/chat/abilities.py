@@ -410,6 +410,19 @@ _METRIC_INTENT_RE = re.compile(
 )
 _TREND_RE = re.compile(r"\btrend|over time|history|chart|graph|progress\b", re.IGNORECASE)
 
+# Asking how to CHANGE a number, not what it is. These questions name a metric
+# and say "my", so every other guard here lets them through to the data
+# handler, which then reports that it has no readings on file.
+_METRIC_ADVICE_RE = re.compile(
+    r"\b(?:lower|reduce|raise|increase|improve|manage|control|prevent|treat|"
+    r"fix|maintain|bring down|get rid of)\b"
+    r"|\bhow (?:can|do|should|would) i\b"
+    r"|\bwhat (?:can|should) i (?:do|eat|take)\b"
+    r"|\bnaturally\b|\bhome remed|\bdiet for\b|\bexercise[s]? for\b"
+    r"|\btips\b|\badvice\b|\bhelp (?:me )?(?:with|to)\b",
+    re.IGNORECASE,
+)
+
 
 def parse_metric_query(message: str) -> MetricQuery | None:
     low = message.lower()
@@ -422,6 +435,13 @@ def parse_metric_query(message: str) -> MetricQuery | None:
             # Require a possessive/lookup framing to avoid hijacking general
             # education questions ("what is a normal blood pressure?").
             if re.search(r"\bnormal\b|\bideal\b|\bshould\b|\brange\b", low):
+                return None
+            # ADVICE is not a lookup. "how can I lower my blood pressure
+            # naturally?" satisfies every test above — it contains "my" and
+            # names a metric — and staging answered it with "I couldn't find
+            # any blood pressure readings in your records yet." The reader
+            # asked how to change a number, not what the number is.
+            if _METRIC_ADVICE_RE.search(low):
                 return None
             if not re.search(r"\bmy\b|\bmine\b|\blatest\b|\blast\b|\bcurrent\b", low):
                 return None
@@ -734,4 +754,72 @@ def parse_section_detail_query(message: str) -> str | None:
     for pattern, kind in _SECTION_ASK_KINDS:
         if re.search(rf"\b(?:{pattern})\b", low):
             return kind
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Manual tracker pulls ("how much water did I drink this week?")
+#
+# These were reaching the LLM. Every one of water / steps / coffee / smoking /
+# sleep is a number the reader logged themselves and we already read for the
+# [P] block — answering them with a model call is 4-12s and a paraphrase where
+# a lookup is ~150ms and exact.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class TrackerQuery:
+    source: str   # "lifestyle" (summed) | "manual" (latest value)
+    key: str
+    period: str   # week | month | year
+
+
+# Term → (source, key). "water" is logged BOTH ways; the lifestyle total is the
+# honest answer to "how much did I drink", so it wins.
+_TRACKER_TERMS: tuple[tuple[str, str, str], ...] = (
+    (r"\bwater\b|\bhydration\b", "lifestyle", "water"),
+    (r"\bcoffee\b|\bcaffeine\b", "lifestyle", "coffee"),
+    (r"\btea\b", "lifestyle", "tea"),
+    (r"\balcohol\b|\bdrink(?:s|ing)? alcohol\b|\bbeer\b|\bwine\b", "lifestyle", "alcohol"),
+    (r"\bsmok(?:e|ed|ing)\b|\bcigarette", "lifestyle", "smoking"),
+    (r"\bsteps?\b|\bwalk(?:ed|ing)?\b", "manual", "steps"),
+    (r"\bsleep\b|\bslept\b", "manual", "sleep"),
+    (r"\bcalorie", "manual", "calories"),
+)
+
+_TRACKER_LOOKUP_RE = re.compile(
+    r"\bhow (?:much|many|long)\b|\bdid i\b|\bhave i\b|\bmy\b|\bshow\b|"
+    r"\btotal\b|\baverage\b|\bthis (?:week|month|year)\b",
+    re.IGNORECASE,
+)
+
+
+def _tracker_period(low: str) -> str:
+    if re.search(r"\bmonth\b|\b30 days\b", low):
+        return "month"
+    if re.search(r"\byear\b", low):
+        return "year"
+    return "week"
+
+
+def parse_tracker_query(message: str) -> TrackerQuery | None:
+    """A lookup of the reader's OWN logged tracker data. None if not one.
+
+    Checked AFTER tracker_add by the caller: "log 2 glasses of water" and "how
+    much water did I drink" share every noun, and only the framing differs.
+    """
+    low = message.lower()
+    if not _TRACKER_LOOKUP_RE.search(low):
+        return None
+    # A question about the NORM is not a question about the reader's log.
+    # "how much water should I drink" satisfies the lookup framing ("how much")
+    # and names a tracked habit, but it is asking what is recommended. The
+    # metric parser has carried this guard for a while; the suite caught this
+    # parser going without it.
+    if re.search(r"\bshould\b|\bnormal\b|\bideal\b|\brecommended\b|\benough\b", low):
+        return None
+    # Advice about a habit is not a reading of it either.
+    if _METRIC_ADVICE_RE.search(low):
+        return None
+    for pattern, source, key in _TRACKER_TERMS:
+        if re.search(pattern, low):
+            return TrackerQuery(source=source, key=key, period=_tracker_period(low))
     return None
