@@ -600,3 +600,58 @@ def test_tracker_lookup_does_not_claim_norms_advice_or_writes(message):
     from app.chat.abilities import parse_tracker_query
 
     assert parse_tracker_query(message) is None
+
+
+# --------------------------------------------------------------------------- #
+# Real-user phrasing
+#
+# Second staging run, questions typed the way people actually type them. Two
+# gaps, both of which made the assistant look like it had no data:
+#
+#   "am i smoking less these days"  -> no lookup keyword matched, so it went to
+#       the model, which answered "I don't have access to any smoking logs or
+#       trackers". That is FALSE — lifestyle_totals reads exactly that. A
+#       missed parse is not a neutral fallback; it invents a limitation.
+#
+#   "show me my meds"  -> medications were not a tracker source at all, so it
+#       fell through to the data-query router and came back "I don't have any
+#       family-history insights on record for you yet."
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("message", "source", "key"),
+    [
+        ("am i smoking less these days", "lifestyle", "smoking"),
+        ("how much water have i been drinking", "lifestyle", "water"),
+        ("whats my step count looking like", "manual", "steps"),
+        ("have i been sleeping ok", "manual", "sleep"),
+        ("how often do i drink alcohol", "lifestyle", "alcohol"),
+        ("show me my meds", "medications", "medications"),
+        ("what medications am i currently on", "medications", "medications"),
+        ("what tablets am i taking", "medications", "medications"),
+        ("list my medicines", "medications", "medications"),
+    ],
+)
+def test_real_user_phrasing_reaches_the_tracker(message, source, key):
+    from app.chat.abilities import parse_tracker_query
+
+    q = parse_tracker_query(message)
+    assert q is not None, f"fell through to the model: {message!r}"
+    assert (q.source, q.key) == (source, key)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Drug INFORMATION is not a reading of the reader's own medications.
+        "side effects of metformin",
+        "what is paracetamol used for",
+        "can i take crocin with dolo",
+        # Still norms and advice, with the wider framing in place.
+        "how much water should i drink",
+        "how can i cut down on smoking",
+    ],
+)
+def test_wider_framing_did_not_widen_into_other_paths(message):
+    from app.chat.abilities import parse_tracker_query
+
+    assert parse_tracker_query(message) is None

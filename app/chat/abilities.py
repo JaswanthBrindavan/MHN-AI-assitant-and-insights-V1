@@ -781,13 +781,29 @@ _TRACKER_TERMS: tuple[tuple[str, str, str], ...] = (
     (r"\balcohol\b|\bdrink(?:s|ing)? alcohol\b|\bbeer\b|\bwine\b", "lifestyle", "alcohol"),
     (r"\bsmok(?:e|ed|ing)\b|\bcigarette", "lifestyle", "smoking"),
     (r"\bsteps?\b|\bwalk(?:ed|ing)?\b", "manual", "steps"),
-    (r"\bsleep\b|\bslept\b", "manual", "sleep"),
+    (r"\bsleep(?:ing)?\b|\bslept\b", "manual", "sleep"),
     (r"\bcalorie", "manual", "calories"),
+    # Medications come from medicine_tracking, not a habit log. Without this,
+    # "show me my meds" fell through to the data-query router and came back
+    # "I don't have any family-history insights on record for you yet."
+    (
+        r"\bmeds?\b|\bmedication|\bmedicines?\b|\btablets?\b|\bpills?\b|"
+        r"\bwhat am i taking\b",
+        "medications",
+        "medications",
+    ),
 )
 
 _TRACKER_LOOKUP_RE = re.compile(
-    r"\bhow (?:much|many|long)\b|\bdid i\b|\bhave i\b|\bmy\b|\bshow\b|"
-    r"\btotal\b|\baverage\b|\bthis (?:week|month|year)\b",
+    # Widened after a staging run. "am i smoking less these days" carried none
+    # of the original keywords, so it fell through to the model, which then
+    # said "I don't have access to any smoking logs or trackers" — a claim that
+    # is simply untrue: lifestyle_totals reads exactly that. A missed parse is
+    # not a neutral fallback here; it invents a limitation.
+    r"\bhow (?:much|many|long|often)\b|\bdid i\b|\bhave i\b|\bam i\b|"
+    r"\bi(?:'|’)?ve been\b|\bmy\b|\bshow\b|\blist\b|\btotal\b|"
+    r"\baverage\b|\bthis (?:week|month|year)\b|"
+    r"\b(?:lately|recently|these days|so far)\b",
     re.IGNORECASE,
 )
 
