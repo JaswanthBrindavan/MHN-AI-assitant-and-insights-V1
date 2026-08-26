@@ -147,6 +147,24 @@ def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+async def _stage(name: str, coro):
+    """Time one pre-retrieval stage and log it. NOT in the user-facing trace.
+
+    Staging measured 43s on a turn that made NO model call at all (a
+    definitional ask served extractively) and 113s on one that did. In both the
+    whole cost sat between routing and retrieval, which the trace records as a
+    single opaque jump. These lines name the stage; they carry a duration and
+    nothing else, so no PHI reaches the log.
+    """
+    started = time.perf_counter()
+    try:
+        return await coro
+    finally:
+        logger.info(
+            "chat stage %s %.0fms", name, (time.perf_counter() - started) * 1000
+        )
+
+
 async def _write_receipt(
     db: AsyncSession,
     *,
@@ -645,7 +663,9 @@ async def _dispatch(
             record_fail_open("drug_lookup")
 
     # 6) Symptom / educational RAG path (risk is none or high here).
-    patient_text, user_codes = await build_patient_context(db, user_id)
+    patient_text, user_codes = await _stage(
+        "patient_context", build_patient_context(db, user_id)
+    )
     # For PERSONAL-symptom questions ("why am I so tired?"), enrich the [P]
     # block with the reader's own recorded data so the answer can be correlated
     # with their lifestyle/vitals/medications — as things to discuss with a
@@ -653,7 +673,9 @@ async def _dispatch(
     # enforce that). General education questions stay lean (no private data).
     if is_personal_health_query(message):
         try:
-            snapshot = await build_health_snapshot(db, user_id)
+            snapshot = await _stage(
+                "health_snapshot", build_health_snapshot(db, user_id)
+            )
             if snapshot:
                 patient_text = (
                     f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
@@ -664,19 +686,21 @@ async def _dispatch(
 
     # Per-user memory (profile, open episodes, past topics), read once through
     # the SHARED assembly so both engines see all of it.
-    _memory = await memory_assembly.assemble(db, user_id)
+    _memory = await _stage("memory_assembly", memory_assembly.assemble(db, user_id))
 
     # Short-term memory: recent verbatim turns drive follow-up resolution. The
     # last entry is the current message (already persisted) — the PRIOR turns
     # are the conversational context.
-    compacted_summary, recent = await assemble_context(db, session_id)
+    compacted_summary, recent = await _stage(
+        "session_context", assemble_context(db, session_id)
+    )
     prior_turns = recent[:-1] if recent else []
 
     # Message-only scope FIRST, then union the pedigree codes in. The old
     # shape called resolve_scope twice with the same message — a duplicate
     # registry match and an extra round trip — because it needed both answers.
     # Deriving one from the other gives both for one call.
-    message_codes = await resolve_scope(db, message, set())
+    message_codes = await _stage("resolve_scope", resolve_scope(db, message, set()))
     codes = message_codes | await resolve_scope(db, "", user_codes)
     # Scope carry-forward: a follow-up like "is it serious?" names no condition
     # of its own, so inherit the topic from the reader's OWN recent questions.
@@ -693,7 +717,7 @@ async def _dispatch(
             codes = codes | carried
             t("Follow-up", f"carried topic scope from recent turns: "
               f"{sorted(carried)[:4]}")
-    chunks = await retrieve_chunks(db, codes, message)
+    chunks = await _stage("retrieval", retrieve_chunks(db, codes, message))
     used_rag = bool(chunks)
     # Why this turn fell back, if it did. The agentic path has always recorded
     # this; the legacy path did not, which left the degradation metric blind on
