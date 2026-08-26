@@ -178,7 +178,7 @@ async def build_questions(db, limit: int) -> list[tuple[str, str, str | None]]:
     # User-curated realistic bank (evals/realistic_questions.json).
     bank = Path("evals/realistic_questions.json")
     if bank.exists():
-        data = json.loads(bank.read_text())
+        data = json.loads(bank.read_text(encoding="utf-8"))
         for group, items in data.get("groups", {}).items():
             for q in items:
                 questions.append((f"realistic:{group.split(' — ')[0]}", q, None))

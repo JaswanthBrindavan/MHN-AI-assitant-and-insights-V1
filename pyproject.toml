@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.27",
     "psycopg2-binary>=2.9",
     "python-docx>=1.1",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,13 @@ dev = [
     "pytest>=8.1",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
+    # The CI "ordering" job runs the suite under two shuffles. Without this
+    # plugin that job fails at startup with "Error importing plugin randomly"
+    # -- which is exactly what it did, because the job was written before the
+    # dependency was. An order-dependent test is a real defect: one such
+    # "flake" turned out to be nondeterministic message ordering that made
+    # compaction fold the wrong turns.
+    "pytest-randomly>=3.15",
     "aiosqlite>=0.20",
     "ruff>=0.4",
     "pyright>=1.1.360",
@@ -68,6 +76,15 @@ addopts = "-m 'not pg'"
 [tool.coverage.run]
 source = ["app"]
 omit = ["app/alembic/*"]
+# SQLAlchemy async runs each awaited DB call inside a GREENLET, and coverage
+# does not follow a greenlet switch with the default thread tracer. Every
+# statement after the first `await db.execute(...)` in a request handler was
+# therefore reported as unexecuted -- code that demonstrably runs, since a
+# raise placed there fails the tests. Without this line the gate silently
+# under-counts every async DB-touching module in the repo: the feedback and
+# review endpoints measured 54% and 69% while genuinely being at 98%.
+# It costs roughly 2x on a coverage run; ordinary test runs are unaffected.
+concurrency = ["thread", "greenlet"]
 
 [tool.coverage.report]
 # Coverage gate — enforced whenever coverage runs, e.g.:

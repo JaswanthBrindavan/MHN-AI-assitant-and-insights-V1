@@ -1,0 +1,199 @@
+{
+  "description": "Quality cases. Unlike evals/scenarios.json (safety invariants that must never break), these measure whether the assistant is USEFUL: does it answer at all, engage with what was asked, retrieve the right profile, and reach for the right tool. Task 12 — retiring the regex engine — is gated on agentic scoring at least as well as legacy here. `scripted` supplies the model reply where the answer's content matters; without it the FakeProvider default is used and only the routing is scored.",
+  "cases": [
+    {
+      "name": "education_diabetes",
+      "message": "what should I know about type 2 diabetes and blood sugar?",
+      "expects_conditions": [
+        "T2DM",
+        "MC001"
+      ],
+      "addresses": "diabetes blood sugar",
+      "scripted": [
+        "Type 2 diabetes affects how the body handles blood sugar. Steady habits and regular monitoring help; a clinician can advise on what applies to you."
+      ]
+    },
+    {
+      "name": "education_hypertension",
+      "message": "how does high blood pressure affect the body over time?",
+      "expects_conditions": [
+        "HTN",
+        "MC051"
+      ],
+      "addresses": "blood pressure",
+      "scripted": [
+        "Raised blood pressure puts sustained strain on the heart and blood vessels. It is worth reviewing with a clinician who can see your readings over time."
+      ]
+    },
+    {
+      "name": "education_cholesterol",
+      "message": "why does cholesterol matter for heart health?",
+      "expects_conditions": [
+        "CAD",
+        "MC052"
+      ],
+      "addresses": "cholesterol heart",
+      "scripted": [
+        "Cholesterol contributes to how arteries narrow over time, which is why it is tracked alongside heart health. Your doctor can interpret your own numbers."
+      ]
+    },
+    {
+      "name": "symptom_tiredness",
+      "message": "why have I been so tired lately?",
+      "addresses": "tired",
+      "scripted": [
+        "Tiredness has many ordinary causes — sleep, stress, diet, activity — and some that are worth checking. Noting when it started and what changes it helps a clinician a great deal."
+      ]
+    },
+    {
+      "name": "symptom_headache_duration",
+      "message": "I have had a mild headache for two days, what could be going on?",
+      "addresses": "headache",
+      "scripted": [
+        "A mild headache lasting a couple of days is common and often settles, though a clinician should look at one that persists or worsens. Keeping track of timing and triggers is useful."
+      ]
+    },
+    {
+      "name": "lifestyle_sleep",
+      "message": "how much sleep do adults actually need?",
+      "addresses": "sleep",
+      "scripted": [
+        "Most adults do best with a regular sleep window and a consistent bedtime. If tiredness persists despite that, it is worth raising with a clinician."
+      ]
+    },
+    {
+      "name": "lifestyle_exercise",
+      "message": "what kind of exercise is good if I sit all day?",
+      "addresses": "exercise",
+      "scripted": [
+        "Regular exercise broken through the day tends to help more than one long session if you sit for long periods. A clinician or physiotherapist can tailor the exercise if you have joint or heart concerns."
+      ]
+    },
+    {
+      "name": "medicine_use",
+      "message": "what is metformin used for?",
+      "addresses": "metformin",
+      "expects_tools": [
+        "lookup_medicine"
+      ],
+      "scripted": [
+        "Metformin is commonly prescribed in the management of blood sugar. Do not start, stop or change a dose on your own — discuss it with the prescriber."
+      ]
+    },
+    {
+      "name": "medicine_side_effects",
+      "message": "what are the common side effects of paracetamol?",
+      "addresses": "paracetamol",
+      "expects_tools": [
+        "lookup_medicine"
+      ],
+      "scripted": [
+        "Paracetamol is generally well tolerated at usual doses. Do not change how you take it without speaking to a pharmacist or the prescriber."
+      ]
+    },
+    {
+      "name": "interaction_routes_to_pharmacist",
+      "message": "can I take ibuprofen and paracetamol together?",
+      "addresses": "ibuprofen paracetamol together",
+      "scripted": [
+        "Whether ibuprofen and paracetamol can be taken together depends on things I cannot verify from here — the doses, the timing, and your other medicines. Please ask a pharmacist about that specific combination."
+      ]
+    },
+    {
+      "name": "own_data_metric",
+      "message": "what was my last blood pressure reading?",
+      "addresses": "blood pressure reading",
+      "expects_tools": [
+        "get_latest_metric"
+      ]
+    },
+    {
+      "name": "own_data_report_param",
+      "message": "what is my creatinine?",
+      "addresses": "creatinine",
+      "expects_tools": [
+        "get_report_parameter"
+      ]
+    },
+    {
+      "name": "own_data_documents",
+      "message": "show me my recent reports",
+      "addresses": "reports",
+      "expects_tools": [
+        "get_documents"
+      ]
+    },
+    {
+      "name": "family_documents",
+      "message": "can you pull up my father's lipid report?",
+      "addresses": "father report",
+      "expects_tools": [
+        "get_documents"
+      ]
+    },
+    {
+      "name": "tracker_add",
+      "message": "I had 3 cups of coffee today",
+      "addresses": "coffee",
+      "expects_tools": [
+        "log_lifestyle_entry"
+      ]
+    },
+    {
+      "name": "summary_week",
+      "message": "how have I been doing this week?",
+      "addresses": "week",
+      "expects_tools": [
+        "get_health_summary"
+      ]
+    },
+    {
+      "name": "stated_value",
+      "message": "my sugar came out at 117 this morning, is that alright?",
+      "addresses": "sugar",
+      "expects_tools": [
+        "check_value_against_range"
+      ]
+    },
+    {
+      "name": "condition_guidance",
+      "message": "what generally helps with type 2 diabetes day to day?",
+      "addresses": "diabetes",
+      "expects_tools": [
+        "get_condition_guidance"
+      ]
+    },
+    {
+      "name": "family_list",
+      "message": "who is connected to my account?",
+      "addresses": "connected account family",
+      "expects_tools": [
+        "get_family_members"
+      ]
+    },
+    {
+      "name": "pregnancy_reassurance_not_refusal",
+      "message": "is it normal to feel very tired in early pregnancy?",
+      "addresses": "tired pregnancy",
+      "scripted": [
+        "Tiredness is very commonly reported in early pregnancy. Anything that worries you, or feels different from that, is worth raising with your midwife or doctor."
+      ]
+    },
+    {
+      "name": "vague_question_still_helps",
+      "message": "I feel off today",
+      "addresses": "feel",
+      "scripted": [
+        "Sorry to hear you feel off. Can you tell me a little more — how long you have felt this way, and whether anything else has changed?"
+      ]
+    },
+    {
+      "name": "followup_fragment",
+      "message": "is that serious?",
+      "addresses": "serious",
+      "scripted": [
+        "Whether it is serious depends a great deal on the details. If you can tell me what you are asking about, I can explain what is generally known and what is worth raising with a clinician."
+      ]
+    }
+  ]
+}

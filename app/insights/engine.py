@@ -19,7 +19,18 @@ from app.models.core import PedigreeCondition
 from app.models.rules import InsightArtifact, InsightTemplate, RiskRule
 
 # Artifact statuses that are "live" (not retired).
-LIVE_STATUSES = ("active", "held_for_review")
+#
+# "suppressed" belongs here even though it is never shown. It is what the
+# hash-supersede check compares against, so a clinician's decision to withhold
+# an insight STICKS: recomputing identical facts finds the suppressed row,
+# sees the same content_hash, and no-ops. Drop it from this tuple and every
+# nightly sweep would raise the same declined insight for the same reviewer to
+# decline again, forever.
+#
+# Changed facts still produce a NEW artifact in "held_for_review" -- a
+# different insight has not been reviewed, whatever was decided about the old
+# one.
+LIVE_STATUSES = ("active", "held_for_review", "suppressed")
 
 
 async def _load_inputs(db: AsyncSession, user_id: uuid.UUID) -> list[core.ConditionInput]:

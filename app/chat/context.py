@@ -15,6 +15,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.erasure import is_pending
 from app.coredata.service import (
     BODY_METRIC_ORDER,
     MANUAL_METRIC_ORDER,
@@ -30,6 +31,27 @@ from app.models.core import PedigreeCondition
 from app.models.rules import InsightArtifact
 
 
+def _memo_key(db: AsyncSession, user_id: uuid.UUID) -> tuple[int, uuid.UUID]:
+    return (id(db), user_id)
+
+
+# Per-session memo. build_patient_context is called up to twice per chat turn
+# (once for the [P] block, once for suggestion scoping) and its inputs change
+# only on a pedigree write, so recomputing it is two wasted queries a turn.
+# Keyed on the SESSION object identity so it cannot leak across requests, and
+# cleared explicitly by recompute_insights' callers.
+_context_memo: dict[tuple[int, uuid.UUID], tuple[str, set[str]]] = {}
+
+
+def clear_patient_context_memo(db: AsyncSession | None = None) -> None:
+    """Drop memoised context. Called after a pedigree write."""
+    if db is None:
+        _context_memo.clear()
+        return
+    for key in [k for k in _context_memo if k[0] == id(db)]:
+        del _context_memo[key]
+
+
 async def build_patient_context(
     db: AsyncSession, user_id: uuid.UUID
 ) -> tuple[str, set[str]]:
@@ -38,7 +60,32 @@ async def build_patient_context(
     The text is a short, de-identified summary of family-history conditions and
     active insight tiers, suitable for the [P] block. Condition codes are used
     to scope retrieval.
+
+    Memoised per session — see ``_context_memo``.
+
+    **Returns nothing while an erasure is pending.** `pedigree_conditions` and
+    `insight_artifacts` are two of the eleven tables the erasure destroys, and
+    the reader has been told — in the API response, not just in a docstring —
+    "Davi has stopped using your information already". Gating only
+    `memory_assembly` left this path open, so the turn after a "forget me"
+    still carried the reader's family history, the most sensitive category
+    here, into the model's prompt.
+
+    The suppression is memoised like any other result: within one session
+    (`id(db)`) the pending state cannot change, because a forget-me request and
+    a chat turn are separate HTTP requests with separate sessions. Belt and
+    braces, `request_erasure` clears this memo, so even a caller that did both
+    on one session cannot serve a stale pre-request value.
     """
+    key = _memo_key(db, user_id)
+    cached = _context_memo.get(key)
+    if cached is not None:
+        return cached[0], set(cached[1])
+
+    if await is_pending(db, user_id):
+        _context_memo[key] = ("", set())
+        return "", set()
+
     conditions = (
         await db.execute(
             select(PedigreeCondition).where(
@@ -60,6 +107,7 @@ async def build_patient_context(
     codes |= {a.condition_code for a in insights}
 
     if not conditions and not insights:
+        _context_memo[_memo_key(db, user_id)] = ("", set(codes))
         return "", codes
 
     displays = sorted({c.condition_display for c in conditions})
@@ -69,7 +117,9 @@ async def build_patient_context(
     if insights:
         tiers = sorted({f"{a.condition_code} ({a.tier})" for a in insights})
         lines.append("Active family-history insights: " + ", ".join(tiers) + ".")
-    return " ".join(lines), codes
+    result = (" ".join(lines), codes)
+    _context_memo[_memo_key(db, user_id)] = (result[0], set(codes))
+    return result
 
 
 # --------------------------------------------------------------------------- #

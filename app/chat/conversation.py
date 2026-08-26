@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.memory import compact_messages, empty_summary, merge_summaries
+from app.chat.summarize import merge_prose, summarize_prose
 from app.models.chat import (
     ConversationMessage,
     ConversationSession,
@@ -35,6 +36,16 @@ async def ensure_session(
             )
         ).scalars().first()
         if existing is not None:
+            if existing.user_id != user_id:
+                # Not this user's session. Every other read path authorizes
+                # (GET /chat/sessions/{id}/messages calls authorize_user);
+                # this one did not, so passing someone else's session_id
+                # loaded THEIR history into your prompt and appended your turn
+                # to it. Mint a fresh session rather than leak one — a 403
+                # here would break existing clients for a case that should
+                # simply never have worked.
+                logger.warning("session_id did not belong to the caller")
+                return await ensure_session(db, user_id, None)
             return existing.id
         session = ConversationSession(id=session_id, user_id=user_id)
     else:
@@ -90,7 +101,9 @@ async def latest_summary(
     ).scalars().first()
 
 
-async def maybe_compact(db: AsyncSession, session_id: uuid.UUID) -> dict | None:
+async def maybe_compact(
+    db: AsyncSession, session_id: uuid.UUID, provider=None
+) -> dict | None:
     """Fold messages older than the last KEEP_VERBATIM into a versioned summary.
 
     Deterministic and never raises (caller relies on fail-open behaviour).
@@ -121,6 +134,16 @@ async def maybe_compact(db: AsyncSession, session_id: uuid.UUID) -> dict | None:
         )
         old = summary_row.summary if summary_row else empty_summary()
         merged = merge_summaries(old, new_part)
+
+        # Prose alongside the structure, never instead of it. The structured
+        # keys are the source of truth for every safety-relevant field; this
+        # only adds the nuance the regex extractors cannot see. A summarizer
+        # failure loses the prose and keeps the structure — never the reverse.
+        if provider is not None:
+            prose = await summarize_prose(
+                provider, [{"role": m.role, "message": m.message} for m in to_fold]
+            )
+            merged = merge_prose(merged, prose)
         version = summary_row.version + 1 if summary_row else 1
         token_estimate = sum(len(m.message) for m in to_fold) // 4
 
@@ -150,3 +173,28 @@ async def assemble_context(
         {"role": m.role, "message": m.message} for m in messages[-KEEP_VERBATIM:]
     ]
     return (summary_row.summary if summary_row else None), last
+
+
+async def questions_asked(db: AsyncSession, session_id: uuid.UUID) -> int:
+    """How many clarifying questions the assistant has already asked.
+
+    A clarifying question is just a reply that ends in a question mark — no
+    state machine, no slot filling. The only thing that needs machinery is
+    stopping a loop, and that is one COUNT.
+
+    Never raises: a counting failure must not cost the reader an answer, so it
+    degrades to "already asked plenty", which suppresses further questions.
+    """
+    try:
+        rows = (
+            await db.execute(
+                select(ConversationMessage.message).where(
+                    ConversationMessage.session_id == session_id,
+                    ConversationMessage.role == "assistant",
+                )
+            )
+        ).scalars().all()
+    except Exception:  # noqa: BLE001 — never break a reply over a counter
+        logger.warning("clarifying-question count failed", exc_info=True)
+        return 999
+    return sum(1 for m in rows if (m or "").rstrip().endswith("?"))

@@ -8,6 +8,32 @@ from __future__ import annotations
 
 from app.rag.retrieval import RetrievedChunk
 
+# Rough characters per token for English prose. Deliberately conservative:
+# over-estimating tokens trims a little early, under-estimating overflows the
+# context window, and only one of those two failures is recoverable.
+#
+# ponytail: a ratio, not a tokenizer. The Anthropic SDK's count_tokens is an
+# API round-trip per call, which is the wrong price for a trimming decision
+# made on every turn. Swap in a local tokenizer if one ships.
+CHARS_PER_TOKEN = 3.5
+
+# What the volatile suffix may spend. The existing caps were COUNT-based
+# (top-k chunks, last 6 turns), which bounds the number of items and not
+# their size — one long retrieved chunk could carry more text than the whole
+# rest of the prompt. This bounds the bytes.
+DEFAULT_VOLATILE_BUDGET_TOKENS = 6000
+
+# How much of one conversation turn is actually rendered into the prompt.
+# The budget MUST cost turns at this length, not their full length — see
+# _fit_budget._cost.
+TURN_RENDER_LIMIT = 400
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token count. See CHARS_PER_TOKEN — an estimate, never a promise."""
+    return int(len(text) / CHARS_PER_TOKEN) + 1
+
+
 _SAFETY_RULES = (
     "You are Davi, a careful health assistant offering general, educational "
     "information and decision support. You are NOT a doctor and you never "
@@ -61,7 +87,7 @@ def format_recent_turns(turns: list[dict]) -> str:
         who = "User" if t.get("role") == "user" else "Davi"
         text = (t.get("message") or "").strip().replace("\n", " ")
         if text:
-            lines.append(f"{who}: {text[:400]}")
+            lines.append(f"{who}: {text[:TURN_RENDER_LIMIT]}")
     return "\n".join(lines)
 
 
@@ -70,12 +96,44 @@ def build_system_prompt(
     patient_context: str,
     compacted_context_json: str | None = None,
     recent_turns: list[dict] | None = None,
-) -> str:
+) -> tuple[str, str]:
+    """Return ``(stable_prefix, volatile_suffix)`` for the legacy engine.
+
+    Split for the same reason the agentic builder is: element 0 is the rules,
+    which are identical for every reader and every turn, so it can carry a
+    prompt-cache breakpoint. Until this split existed the legacy engine passed
+    ONE string to ``provider.generate``, `_to_system_blocks` returned it
+    untouched, and the DEFAULT engine set no breakpoint at all.
+
+    **This is correct plumbing, not yet a saving — say so rather than claiming
+    one.** Measured: this prefix is ~267 tokens without the personalization
+    rules and ~560 with them, because legacy offers no tools and so has no
+    1,691-token schema block to carry it. Against the per-model minimums
+    (Opus 5 512, Sonnet 5 1024, Haiku 4.5 4096) only the personalized variant
+    on Opus 5 currently caches anything at all. The breakpoint costs nothing,
+    makes both engines consistent, and starts paying the moment the prefix
+    grows — a per-user memory block before the mark would add ~700 tokens.
+    Verify with ``python -m scripts.cache_probe`` before quoting a number.
+
+    The personalization rules stay CONDITIONAL, as before. Note WHY that is
+    tolerable, because the obvious reason is wrong: the condition keys off
+    `build_health_snapshot` output, which the orchestrator only requests for a
+    PERSONAL-health question -- so the variant flips per MESSAGE, not per
+    reader. One session can alternate A/B/A across three turns. It is still
+    fine, but for a different reason: two variants are two cache entries, each
+    with its own TTL, and under alternation both stay warm. The cost is one
+    extra cache write per variant per idle window, not one per turn. Making
+    them unconditional would change what the model is told on every
+    general-education turn, which is a bigger change than this fix is entitled
+    to make.
+    """
     parts = [_SAFETY_RULES, _GROUNDING_RULES]
     # Only spend the personalization budget when personal data is actually
     # present in [P] (the snapshot line is unmistakable).
     if patient_context and "own recorded data" in patient_context:
         parts.append(_PERSONALIZATION_RULES)
+    stable = "\n\n".join(parts)
+    parts = []
     # Recent verbatim turns let the model resolve follow-ups ("is it serious?",
     # "what about for children?") and refer back to its own earlier answers.
     if recent_turns:
@@ -111,7 +169,7 @@ def build_system_prompt(
         )
     if patient_context:
         parts.append("Patient context block [P]:\n" + patient_context)
-    return "\n\n".join(parts)
+    return stable, "\n\n".join(parts)
 
 
 def build_correction_directive(violations: list[dict]) -> str:
@@ -124,3 +182,135 @@ def build_correction_directive(violations: list[dict]) -> str:
         "valid citation marker ([n]/[P], or [GK] only if nothing was retrieved), "
         "citing only blocks that exist. Do not add new facts."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Agentic engine
+# --------------------------------------------------------------------------- #
+_TOOL_RULES = (
+    "You have tools that read the reader's OWN health records. Use them "
+    "whenever the answer depends on their data — a lab value, a document, a "
+    "tracked habit, a family member's shared report. Never state a number a "
+    "tool did not return, and never guess at a value you could look up.\n"
+    "When a tool returns a `deterministic_reply`, that wording has already "
+    "been safety-checked: prefer it verbatim when it answers the question on "
+    "its own. Write your own wording only when you need to COMBINE facts from "
+    "more than one tool — and even then, quote every value exactly as the tool "
+    "gave it.\n"
+    "If a tool reports nothing on file, say so plainly. Do not estimate, and "
+    "do not suggest the reader is missing something they should have."
+)
+
+_CLARIFY_RULES = (
+    "If the question is too vague to answer safely — a symptom with no "
+    "duration or severity, a reading with no context — ask ONE short "
+    "clarifying question instead of guessing. One at a time, and never more "
+    "than a couple across the whole conversation. If you have already asked, "
+    "answer with what you have."
+)
+
+
+def _fit_budget(
+    chunks: list[RetrievedChunk] | None,
+    recent_turns: list[dict] | None,
+    patient_context: str,
+    compacted_context_json: str | None,
+    budget_tokens: int,
+) -> tuple[list[RetrievedChunk] | None, list[dict] | None]:
+    """Drop the lowest-value material until the suffix fits.
+
+    Chunks go first (lowest-ranked first — retrieval already ordered them),
+    then the OLDEST conversation turns. The most recent turn is never dropped:
+    a follow-up fragment is meaningless without the turn it follows.
+    """
+    fixed = estimate_tokens(patient_context) + estimate_tokens(
+        compacted_context_json or ""
+    )
+    remaining = budget_tokens - fixed
+
+    kept_chunks = list(chunks or [])
+    kept_turns = list(recent_turns or [])
+
+    def _cost() -> int:
+        # Turns are costed at their RENDERED length. format_recent_turns
+        # truncates each to TURN_RENDER_LIMIT, so charging the full message
+        # would protect text that is thrown away and pay for it by dropping
+        # retrieved knowledge: six 4000-char turns "cost" ~6900 tokens and
+        # render as ~690, which was enough to evict every chunk from a health
+        # question because somebody earlier pasted a long lab report.
+        return sum(
+            estimate_tokens(c.content) for c in kept_chunks
+        ) + sum(
+            estimate_tokens(str(t.get("message", ""))[:TURN_RENDER_LIMIT])
+            for t in kept_turns
+        )
+
+    while _cost() > remaining and kept_chunks:
+        kept_chunks.pop()
+    while _cost() > remaining and len(kept_turns) > 1:
+        kept_turns.pop(0)
+
+    return (kept_chunks or None), (kept_turns or None)
+
+
+def build_agentic_system_prompt(
+    patient_context: str,
+    compacted_context_json: str | None = None,
+    recent_turns: list[dict] | None = None,
+    chunks: list[RetrievedChunk] | None = None,
+    allow_questions: bool = True,
+    budget_tokens: int = DEFAULT_VOLATILE_BUDGET_TOKENS,
+) -> tuple[str, str]:
+    """Return ``(stable_prefix, volatile_suffix)``.
+
+    The prefix is byte-identical across turns and carries the prompt-cache
+    breakpoint (see ``app/llm/anthropic.py``); everything that varies per turn
+    goes in the suffix, where it would break the cache on every call.
+
+    ``budget_tokens`` bounds the SUFFIX only. The prefix is never trimmed:
+    trimming it would change it, which is the one thing it must not do.
+
+    What gets dropped first, and why: retrieved chunks before conversation
+    turns. A dropped chunk costs the model one source it can cite; a dropped
+    turn costs it the thread of the conversation, and a follow-up like "is
+    that serious?" becomes unanswerable. Patient context and the compacted
+    summary are never dropped — they are small and they are the reader's own
+    situation.
+    """
+    stable_parts = [_SAFETY_RULES, _GROUNDING_RULES, _TOOL_RULES]
+    if allow_questions:
+        stable_parts.append(_CLARIFY_RULES)
+    stable_parts.append(_PERSONALIZATION_RULES)
+    stable = "\n\n".join(stable_parts)
+
+    # Trim to the budget BEFORE rendering, not after. Rendering then truncating
+    # would cut a chunk mid-sentence and hand the model a fact with its
+    # qualifier missing — worse than not having the chunk at all.
+    chunks, recent_turns = _fit_budget(
+        chunks, recent_turns, patient_context, compacted_context_json, budget_tokens
+    )
+
+    volatile: list[str] = []
+    if recent_turns:
+        rendered = format_recent_turns(recent_turns)
+        if rendered:
+            volatile.append(
+                "Recent conversation so far (context for follow-up questions; "
+                "the user's latest message is answered below):\n" + rendered
+                + "\n\nIf the latest message is short or a fragment, it is very "
+                "likely a follow-up — interpret it in that context and resolve "
+                "pronouns like 'it'/'that' from the recent turns."
+            )
+    if compacted_context_json:
+        volatile.append(
+            "COMPACTED_CONTEXT_JSON (topics, flags and phrases mentioned "
+            "earlier in this conversation — NOT the reader's medical record; a "
+            "condition appearing here means it was DISCUSSED, not that the "
+            "reader has it; never present these as their own history):\n"
+            + compacted_context_json
+        )
+    if chunks:
+        volatile.append("Retrieved knowledge blocks:\n" + format_chunks(chunks))
+    if patient_context:
+        volatile.append("Patient context block [P]:\n" + patient_context)
+    return stable, "\n\n".join(volatile)

@@ -8,6 +8,7 @@ import pytest
 
 from app.chat.orchestrator import handle_chat
 from app.llm.fake import FakeProvider
+from app.llm.tools import join_system
 from app.models.chat import McpChunk
 
 USER = uuid.UUID("33333333-3333-3333-3333-333333333333")
@@ -29,8 +30,8 @@ class _SpyProvider(FakeProvider):
         super().__init__(responses=["Here is some information [1]."])
         self.systems: list[str] = []
 
-    async def generate(self, *, system: str, user: str) -> str:
-        self.systems.append(system)
+    async def generate(self, *, system, user: str) -> str:
+        self.systems.append(join_system(system))
         return "Here is some information [1]."
 
 

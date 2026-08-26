@@ -86,7 +86,13 @@ async def test_refresh_inactive_removes_card(client, sessionmaker):
     await client.post("/api/v1/admin/registry/MC001/refresh", headers=HEADERS)
     async with sessionmaker() as db:
         row = (
-            (await db.execute(select(ConditionRegistry).where(ConditionRegistry.condition_code == "MC001")))
+            (
+                await db.execute(
+                    select(ConditionRegistry).where(
+                        ConditionRegistry.condition_code == "MC001"
+                    )
+                )
+            )
             .scalar_one()
         )
         row.active = False
@@ -108,7 +114,8 @@ async def test_refresh_auth_required(client, sessionmaker):
     await _seed_condition(sessionmaker)
     assert (await client.post("/api/v1/admin/registry/MC001/refresh")).status_code == 401
     bad = {"Authorization": "Bearer wrong-token-wrong-token-wrong-token"}
-    assert (await client.post("/api/v1/admin/registry/MC001/refresh", headers=bad)).status_code == 401
+    resp = await client.post("/api/v1/admin/registry/MC001/refresh", headers=bad)
+    assert resp.status_code == 401
 
 
 @pytest.mark.asyncio

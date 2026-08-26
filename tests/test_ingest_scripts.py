@@ -656,3 +656,56 @@ async def test_mcp_mixed_folder_stats_accurate(db_session, tmp_path):
     rows = (await db_session.execute(select(ConditionRegistry))).scalars().all()
     engine = {r.condition_code: r.engine_codes for r in rows}
     assert engine == {"MC001": ["T2DM"], "MC051": ["HTN"], "MC305": []}
+
+
+async def test_ingest_refuses_to_truncate_a_referenced_catalogue(
+    db_session, monkeypatch, tmp_path
+):
+    """mhn-spring's medicine_master.drug_reference_id is ON DELETE SET NULL.
+
+    Truncating drug_reference would NULL every one of ~250K links at the
+    database level, silently, and it cannot be undone: reloaded rows get fresh
+    uuids and V19's relink will never run again. The script must refuse rather
+    than damage another team's data on a command our own docs tell people to
+    run.
+    """
+    from scripts import ingest_drugs
+
+    async def _pretend_linked(_db):
+        return 250_000
+
+    monkeypatch.setattr(ingest_drugs, "linked_row_count", _pretend_linked)
+
+    csv_path = tmp_path / "drugs.csv"
+    csv_path.write_text("name\nParacetamol 500\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="250,000"):
+        await ingest_drugs.ingest_drug_csv(db_session, csv_path)
+
+
+async def test_force_overrides_the_guard(db_session, monkeypatch, tmp_path):
+    """Deliberate is fine; accidental is not."""
+    from scripts import ingest_drugs
+
+    async def _pretend_linked(_db):
+        return 250_000
+
+    monkeypatch.setattr(ingest_drugs, "linked_row_count", _pretend_linked)
+
+    csv_path = tmp_path / "drugs.csv"
+    csv_path.write_text("name\nParacetamol 500\n", encoding="utf-8")
+
+    stats = await ingest_drugs.ingest_drug_csv(db_session, csv_path, force=True)
+    assert stats["rows"] == 1
+
+
+async def test_an_unlinked_database_ingests_normally(db_session, tmp_path):
+    """Local and test databases have no medicine_master — no friction there."""
+    from scripts import ingest_drugs
+
+    assert await ingest_drugs.linked_row_count(db_session) == 0
+
+    csv_path = tmp_path / "drugs.csv"
+    csv_path.write_text("name\nParacetamol 500\n", encoding="utf-8")
+    stats = await ingest_drugs.ingest_drug_csv(db_session, csv_path)
+    assert stats["rows"] == 1

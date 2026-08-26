@@ -80,6 +80,27 @@ NON_DRUG_TERMS: frozenset[str] = frozenset(
         "chemotherapy", "radiation", "radiotherapy", "dialysis", "surgery",
         "vaccination", "pregnancy", "breastfeeding", "menopause",
         "sunlight", "screen time", "junk food", "fast food", "cold drinks",
+        # Everyday foods, added when the interaction gate was hardened (Task
+        # 25). "Can I take honey and lemon together" must still reach the LLM
+        # as an ordinary question; without these, tightening that gate would
+        # have turned every food pairing into a check-with-your-pharmacist
+        # reply. DRAFT — pending clinician sign-off.
+        "lemon", "lime", "ginger", "garlic", "turmeric", "haldi", "curd",
+        "yogurt", "yoghurt", "buttermilk", "banana", "apple", "egg", "eggs",
+        "chicken", "fish", "dal", "roti", "chapati", "bread", "juice",
+        "green tea", "black tea", "lemon water", "warm water", "hot water",
+        "jaggery", "dates", "nuts", "almonds", "cinnamon", "pepper",
+        # GENERIC nouns for "a medicine", as opposed to a named one. Hardening
+        # the interaction gate to fire on phrasing made these matter: without
+        # them, "can I take my medicine with food?" -- an extremely ordinary
+        # question -- produced "Whether medicine and food can be taken
+        # together depends on...", which is nonsense. The refusal is only
+        # meaningful when at least one side names a SPECIFIC substance.
+        # "can I take paracetamol with my medicine?" still fires, correctly.
+        "medicine", "medicines", "medication", "medications", "tablet",
+        "tablets", "pill", "pills", "capsule", "capsules", "drug", "drugs",
+        "syrup", "injection", "supplement", "supplements", "vitamin",
+        "vitamins", "painkiller", "painkillers", "antibiotic", "antibiotics",
     }
 )
 
@@ -237,11 +258,28 @@ async def find_substitutes(db: AsyncSession, drug: MedicineMaster) -> list[str]:
 
 
 def build_drug_reply(
-    drug: MedicineMaster, substitutes: Sequence[str | None] | None = None
+    drug: MedicineMaster,
+    substitutes: Sequence[str | None] | None = None,
+    allergy_warning: str = "",
 ) -> str:
-    """A deterministic, validator-safe drug-information reply (PURE — the
-    caller fetches ``substitutes`` via :func:`find_substitutes`)."""
+    """A deterministic, validator-safe drug-information reply.
+
+    PURE — the caller fetches ``substitutes`` via :func:`find_substitutes`.
+
+    ``allergy_warning`` goes FIRST when present. It is a parameter rather than
+    something read from the patient-context block because this path never sees
+    that block: the drug handler returns from the orchestrator BEFORE
+    `build_patient_context` runs, and it sits inside the legacy branch, so the
+    reader's own allergies were unreachable from here on the default engine.
+
+    A reader with a severe penicillin allergy asking "side effects of
+    amoxicillin" got a clean monograph with no mention of it.
+    """
     parts: list[str] = []
+    if allergy_warning:
+        parts.append(allergy_warning)
+    # No manufacturer: it adds nothing a patient can act on, and the reply
+    # should read like drug information, not a product listing.
     comp = ", ".join(c for c in (drug.composition1, drug.composition2) if c)
     intro = f"{drug.name}"
     if comp:

@@ -46,8 +46,13 @@ from app.models.coredata import (
     Vaccination,
     VitalReading,
 )
+from app.models.erasure import ErasureRequest
+from app.models.feedback import TurnFeedback
 from app.models.jobs import JobRun
 from app.models.knowledge import ConditionRegistry, DrugReference
+from app.models.memory_document import UserMemoryDocument
+from app.models.profile import UserProfile
+from app.models.review import ClinicianReviewer, InsightReviewAudit
 from app.models.rules import InsightArtifact, InsightTemplate, RiskRule
 
 __all__ = [
@@ -68,7 +73,13 @@ __all__ = [
     "ConversationSummary",
     "McpChunk",
     "RagTurnReceipt",
+    "ClinicianReviewer",
+    "ErasureRequest",
+    "UserMemoryDocument",
+    "InsightReviewAudit",
     "JobRun",
+    "TurnFeedback",
+    "UserProfile",
     "ConditionRegistry",
     "DrugReference",
     "Report",

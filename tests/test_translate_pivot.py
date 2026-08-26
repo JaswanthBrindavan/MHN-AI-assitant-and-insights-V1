@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from app.chat.orchestrator import handle_chat
-from app.chat.replies import SCOPE_DECLINE
+from app.chat.replies import SCOPE_DECLINES
 from app.llm.fake import FakeProvider
 from app.translate.fake import FakeTranslator
 from app.translate.service import (
@@ -204,7 +204,7 @@ async def test_chat_pivots_telugu_through_english(db_session):
         db_session, uuid.uuid4(), TELUGU, provider, translator=fake
     )
     # The pipeline (and the LLM) saw English…
-    assert provider.calls and provider.calls[0][1] == TELUGU_EN
+    assert provider.calls and provider.calls[0]["user"] == TELUGU_EN
     # …and the reply was translated back (fake marks it visibly).
     assert r.response_message.startswith("[te/native]")
     assert r.language == "te"
@@ -257,7 +257,9 @@ async def test_chat_scope_decline_translated(db_session):
         db_session, uuid.uuid4(), TELUGU, FakeProvider(), translator=fake
     )
     assert r.provenance["path"] == "scope_declined"
-    assert r.response_message == f"[te/native] {SCOPE_DECLINE}"
+    # The decline text varies by session; the pivot wrapper must be exact.
+    assert r.response_message.startswith("[te/native] ")
+    assert r.response_message.removeprefix("[te/native] ") in SCOPE_DECLINES
 
 
 async def test_chat_digit_corruption_falls_back_to_english(db_session):
@@ -282,8 +284,8 @@ async def test_chat_sidecar_down_degrades_to_directive_path(db_session):
     )
     # No translation happened; the LLM got the original text plus the
     # reply-language directive (pre-pivot behavior).
-    assert provider.calls and provider.calls[0][1] == TELUGU
-    assert "Reply in Telugu" in provider.calls[0][0]
+    assert provider.calls and provider.calls[0]["user"] == TELUGU
+    assert "Reply in Telugu" in provider.calls[0]["system"]
     assert r.language == "te"
     assert "translation" not in r.provenance
 
@@ -298,7 +300,7 @@ async def test_english_followup_after_telugu_stays_english(db_session):
     r1 = await handle_chat(db_session, user, TELUGU, provider, translator=fake)
     # Pivot active → the model is explicitly told to answer in English
     # (the sidecar translates the reply back to Telugu).
-    assert "Reply in English" in provider.calls[0][0]
+    assert "Reply in English" in provider.calls[0]["system"]
     assert r1.response_message.startswith("[te/native]")
 
     r2 = await handle_chat(
@@ -309,5 +311,5 @@ async def test_english_followup_after_telugu_stays_english(db_session):
     # English even though the recent-turns context contains Telugu.
     assert r2.language == "en"
     assert "translation" not in r2.provenance
-    assert "Reply in English" in provider.calls[1][0]
+    assert "Reply in English" in provider.calls[1]["system"]
     assert not r2.response_message.startswith("[te/")

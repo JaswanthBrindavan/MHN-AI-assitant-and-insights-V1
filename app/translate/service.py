@@ -26,13 +26,12 @@ refuses, unlike safety-tuned LLM translators).
 from __future__ import annotations
 
 import logging
-import re
-from collections import Counter
 from dataclasses import dataclass
 
 import httpx
 
 from app.config import get_settings
+from app.grounding.fidelity import digits_preserved
 from app.i18n.language import detect_language
 
 logger = logging.getLogger("davi.translate")
@@ -180,18 +179,9 @@ async def pivot_inbound(
     return InboundPivot("en", "latin", message, active=False)
 
 
-_DIGITS_RE = re.compile(r"\d+")
-
-
-def digits_preserved(source: str, translated: str) -> bool:
-    """True when every digit sequence survived translation unchanged.
-
-    Dosages, lab values, and helpline numbers must never be corrupted by the
-    MT model — a mismatch fails the whole translation (English fallback).
-    """
-    return Counter(_DIGITS_RE.findall(source)) == Counter(
-        _DIGITS_RE.findall(translated)
-    )
+# digits_preserved lives in app/grounding/fidelity.py now, next to the guard
+# that applies the same idea to tool-composed replies. It is imported above and
+# used by pivot_outbound below.
 
 
 async def pivot_outbound(

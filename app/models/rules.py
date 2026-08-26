@@ -67,7 +67,9 @@ class InsightArtifact(Base, UUIDPrimaryKey, CreatedAt):
     template_version: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     pipeline_version: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     content_hash: Mapped[str] = mapped_column(sa.String(64), nullable=False, index=True)
-    # active | superseded | held_for_review
+    # active | superseded | held_for_review | suppressed
+    # ("suppressed" is set by the clinician review queue; see
+    #  app/api/v1/review.py and engine.LIVE_STATUSES.)
     status: Mapped[str] = mapped_column(sa.String(20), nullable=False, default="active")
     superseded_by: Mapped[uuid.UUID | None] = mapped_column(
         sa.ForeignKey("insight_artifacts.id"), nullable=True

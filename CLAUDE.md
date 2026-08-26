@@ -14,13 +14,40 @@ A healthtech backend with two independent halves that share a database and auth:
 
 Everything is decision support, never diagnosis — enforced in code.
 
+## Development Workflows
+
+Reusable workflow instructions are stored in `.claude/`.
+
+### Implementation
+When executing an existing implementation plan, read:
+`.claude/execution-rules.md`
+
+Follow those instructions for implementation, verification, testing, and final diff review.
+
+### Code Review
+When performing an independent review of implemented changes, read:
+`.claude/review-rules.md`
+
+Follow those instructions for requirement coverage, bug detection, security, performance, testing, and review findings.
+
+### Task Plans
+Current implementation plans and task-specific documents are stored in:
+`project_docs/` (architecture.md, drawbacks.md, implementation-plan.md).
+`docs/` holds the verified production contracts, not plans.
+
+Treat the current task's implementation plan as the source of truth for what should be implemented.
+
+Do not assume these workflow files apply automatically to every task. Read the relevant workflow file when the task matches its purpose.
+
 ## Database coexistence (important)
 
 This backend shares the **MHN production database**. The production stack is
 three repos (see `docs/production_integration.md` for verified contracts):
 `mhn-spring` (Java API, **Flyway owns ALL schema** — including the `ai_*`
 tables since V4; our `V6__davi_ai_tables.sql` is ADOPTED, and teammates have
-added V7–V10 after it — V10 is the ai name-check columns), `mhn-ai`
+added V7–V20 after it — V10 is the ai name-check columns, V18 the
+193-row reference catalogue, V20 staff sessions, with our
+`V21__davi_chat_platform.sql` above them), `mhn-ai`
 (per-document AI: classify → file → extract → insights; writes `content.ai`
 envelopes into `reports.content` etc.; its Alembic chain is frozen,
 `ai_alembic_version`; since its PR #4 it also runs a NAME CHECK — a document
@@ -43,9 +70,14 @@ Rules we follow (do not break these):
   (version table **`davi_alembic_version`**) builds local/test databases only.
   The `"user"` table is in ORM metadata (partial read-only `User` model) but
   **excluded from migrations** via `EXTERNAL_TABLES` + `include_object`.
-- Migrations are verified two ways: reversibility on a fresh DB, and coexistence
-  (apply on top of a full load of `db/existing_schema.sql` — note that dump is
-  the V1 baseline; production has ddl-auto additions like
+- Migrations are verified two ways: reversibility on a fresh DB
+  (`tests/test_migrations.py`), and coexistence — apply Davi's chain on top of
+  a full load of `db/existing_schema.sql` (`tests/test_coexistence.py`, both
+  `pg`-marked). That dump is now composed from mhn-spring V1–V19 by
+  `python -m scripts.build_existing_schema`; regenerate it whenever they add a
+  migration. It used to be the V1 baseline and the coexistence check was
+  manual, which is why V7–V19 went unnoticed. Production also has ddl-auto
+  additions like
   `family_connect.req_read/acc_read` and `file_access_exclusions`, which our
   models map nullable-with-fallback).
 - **Auth**: production session JWTs are **HS512** with the shared `JWT_SECRET`
@@ -97,7 +129,9 @@ app/
                        owned medicine_master catalogue (V19; drug_reference
                        stays only as the ingest target); deterministic
                        validator-safe replies
-  llm/                 LLMProvider protocol, FakeProvider, agnostic providers
+  llm/                 LLMProvider + ToolCallingProvider protocols, tools.py
+                       (provider-neutral tool vocabulary), FakeProvider,
+                       agnostic providers
                        (OpenAI-compatible + Anthropic, pure httpx, env-selected)
   coredata/service.py  reads over Flyway core tables (documents w/ family
                        consent, vitals, lifestyle) + lifestyle_log tracker WRITE
@@ -117,8 +151,14 @@ translator/            self-hosted sidecar (own Dockerfile, second Railway
                        submits the mhn-ai processing run (verified contract:
                        POST /v1/document-processing-runs, bearer
                        MHN_SERVICE_TOKEN; fail-open; job_runs bookkeeping)
+  telemetry.py         stdlib Prometheus exposition (/metrics); the metric
+                       registry `_ALL` is HAND-MAINTAINED — a Counter declared
+                       elsewhere renders nowhere
+  models/feedback.py   reader verdicts on turns (no FK: must outlive the chat)
+  models/review.py     clinician roster + append-only access audit
   api/v1/              health, pedigree, insights, chat (+ /chat/upload,
-                       /chat/sessions history endpoints), schemas
+                       /chat/sessions history endpoints), feedback, review,
+                       profile, schemas
 evals/scenarios.json   safety-invariant scenarios (scripts/run_evals.py + pytest)
 scripts/               seed_rules_templates, seed_synthetic, ingest_knowledge,
                        ingest_mcp_corpus, ingest_drugs, nightly_sweep, run_evals
@@ -142,7 +182,11 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
 - **One vocabulary**: compaction detects flags with the SAME triage tables.
 - **Fail open**: grounding/validation/receipts/compaction/provider crashes →
   safe reply + WARNING, never an exception to the caller.
-- **No PHI in logs / receipts**: receipts store SHA-256 of the message only.
+- **No PHI in logs / receipts**: receipts store SHA-256 of the message only —
+  with ONE known exception, `grounding.violations[].sentence`, which stores the
+  offending GENERATED sentence verbatim and can echo the reader's own numbers.
+  See open item C11; the `RagTurnReceipt` docstring's "never raw text" is
+  therefore not yet literally true.
 - **Identity privacy**: the underlying model/provider is never disclosed.
   Model/provider questions route to the canned identity reply (no LLM); the
   system prompt forbids naming providers; the validator bans provider names in
@@ -158,13 +202,51 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
 
 ## Current state
 
-Phases 0–7 complete. Suite green on aiosqlite; the `pg`-marked reversibility +
-coexistence checks pass on a local Postgres 16 with pgvector. Coverage ~91%
-(gate ≥80%). ruff + pyright clean. All clinical content is DRAFT.
+Original build phases 0–7 complete, plus `project_docs/implementation-plan.md`
+phases 0–4 (Tasks 1–11, 13–28). **Task 12 — retiring the legacy regex chain —
+is deliberately blocked**; see `project_docs/handover.md`.
+
+Suite green on aiosqlite (1,863 tests, clean under shuffled seeds).
+`scripts/run_evals` is 17/17 on BOTH engines. ruff + pyright clean. All
+clinical content is DRAFT.
+
+**Branch `praveen-mhn` is ahead of main, with PR #22 open.** Its schema is
+already adopted into mhn-spring as `V21__davi_chat_platform.sql`. Read
+`project_docs/handover.md` before continuing.
+
+`db/` is gitignored: mhn-spring owns the Flyway files, and
+`db/existing_schema.sql` is generated by
+`python -m scripts.build_existing_schema`. The parity and coexistence checks
+skip when the directory is absent.
+
+The `pg`-marked checks (`tests/test_migrations.py`,
+`tests/test_coexistence.py`) need a real PostgreSQL and have not been run on
+this machine.
 
 Docker is not available on the original dev machine, so `pg` tests were run
 against a Homebrew Postgres 16 with a source-built pgvector — see the
 `local-dev-postgres` memory for the exact setup.
+
+### Two chat engines
+
+`CHAT_ENGINE=legacy|agentic`, defaulting to **legacy**. Legacy is the regex
+handler chain; agentic lets the model orchestrate the same abilities as tools.
+The triage floor, scope guard, emergency directive, canned conversational
+replies and the drug-combination refusal all run in a **shared prologue** ahead
+of the engine branch, and validation/grounding run behind both.
+
+**If you add a deterministic, safety-relevant handler, put it in the shared
+prologue, not in the legacy chain.** A drug-interaction refusal sat at step 5
+inside the legacy branch and the agentic engine bypassed it entirely — the
+model answered interaction questions from its own weights. The other step-4 and
+step-5 handlers have not been audited for the same problem.
+
+### Documentation for agents
+
+`project_docs/` carries the working record: `handover.md` (resume here),
+`memory.md` (invariants), `implementation-log.md` (what was decided and why),
+`findings.md` + `findings-phase-4.md` (review findings, including refuted
+ones), and `decisions-needed.md` (autonomous calls awaiting review).
 
 ## Gotchas
 
@@ -174,3 +256,34 @@ against a Homebrew Postgres 16 with a source-built pgvector — see the
 - Adding a model column? Autogenerate against a sqlite scratch DB, then hand-fix
   (imports, the embedding false-diff), and re-run the coexistence check.
 - `sqlite` needs `PRAGMA foreign_keys=ON` for cascade tests (set in conftest).
+- A new `db/flyway/V*__davi_*.sql` MUST register its tables in
+  `tests/test_flyway_parity.py::FLYWAY_TABLES` or that test fails. The whole
+  suite runs on Alembic-built schema, so without the parity check a drifted
+  column passes every test here and fails only in production.
+- **Flyway version numbers are a SHARED namespace with mhn-spring, and nothing
+  in this repo can see their chain.** Davi staged V7-V10 while mhn-spring used
+  those same numbers for `medical_history`, `medical_history_date_order`,
+  `period_pause_and_pregnancy` and `ai_name_check` — four migrations that could
+  never have been applied. Everything after V6 is now consolidated into
+  `V20__davi_chat_platform.sql`. Before adding another, check mhn-spring's head
+  and go above it; `test_davi_migrations_do_not_collide_with_mhn_spring` does
+  this automatically when the sibling checkout exists (or set
+  `MHN_SPRING_PATH`), and skips where it does not.
+- Prompt caching: `system` is `str | Sequence[str]`, element 0 is the
+  byte-identical cached prefix. Append per-turn text with `append_directive()`,
+  never `system + x`. The prefix is ~2,541 tokens and the system rules ALONE
+  (~850) are under the 1024 minimum — the tool schemas are what carry it over.
+
+## Task Lifecycle
+
+For substantial implementation work, follow this general lifecycle:
+
+1. Understand and review the existing code.
+2. Identify drawbacks, risks, and affected areas.
+3. Create an implementation plan.
+4. Execute the approved implementation plan using `.claude/execution-rules.md`.
+5. Independently review the resulting implementation using `.claude/review-rules.md`.
+6. Fix legitimate review findings.
+7. Run final verification and inspect the git diff.
+
+Do not skip directly from a high-level requirement to implementation when the task requires substantial architectural or code changes.

@@ -13,7 +13,11 @@ import uuid
 from sqlalchemy import select
 
 from app.chat.orchestrator import handle_chat
-from app.chat.replies import HIGH_ESCALATION, SCOPE_DECLINE, safe_reply
+from app.chat.replies import (
+    _SAFE_NONES,
+    HIGH_ESCALATION,
+    SCOPE_DECLINES,
+)
 from app.grounding.claims import analyze_grounding, is_factual, strip_markers
 from app.llm.fake import FakeProvider
 from app.models.chat import (
@@ -30,24 +34,6 @@ SYMPTOM_Q = "tell me about diabetes and blood sugar"
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-class RaisingProvider(FakeProvider):
-    """Raises on every generate() call — simulates a total provider outage."""
-
-    async def generate(self, *, system: str, user: str) -> str:
-        self.calls.append((system, user))
-        raise RuntimeError("provider down")
-
-
-class ScriptThenRaiseProvider(FakeProvider):
-    """Returns scripted responses, then raises once the script is exhausted."""
-
-    async def generate(self, *, system: str, user: str) -> str:
-        if not self._responses:
-            self.calls.append((system, user))
-            raise RuntimeError("provider down mid-conversation")
-        return await super().generate(system=system, user=user)
 
 
 # --------------------------------------------------------------------------- #
@@ -400,11 +386,11 @@ def test_strip_markers_idempotent():
 # --------------------------------------------------------------------------- #
 async def test_provider_error_degrades_to_safe_reply(db_session, set_grounding_mode):
     set_grounding_mode("log")
-    provider = RaisingProvider()
+    provider = FakeProvider(raises=RuntimeError("provider down"))
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert result.risk_level == NONE
     assert result.recommended_action == "discuss_with_clinician"
     assert result.provenance == {"path": "symptom_rag", "degraded": "provider_error"}
@@ -423,7 +409,7 @@ async def test_provider_error_at_high_risk_keeps_escalation(
     db_session, set_grounding_mode
 ):
     set_grounding_mode("log")
-    provider = RaisingProvider()
+    provider = FakeProvider(raises=RuntimeError("provider down"))
 
     result = await handle_chat(
         db_session, USER, "I have severe chest pain right now", provider
@@ -441,14 +427,23 @@ async def test_provider_error_on_enforce_retry_degrades_not_crashes(
     set_grounding_mode("enforce")
     # First answer carries an invalid marker (no chunks exist), forcing the
     # enforce-mode corrective retry — which raises.
-    provider = ScriptThenRaiseProvider(responses=["The dose is 5 mg [1]."])
+    # responses= then raises= composes into "answer once, then the provider
+    # dies" — the grounding retry is what trips the outage.
+    provider = FakeProvider(
+        responses=["The dose is 5 mg [1]."],
+        raises=RuntimeError("provider down mid-conversation"),
+    )
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
     assert len(provider.calls) == 2
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert result.provenance["path"] == "symptom_rag"
-    assert "degraded" not in result.provenance
+    # The turn DID fall back, and now says so. This assertion previously read
+    # "degraded" not in provenance — it was encoding the observability gap
+    # rather than the behaviour: the legacy engine degraded silently, so the
+    # metric could not see it.
+    assert result.provenance["degraded"] == "guard_error"
     assert result.grounding is None
 
     receipts = (await db_session.execute(select(RagTurnReceipt))).scalars().all()
@@ -486,7 +481,7 @@ async def test_validator_failure_substitutes_safe_reply(db_session, set_groundin
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert "probably" not in result.response_message
     assert "[1]" not in result.response_message
     # In log mode the (invalid-marker) answer was kept by grounding; it was the
@@ -508,7 +503,7 @@ async def test_validator_failure_even_when_grounding_clean(
 
     result = await handle_chat(db_session, USER, SYMPTOM_Q, provider)
 
-    assert result.response_message == safe_reply(NONE)
+    assert result.response_message in _SAFE_NONES
     assert result.grounding is not None
     assert result.grounding["status"] == "grounded"
 
@@ -582,7 +577,7 @@ async def test_session_id_returned_on_emergency_and_scope_decline(db_session):
     decline = await handle_chat(
         db_session, USER, "what is the capital of france", provider
     )
-    assert decline.response_message == SCOPE_DECLINE
+    assert decline.response_message in SCOPE_DECLINES
     assert decline.risk_level == NONE
     assert decline.session_id is not None
     assert decline.session_id != emergency.session_id

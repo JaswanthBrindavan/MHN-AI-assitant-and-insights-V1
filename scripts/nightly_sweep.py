@@ -3,7 +3,13 @@
 - Recomputes insights for every user with pedigree data (reads never compute;
   this is the sanctioned batch recompute).
 - Hard-purges pedigree_conditions soft-deleted more than 30 days ago.
+- EXECUTES scheduled erasures whose grace period has expired.
+- Applies retention to the chat transcript and the audit trail.
 - Records a job_runs row for observability.
+
+The last two commit as they go and are batched. They deliberately do NOT run
+inside the recompute's transaction: both are destructive and unbounded in
+principle, and this database is shared with mhn-spring and mhn-ai.
 
 Run:  python -m scripts.nightly_sweep
 """
@@ -16,8 +22,13 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.episodes import purge_stale
+from app.chat.erasure import execute_due
+from app.chat.retention import purge_expired
+from app.config import get_settings
 from app.db import get_sessionmaker
 from app.insights.engine import recompute_insights
+from app.memory import document as memory_document
 from app.models.common import utcnow
 from app.models.core import PedigreeCondition
 from app.models.jobs import JobRun
@@ -27,6 +38,8 @@ PURGE_AFTER_DAYS = 30
 
 async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
     now = now or utcnow()
+    # actor_user_id stays NULL: scheduled work has no actor, and a NULL here
+    # means "the system", never "an unknown user".
     job = JobRun(name="nightly_sweep", trigger="cron", status="running", started_at=now)
     db.add(job)
     await db.flush()
@@ -59,7 +72,43 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
 
         job.status = "succeeded"
         job.finished_at = utcnow()
-        result = {"users_recomputed": recomputed, "conditions_purged": len(to_purge)}
+        # Symptom episodes nobody has mentioned in STALE_AFTER are over. Read
+        # paths already filter them out; this is where the rows actually go,
+        # because a chat turn is the wrong place to run a cleanup.
+        episodes_purged = await purge_stale(db)
+
+        result = {
+            "users_recomputed": recomputed,
+            "conditions_purged": len(to_purge),
+            "episodes_purged": episodes_purged,
+        }
+
+        # Erasure and retention COMMIT AS THEY GO, so they run after the
+        # recompute rather than inside its transaction. Both are destructive
+        # and batched; holding them open with everything else would lock a
+        # database two other services share.
+        settings = get_settings()
+
+        # Rebuild the memory document for everyone the recompute touched.
+        # Rebuilding on the events that change it is the design; this is the
+        # backstop for anything that changed without one, and it is what keeps
+        # a document from sitting stale for a reader who has not chatted.
+        rebuilt = 0
+        for uid in user_ids:
+            if await memory_document.refresh(db, uid) is not None:
+                rebuilt += 1
+        await db.commit()
+        result["memory_documents_rebuilt"] = rebuilt
+
+        result.update(await execute_due(db))
+        result.update(
+            await purge_expired(
+                db,
+                message_days=settings.message_retention_days,
+                receipt_days=settings.receipt_retention_days,
+                batch_size=settings.retention_batch_size,
+            )
+        )
     except Exception as exc:  # noqa: BLE001 — record failure on the job row
         job.status = "failed"
         job.finished_at = utcnow()

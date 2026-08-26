@@ -7,7 +7,17 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from app.api.v1 import admin, chat, documents, health, insights, pedigree
+from app.api.v1 import (
+    admin,
+    chat,
+    documents,
+    feedback,
+    health,
+    insights,
+    pedigree,
+    profile,
+    review,
+)
 
 API_V1 = "/api/v1"
 _UI_INDEX = Path(__file__).resolve().parent.parent / "ui" / "index.html"
@@ -28,6 +38,9 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix=API_V1)
     app.include_router(documents.router, prefix=API_V1)
     app.include_router(admin.router, prefix=API_V1)
+    app.include_router(profile.router, prefix=API_V1)
+    app.include_router(feedback.router, prefix=API_V1)
+    app.include_router(review.router, prefix=API_V1)
 
     # Self-contained test console (dev tool; synthetic accounts only).
     if _UI_INDEX.exists():

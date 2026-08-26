@@ -399,7 +399,8 @@ async def test_citations_built_from_cited_markers(db_session, set_grounding_mode
 def test_provider_selection_by_env(monkeypatch):
     from app.config import get_settings
     from app.llm import get_provider
-    from app.llm.providers import AnthropicProvider, OpenAICompatibleProvider
+    from app.llm.anthropic import AnthropicProvider
+    from app.llm.openai_compat import OpenAICompatibleProvider
 
     monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
     monkeypatch.setenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")

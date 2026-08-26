@@ -1069,6 +1069,7 @@ async def test_fetch_ai_result_carries_name_check(monkeypatch):
     # A mismatch never asks the typed result route (it would 409).
     assert fetch.ok and fetch.result is None
     assert fetch.error_code == "name_mismatch"
+    assert fetch.name_check is not None
     assert fetch.name_check["document_name"] == "Ramesh Kumar"
     get_settings.cache_clear()
 

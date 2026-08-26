@@ -161,6 +161,7 @@ async def submit_document(
         trigger="chat",
         status="running",
         started_at=utcnow(),
+        actor_user_id=user_id,
     )
     db.add(job)
     result = await trigger_mhn_ai(document_id, user_id, client=client)

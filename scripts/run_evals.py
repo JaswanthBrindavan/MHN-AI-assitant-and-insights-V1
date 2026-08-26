@@ -26,13 +26,16 @@ from app.chat.orchestrator import handle_chat
 from app.db import Base
 from app.knowledge.registry import reset_index_cache
 from app.llm.fake import FakeProvider
+from app.llm.tools import LLMTurn, ToolCall
+
+
+def _agentic() -> bool:
+    from app.config import get_settings
+
+    return get_settings().chat_engine == "agentic"
+
 
 EVAL_USER = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-
-
-class _RaisingProvider(FakeProvider):
-    async def generate(self, *, system: str, user: str) -> str:
-        raise RuntimeError("simulated provider outage")
 
 
 async def _fresh_sessionmaker() -> tuple[async_sessionmaker[AsyncSession], object]:
@@ -65,7 +68,13 @@ def _check(expect: dict, result) -> list[str]:
         )
     if "language" in expect and result.language != expect["language"]:
         failures.append(f"language={result.language!r} != {expect['language']!r}")
-    if "path" in expect and result.provenance.get("path") != expect["path"]:
+    # The agentic engine reaches the same answers through tools, so it
+    # reports path="agentic" where the legacy chain names the handler. A
+    # scenario pins BEHAVIOUR, not which engine produced it.
+    if (
+        "path" in expect
+        and result.provenance.get("path") not in (expect["path"], "agentic")
+    ):
         failures.append(
             f"path={result.provenance.get('path')!r} != {expect['path']!r}"
         )
@@ -85,7 +94,7 @@ def _check(expect: dict, result) -> list[str]:
 
 
 async def run(path: Path) -> int:
-    spec = json.loads(path.read_text())
+    spec = json.loads(path.read_text(encoding="utf-8"))
     scenarios = spec["scenarios"]
     failed = 0
 
@@ -93,9 +102,28 @@ async def run(path: Path) -> int:
         reset_index_cache()
         sm, engine = await _fresh_sessionmaker()
         if scenario.get("provider_raises"):
-            provider = _RaisingProvider()
+            provider = FakeProvider(
+                raises=RuntimeError("simulated provider outage")
+            )
         elif scenario.get("scripted_reply"):
             provider = FakeProvider(responses=[scenario["scripted_reply"]])
+        elif _agentic() and scenario.get("agentic_tool_calls"):
+            # A deterministic fake cannot DECIDE to call a tool, so a scenario
+            # that exercises a data ability scripts the call it expects. The
+            # tool itself, its executor and every safety layer still run for
+            # real — only the model's choice is scripted.
+            provider = FakeProvider(
+                turns=[
+                    LLMTurn(
+                        tool_calls=tuple(
+                            ToolCall(id=f"c{i}", name=c["name"], arguments=c["arguments"])
+                            for i, c in enumerate(scenario["agentic_tool_calls"])
+                        ),
+                        stop_reason="tool_use",
+                    ),
+                    LLMTurn(text=scenario.get("agentic_reply", FakeProvider.DEFAULT)),
+                ]
+            )
         else:
             provider = FakeProvider()
 

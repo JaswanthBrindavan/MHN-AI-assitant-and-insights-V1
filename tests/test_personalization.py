@@ -17,6 +17,7 @@ from app.chat.context import build_health_snapshot, is_personal_health_query
 from app.chat.orchestrator import handle_chat
 from app.coredata.service import active_medications, recent_lab_values
 from app.llm.fake import FakeProvider
+from app.llm.tools import join_system
 from app.models.chat import McpChunk
 from app.models.common import utcnow
 from app.models.coredata import (
@@ -193,8 +194,8 @@ async def test_personal_question_passes_snapshot_to_prompt(db_session, monkeypat
     captured = {}
 
     class SpyProvider(FakeProvider):
-        async def generate(self, *, system: str, user: str) -> str:
-            captured["system"] = system
+        async def generate(self, *, system, user: str) -> str:
+            captured["system"] = join_system(system)
             return "Fatigue has many causes [1]. Discuss with your doctor."
 
     await handle_chat(
@@ -218,8 +219,8 @@ async def test_educational_question_stays_lean(db_session, monkeypatch):
     captured = {}
 
     class SpyProvider(FakeProvider):
-        async def generate(self, *, system: str, user: str) -> str:
-            captured["system"] = system
+        async def generate(self, *, system, user: str) -> str:
+            captured["system"] = join_system(system)
             return "Diabetes is a condition [1]."
 
     await handle_chat(

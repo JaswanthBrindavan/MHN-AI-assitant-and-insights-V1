@@ -70,9 +70,13 @@ Flyway in `mhn-spring` owns **all** production schema — since 2026-08-06 even
 the `ai_*` tables (mhn-ai's Alembic is frozen at `b6d1f8a3c209` and builds
 local/test DBs only). Davi follows the same rule:
 
-- **Adopt [`db/flyway/V6__davi_ai_tables.sql`](../db/flyway/V6__davi_ai_tables.sql)**
-  into `mhn-spring/src/main/resources/db/migration/` — it creates all 17 Davi
-  tables (uuid `user_id`, no FK to `"user"`, pgvector for `mcp_chunks`).
+- **Both Davi Flyway files are already adopted** into
+  `mhn-spring/src/main/resources/db/migration/`: `V6__davi_ai_tables.sql`
+  (17 tables — uuid `user_id`, no FK to `"user"`, pgvector for `mcp_chunks`)
+  and `V21__davi_chat_platform.sql` (the rest — `user_profiles`,
+  `turn_feedback`, `clinician_reviewers`, `insight_review_audit`,
+  `erasure_requests`, `user_memory_document`, `job_runs.actor_user_id`).
+  `db/` is gitignored here; mhn-spring owns those files.
 - Davi's Alembic chain (version table **`davi_alembic_version`**, mirroring
   `ai_alembic_version`) is for local/test databases only from now on.
 
@@ -235,3 +239,56 @@ error.
 production database would let anyone impersonate any user. Keep
 `AUTH_ENABLED=true` on Railway and test via the API with real session JWTs
 (or the SERVICE_TOKEN path); use the console locally.
+
+## Reading document bytes (Phase 3, verified against the posture above)
+
+Phase 3 adds an image path for vision. **The "no AWS credentials" posture in the
+table above is preserved, not abandoned.** Davi still holds none.
+
+The flow, when `MHN_SPRING_BASE_URL` is configured:
+
+1. Davi evaluates the family-consent gate **itself** — accepted
+   `family_connect` + owner-side `req_read`/`acc_read` + not `private` + no
+   `file_access_exclusions` row. If it refuses, nothing leaves the process.
+2. Davi calls `GET {MHN_SPRING_BASE_URL}/files/{resource_type}/{id}/url` with
+   `Authorization: Bearer <MHN_SPRING_TOKEN>` and `X-User-Id: <uuid>` — the
+   same service-to-service shape as the mhn-ai trigger. **Spring mints the
+   presigned URL and re-checks authorization while doing so.**
+3. Davi GETs the presigned URL and holds the bytes in memory for one turn.
+   Image content types only, 12 MB cap. Nothing is written to disk or to a
+   table.
+
+Both checks are deliberate. Spring's is authoritative; Davi's means a bug in
+Spring alone cannot widen what the AI can read, and vice versa.
+
+Every fetch writes a `job_runs` row (`name="document_fetch"`), so **which
+documents the AI read is answerable from the database**, not from logs. The row
+records the resource identifier only — never the bytes, never the content.
+
+PDFs are deliberately excluded: mhn-ai already extracts those into
+`content.ai`, and re-reading the raw file would duplicate its job with a worse
+tool.
+
+### What Spring needs to return
+
+```
+GET /files/{resource_type}/{id}/url    ->  200 {"url": "https://…"}
+```
+
+`presignedUrl` and `downloadUrl` are also accepted as the key. A non-200, a
+missing key, or a non-`http` value all mean "no read" — the chat falls back to
+the extracted `content.ai` it has always used.
+
+## Voice (Phase 3)
+
+`POST /api/v1/chat/voice` takes base64 audio, transcribes it through a
+self-hosted sidecar (`VOICE_BASE_URL`, same pattern as the translator), and
+feeds the transcript into the **same** pipeline as a typed message.
+
+There is no separate voice path — the triage floor sees the transcript, so a
+spoken red flag cannot bypass the safety design by virtue of the input method.
+
+A transcript below the confidence floor is returned to the client as a
+confirmation question with `recommended_action: "confirm_transcript"`, and the
+pipeline is **not run**. The client re-sends with `confirmed: true` once the
+reader agrees. "I can breathe" and "I can't breathe" differ by one phoneme.

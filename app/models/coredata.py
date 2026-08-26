@@ -19,6 +19,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 from app.models.common import JSONColumn
 
+# Every Flyway-owned enum this module references. Production and the
+# coexistence dump both already have them; a bare test PostgreSQL does not, and
+# `Base.metadata.create_all` will not make them because of `create_type=False`.
+# The pg fixture creates these first -- see `tests/conftest.py::pg_engine`.
+PG_ENUMS: list = []
+
 
 def _pg_enum(name: str, *values: str):
     """String column that binds as the core app's PG enum type.
@@ -27,9 +33,9 @@ def _pg_enum(name: str, *values: str):
     reference it so parameter binds cast correctly ($1::<enum> not ::VARCHAR).
     SQLite (unit tests) sees a plain string.
     """
-    return sa.String(32).with_variant(
-        postgresql.ENUM(*values, name=name, create_type=False), "postgresql"
-    )
+    enum = postgresql.ENUM(*values, name=name, create_type=False)
+    PG_ENUMS.append(enum)
+    return sa.String(32).with_variant(enum, "postgresql")
 
 # Table names owned by the core app that this module maps (merged into
 # EXTERNAL_TABLES in app.models.core).
@@ -55,7 +61,11 @@ COREDATA_TABLES = {
     "file_access_exclusions",
     "traditional_health_parameters",
     "thp_age_range",
+    "medical_condition",
     "medicine_master",
+    "period_settings",
+    "period_status",
+    "period_tracking",
 }
 
 
@@ -378,6 +388,18 @@ class TraditionalHealthParameter(Base):
     aliases: Mapped[list | None] = mapped_column(
         sa.ARRAY(sa.String).with_variant(sa.JSON(), "sqlite"), nullable=True
     )
+    # Curation state, added by the backend in V14/V18. Mapped because Davi
+    # must not grade a patient's value against reference data the owning team
+    # has not approved: "HDL/LDL Ratio" ships as status='draft'.
+    #
+    # Nullable with a permissive default so a database predating those columns
+    # still behaves — the rows there are the curated originals.
+    status: Mapped[str | None] = mapped_column(
+        sa.String(32), nullable=True, default="approved"
+    )
+    visible: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True, default=True
+    )
 
 
 class MedicineMaster(Base):
@@ -438,3 +460,148 @@ class ThpAgeRange(Base):
     high_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
     high_danger: Mapped[float] = mapped_column(sa.Float, nullable=False)
     max: Mapped[float] = mapped_column(sa.Float, nullable=False)
+
+
+class MedicalCondition(Base):
+    """Conditions, surgeries AND allergies — one table split by ``type``.
+
+    mhn-spring's V7 turned the original conditions table into a three-in-one
+    record rather than three tables, because the hub screen reads all three
+    together and three tables would have meant three copies of the
+    family-sharing switch.
+
+    Read-only here, and PARTIAL: only the columns Davi needs. Note ``private``,
+    which the owning service honours — anything Davi surfaces must honour it
+    too, or Davi shows what the app deliberately hides.
+    """
+
+    __tablename__ = "medical_condition"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
+    # condition | surgery | allergy
+    type: Mapped[str | None] = mapped_column(
+        _pg_enum("medical_record_type_enum", "condition", "surgery", "allergy"),
+        nullable=True,
+    )
+    status: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    started_on: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    ended_on: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    notes: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    # Allergy-only columns.
+    reaction: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
+    category: Mapped[str | None] = mapped_column(
+        _pg_enum("allergy_category_enum", "food", "environmental", "medication"),
+        nullable=True,
+    )
+    severity: Mapped[str | None] = mapped_column(
+        _pg_enum("allergy_severity_enum", "mild", "medium", "severe"),
+        nullable=True,
+    )
+    # Nullable-with-fallback: the column is `bool DEFAULT false NULL`, so a row
+    # predating it reads NULL. NULL is treated as NOT private, matching the
+    # column default rather than inventing a stricter rule than the app's.
+    private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+
+
+# --------------------------------------------------------------------------- #
+# Cycle tracking
+# --------------------------------------------------------------------------- #
+# mhn-spring's V5 argues the privacy model in its own DDL, and it is worth
+# quoting because it decides how Davi may use any of this:
+#
+#   "DEFAULT TRUE, unlike every other `private` column in this schema. The
+#    existing family sharing model is default-ALLOW... Shipping cycle data on
+#    that model would, on release day, hand every accepted connection — spouse,
+#    parent, sibling, in-law — visibility of contraception and pregnancy status
+#    that nobody opted into."
+#
+# and, on the fertile window:
+#
+#   "Off unless the user turns it on. A fertile window is an estimate, it is
+#    not contraception, and defaulting it on would put a claim in front of
+#    people who never asked for one."
+#
+# So, for Davi: this is OWN-DATA ONLY, never a family member's, not even for an
+# accepted connection. `resource_type_enum` was deliberately NOT extended with
+# a cycle value, so it is not a shareable resource at all.
+
+
+class PeriodSettings(Base):
+    """Whether cycle tracking is on, and what the reader agreed to show."""
+
+    __tablename__ = "period_settings"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    enabled: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    # DEFAULT TRUE here, unlike everywhere else in the schema.
+    private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    share_with_doctor: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    goal: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    predict_enabled: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    # Davi must not state a fertile window unless this is on.
+    show_fertile_window: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True
+    )
+    assumed_cycle_length: Mapped[int | None] = mapped_column(
+        sa.Integer, nullable=True
+    )
+    paused_until: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+
+
+class PeriodStatus(Base):
+    """Life stage, contraception, pregnancy — TEMPORAL, latest row wins.
+
+    `cycles_countable` and `predictions_suppressed` are GENERATED columns that
+    encode mhn-spring's clinical logic (which stages, contraceptives and
+    surgeries make a cycle countable). Davi READS them rather than re-deriving
+    them, for the same reason it asks Spring for adherence: two services
+    disagreeing about the same fact in front of one reader is worse than a
+    network call.
+    """
+
+    __tablename__ = "period_status"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    effective_from: Mapped[date] = mapped_column(sa.Date, nullable=False)
+    stage: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    contraception: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    pregnancy: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    surgical: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    breastfeeding: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    diagnosed_pcos: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    # Generated by the database. Read, never computed.
+    cycles_countable: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True
+    )
+    predictions_suppressed: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True
+    )
+
+
+class PeriodTracking(Base):
+    """One recorded cycle."""
+
+    __tablename__ = "period_tracking"
+
+    id: Mapped[int] = mapped_column(sa.Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    start_date: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False
+    )
+    end_date: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    # A PREDICTED cycle is an estimate the app drew, not something that
+    # happened. Davi must never report one as a fact.
+    is_predicted: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    cycle_length: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+    flow_intensity: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+    symptoms: Mapped[list | None] = mapped_column(JSONColumn, nullable=True)

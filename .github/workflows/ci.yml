@@ -1,0 +1,130 @@
+name: CI
+
+# The repo's stated gate is `ruff check . && pyright` plus the test suite, but
+# nothing enforced it — two PRs landed on main with lint, type and test
+# failures. This makes the gate real.
+#
+# The pg job is the important half. `_hybrid_rank` returns None immediately on
+# any non-PostgreSQL dialect, so on SQLite the ENTIRE hybrid retrieval path is
+# skipped — it has never run in CI. Same for pgvector similarity, PG enum
+# binds, partial unique indexes and the migration coexistence check.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"          # scenarios.json is UTF-8; Windows runners default to cp1252
+  LLM_PROVIDER: fake       # no test may reach a real provider
+  AUTH_ENABLED: "false"
+
+jobs:
+  quality:
+    name: lint · types · unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Types
+        run: pyright
+
+      - name: Unit tests
+        # -p no:randomly for a reproducible ordering. Order-dependent failures
+        # are found by the dedicated job below rather than at random here.
+        run: pytest -q -p no:randomly --cov=app --cov-report=term-missing
+
+      - name: Safety evals (both engines)
+        run: |
+          python -m scripts.run_evals
+          CHAT_ENGINE=agentic python -m scripts.run_evals
+
+      # Quality is measured, not assumed. Against the deterministic fake this
+      # covers retrieval scope and degradation only — tool choice and answer
+      # quality need a real model, so the harness leaves them unscored rather
+      # than reporting a confident number about something it did not measure.
+      - name: Quality evals (fake provider — routing and retrieval only)
+        run: python -m scripts.quality_eval --compare --min-overall 85
+
+  ordering:
+    name: random-order tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      # Runs the suite under two different shuffles. An order-dependent test
+      # is a real defect — one such "flake" turned out to be nondeterministic
+      # message ordering that made compaction fold the wrong turns.
+      - run: pytest -q -p randomly --randomly-seed=1
+      - run: pytest -q -p randomly --randomly-seed=2
+
+  postgres:
+    name: postgres + pgvector
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: davi
+          POSTGRES_PASSWORD: davi
+          POSTGRES_DB: davi
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U davi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_ALEMBIC_URL: postgresql+psycopg2://davi:davi@localhost:5432/davi
+      TEST_DATABASE_URL: postgresql+asyncpg://davi:davi@localhost:5432/davi
+      ALEMBIC_DATABASE_URL: postgresql+psycopg2://davi:davi@localhost:5432/davi
+      DATABASE_URL: postgresql+asyncpg://davi:davi@localhost:5432/davi
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Enable pgvector
+        run: |
+          PGPASSWORD=davi psql -h localhost -U davi -d davi \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      # Migration reversibility + coexistence on top of the production dump.
+      - name: pg-marked tests
+        run: pytest -q -p no:randomly -m pg
+
+      # The suite again, but against PostgreSQL rather than SQLite, so the
+      # paths that short-circuit on dialect actually execute.
+      - name: Suite on postgres
+        run: pytest -q -p no:randomly -m "not pg"

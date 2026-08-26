@@ -10,6 +10,7 @@ from sqlalchemy import select
 from app.chat.long_term import recall, record_topics
 from app.chat.orchestrator import handle_chat
 from app.llm.fake import FakeProvider
+from app.llm.tools import join_system
 from app.models.chat import McpChunk, UserMemory
 
 USER = uuid.UUID("44444444-4444-4444-4444-444444444444")
@@ -62,8 +63,8 @@ async def test_cross_session_recall_through_orchestrator(db_session):
             super().__init__(responses=["General wellbeing info [GK]."])
             self.system = ""
 
-        async def generate(self, *, system: str, user: str) -> str:
-            self.system = system
+        async def generate(self, *, system, user: str) -> str:
+            self.system = join_system(system)
             return "General wellbeing info [GK]."
 
     spy = Spy()

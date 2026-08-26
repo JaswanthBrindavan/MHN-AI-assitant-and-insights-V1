@@ -14,10 +14,13 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat import memory_assembly
+from app.chat.agent import append_directive, recover, run_agent
 from app.chat.context import (
     build_health_snapshot,
     build_patient_context,
@@ -28,6 +31,7 @@ from app.chat.conversation import (
     assemble_context,
     ensure_session,
     maybe_compact,
+    questions_asked,
 )
 from app.chat.data_handlers import (
     handle_ai_result_query,
@@ -42,13 +46,14 @@ from app.chat.data_handlers import (
     handle_tracker_add,
     handle_value_check,
 )
-from app.chat.long_term import recall, record_topics
+from app.chat.db_release import ReleasingProvider
 from app.chat.replies import (
-    GREETING_REPLY,
+    GREETING_REPLIES,
     HIGH_ESCALATION,
-    IDENTITY_REPLY,
-    SCOPE_DECLINE,
+    IDENTITY_REPLIES,
+    SCOPE_DECLINES,
     SELF_HARM_REPLY,
+    pick,
     safe_reply,
 )
 from app.chat.router import (
@@ -58,8 +63,11 @@ from app.chat.router import (
     route,
 )
 from app.chat.scope import is_off_topic
-from app.chat.validation import validate_reply
+from app.chat.tools.definitions import TOOL_SPECS
+from app.chat.tools.registry import execute_tool
+from app.chat.validation import redact_reason, validate_reply
 from app.config import get_settings
+from app.coredata.service import allergy_warning, medication_allergies
 from app.drugs.service import (
     NON_DRUG_TERMS,
     build_drug_reply,
@@ -70,6 +78,7 @@ from app.drugs.service import (
     find_substitutes,
 )
 from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
+from app.grounding.fidelity import unit_values, values_traceable
 from app.i18n.language import (
     LANGUAGE_NAMES,
     detect_language,
@@ -77,10 +86,24 @@ from app.i18n.language import (
 )
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
+from app.llm.tools import UserMessage
 from app.models.chat import RagTurnReceipt
 from app.rag.extractive import build_extractive_answer, is_definitional_ask
-from app.rag.prompt import build_correction_directive, build_system_prompt
+from app.rag.prompt import (
+    build_agentic_system_prompt,
+    build_correction_directive,
+    build_system_prompt,
+)
 from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
+from app.telemetry import (
+    chat_latency,
+    chat_turns,
+    degradations,
+    llm_tokens,
+    record_fail_open,
+    timed,
+    tool_calls,
+)
 from app.translate.service import (
     InboundPivot,
     SidecarTranslator,
@@ -155,11 +178,12 @@ async def _write_receipt(
         await db.flush()
     except Exception:  # noqa: BLE001 — receipts must never break a reply
         logger.warning("receipt write failed", exc_info=True)
+        record_fail_open("receipts")
 
 
 async def _apply_grounding(
     provider: LLMProvider,
-    system: str,
+    system: str | Sequence[str],
     message: str,
     answer: str,
     chunks: list[RetrievedChunk],
@@ -183,7 +207,12 @@ async def _apply_grounding(
 
     # enforce: ONE corrective retry against the SAME retrieved context.
     directive = build_correction_directive(report.violations)
-    retry = await provider.generate(system=system + "\n\n" + directive, user=message)
+    # append_directive, not `system + x`: on a split prompt the naive form
+    # writes into the cached prefix, which is the one string that must not
+    # change.
+    retry = await provider.generate(
+        system=append_directive(system, "\n\n" + directive), user=message
+    )
     retry_report = analyze_grounding(
         retry,
         num_chunks=len(chunks),
@@ -208,6 +237,106 @@ async def _data_query_reply(db: AsyncSession, user_id: uuid.UUID) -> str:
         + text
         + " These are decision-support notes, not a diagnosis — worth discussing "
         "with your doctor."
+    )
+
+
+async def _interaction_refusal(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider: LLMProvider,
+    session_id: uuid.UUID | None,
+    risk: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult | None:
+    """The deterministic reply to "can I take X with Y". None if not asked.
+
+    Lives OUTSIDE the engine branch on purpose. It is provider-independent and
+    it is the one drug question where an ungrounded answer can hurt someone,
+    so both engines must pass through it — see project_docs/
+    task-25-drug-interactions.md.
+    """
+    if risk != NONE:
+        # The triage floor always wins; a red flag stays on the escalation
+        # path rather than being answered as a medication question.
+        return None
+    # Combination questions ("can I take X and Y together"). There is
+    # NO interaction dataset, so the only honest answer is a deterministic
+    # one that names both items and routes to a pharmacist — never an
+    # ungrounded LLM answer, and never the generic safe fallback.
+    #
+    # This fires on the PHRASING, not on whether medicine_master recognised
+    # the terms. Requiring a database hit (as this did originally) meant an
+    # unrecognised medicine name — a foreign brand, a misspelling, a
+    # supplement, anything outside the Indian dataset — fell through to the
+    # LLM, on the one question class where an ungrounded answer can do the
+    # most harm. The asymmetry settles it: a false refusal costs a mildly
+    # unhelpful "ask a pharmacist"; a false ANSWER about a real interaction
+    # can hurt someone.
+    #
+    # Ordinary food pairings still reach the LLM through NON_DRUG_TERMS,
+    # which carries everyday foods for exactly this reason.
+    # NARROW on purpose. The pattern match touches no I/O and cannot fail for
+    # a database reason; only the lookup can. A wider try -- one that also
+    # wrapped the receipt write below -- would mean a transient DB error
+    # DELETED the refusal and handed "can I take warfarin and aspirin
+    # together?" to the LLM. That is the exact outcome this function exists to
+    # prevent, and it would have been reachable by a database hiccup.
+    try:
+        pair = extract_interaction_query(message)
+    except Exception:  # noqa: BLE001 — a parser must never break a reply
+        logger.warning("interaction extraction failed; continuing", exc_info=True)
+        record_fail_open("drug_interaction")
+        return None
+
+    if not pair or all(term.lower() in NON_DRUG_TERMS for term in pair):
+        return None
+
+    # Reply with the USER'S OWN terms, not the canonical product names — a
+    # composition match can resolve "ibuprofen" to an obscure brand, and
+    # answering about that brand reads wrong.
+    names: list[str] = list(pair)
+
+    # Recorded, not gated on: it says how often the refusal fires for terms the
+    # dataset has never heard of, which is the number that would justify buying
+    # a better one. A lookup failure costs us that statistic and NOTHING else —
+    # the refusal proceeds either way.
+    recognised = False
+    try:
+        for raw in pair:
+            if raw.lower() in NON_DRUG_TERMS:
+                continue
+            async with db.begin_nested():
+                if await find_drug(db, raw) is not None:
+                    recognised = True
+    except Exception:  # noqa: BLE001 — the refusal does not depend on this
+        logger.warning("drug recognition lookup failed; continuing", exc_info=True)
+        record_fail_open("drug_interaction")
+
+    t("Drug interaction question",
+      f"'{names[0]}' + '{names[1]}' — deterministic "
+      "check-with-pharmacist reply (no interaction data, "
+      "no LLM)")
+    # _write_receipt is already fail-open internally, so a receipt failure
+    # cannot take the refusal down with it.
+    await _write_receipt(
+        db, user_id=user_id, session_id=session_id,
+        message=message, model_name=provider.model_name,
+    )
+    return ChatResult(
+        response_message=build_interaction_reply(*names),
+        risk_level=risk,
+        recommended_action="discuss_with_prescriber",
+        provenance={
+            "path": "drug_interaction_query",
+            "drugs": names,
+            "source": "medicine_master",
+            "recognised": recognised,
+        },
+        language=lang,
+        trace=trace,
     )
 
 
@@ -246,7 +375,7 @@ async def _dispatch(
             model_name=provider.model_name,
         )
         return ChatResult(
-            response_message=SCOPE_DECLINE,
+            response_message=pick(SCOPE_DECLINES, session_id),
             risk_level=NONE,
             recommended_action="out_of_scope",
             provenance={"path": "scope_declined"},
@@ -265,6 +394,20 @@ async def _dispatch(
         else:
             t("Emergency response",
               "deterministic directive — the LLM is never the arbiter of emergencies")
+        # RECORD BEFORE EXITING. An emergency is the single event most worth
+        # remembering, and until now it was the only severity that opened no
+        # episode: this path returns before either engine reaches the normal
+        # recording step, so the top of the range the triage floor decides was
+        # never persisted.
+        #
+        # This runs in the SHARED prologue, so one call covers both engines.
+        # It records the event only — no topics, because retrieval has not run
+        # and must not: emergency handling does NOT continue through the normal
+        # symptom-assessment flow. Fail-open, so remembering can never delay or
+        # displace the directive the reader needs right now.
+        await memory_assembly.record(
+            db, user_id, codes=(), flags=tr.matched_terms, risk=risk
+        )
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
             model_name=provider.model_name,
@@ -283,7 +426,11 @@ async def _dispatch(
     # 3) Conversational (greeting / identity).
     if intent == CONVERSATIONAL:
         t("Intent", "greeting / identity — canned reply")
-        reply = IDENTITY_REPLY if is_identity_question(message) else GREETING_REPLY
+        reply = (
+            pick(IDENTITY_REPLIES, session_id)
+            if is_identity_question(message)
+            else pick(GREETING_REPLIES, session_id)
+        )
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
             model_name=provider.model_name,
@@ -295,6 +442,29 @@ async def _dispatch(
             provenance={"path": "conversational"},
             language=lang,
             trace=trace,
+        )
+
+    # 3.4) Drug-combination questions. SHARED across both engines, and it has
+    #      to be: there is no interaction dataset, so a model asked "can I take
+    #      X with Y" would answer from its own weights. This sat inside the
+    #      legacy chain below until two safety evals caught the agentic engine
+    #      answering interaction questions itself — a gap that retiring the
+    #      legacy chain (Task 12) would have made permanent and invisible.
+    combination = await _interaction_refusal(
+        db, user_id, message, provider, session_id, risk, lang, trace, t
+    )
+    if combination is not None:
+        return combination
+
+    # 3.5) Engine selection. Everything above — the triage floor, the scope
+    #      guard, the emergency directive, the canned conversational replies
+    #      and the drug-combination refusal — is SHARED and has already run,
+    #      so the agentic engine can never see an emergency and the model is
+    #      never the arbiter of one.
+    if get_settings().chat_engine == "agentic":
+        t("Engine", "agentic — the assistant can look things up for itself")
+        return await _dispatch_agentic(
+            db, user_id, message, provider, session_id, tr, risk, lang, trace, t
         )
 
     # 4) Deterministic data abilities — documents, tracker adds, metric
@@ -358,9 +528,9 @@ async def _dispatch(
                 verdict = validate_reply(ability["reply"], risk)
                 if not verdict.ok:
                     t("Output validation",
-                      f"blocked ({verdict.reason}) — replaced with safe reply")
+                      f"blocked ({redact_reason(verdict.reason)}) — replaced with safe reply")
                     ability = {
-                        "reply": safe_reply(risk),
+                        "reply": safe_reply(risk, session_id),
                         "action": ability["action"],
                         "provenance": {**ability["provenance"],
                                        "degraded": "validation"},
@@ -384,6 +554,7 @@ async def _dispatch(
                 )
         except Exception:  # noqa: BLE001 — abilities must never break a reply
             logger.warning("data ability failed; continuing", exc_info=True)
+            record_fail_open("abilities")
 
     # 4.5) Data query — serve stored insights/pedigree; never compute. Runs
     #      AFTER the abilities so a precise parse ("show me my last BP
@@ -409,51 +580,6 @@ async def _dispatch(
     #    drug database (never the LLM). Only at NONE risk: any red-flag match
     #    stays on the symptom path so escalation is preserved. Fail-open.
     if risk == NONE:
-        # 5a) Combination questions ("can I take X and Y together") — the drug
-        # dataset has no interaction data, so instead of an ungrounded LLM
-        # answer or the generic fallback, name both items deterministically
-        # and route to a pharmacist. Fires only when at least one term is a
-        # verified medicine (so "honey and lemon" still reaches the LLM).
-        try:
-            pair = extract_interaction_query(message)
-            if pair and not all(t.lower() in NON_DRUG_TERMS for t in pair):
-                # Reply with the USER'S OWN terms, not the canonical product
-                # names — a composition match can resolve "ibuprofen" to an
-                # obscure brand, and answering about that brand reads wrong.
-                # The lookup is only the is-this-a-medicine gate.
-                names: list[str] = list(pair)
-                matched_any = False
-                for raw in pair:
-                    hit = None
-                    if raw.lower() not in NON_DRUG_TERMS:
-                        async with db.begin_nested():
-                            hit = await find_drug(db, raw)
-                    matched_any = matched_any or hit is not None
-                if matched_any:
-                    t("Drug interaction question",
-                      f"'{names[0]}' + '{names[1]}' — deterministic "
-                      "check-with-pharmacist reply (no interaction data, "
-                      "no LLM)")
-                    await _write_receipt(
-                        db, user_id=user_id, session_id=session_id,
-                        message=message, model_name=provider.model_name,
-                    )
-                    return ChatResult(
-                        response_message=build_interaction_reply(*names),
-                        risk_level=risk,
-                        recommended_action="discuss_with_prescriber",
-                        provenance={
-                            "path": "drug_interaction_query",
-                            "drugs": names,
-                            "source": "medicine_master",
-                        },
-                        language=lang,
-                        trace=trace,
-                    )
-        except Exception:  # noqa: BLE001 — must never break a reply
-            logger.warning(
-                "drug interaction check failed; continuing", exc_info=True
-            )
         try:
             term = extract_drug_query_term(message)
             drug = None
@@ -469,7 +595,24 @@ async def _dispatch(
                     t("Drug lookup",
                       f"'{term}' matched {drug.name} in the validated medicines "
                       "database — deterministic reply (no LLM)")
-                    reply = build_drug_reply(drug, substitutes)
+                    # The reader's OWN medication allergies. This path
+                    # returns before the [P] block is built and lives inside
+                    # the legacy branch, so nothing else would carry them.
+                    # Fail-open: a lookup failure must not cost the answer.
+                    warning = ""
+                    try:
+                        async with db.begin_nested():
+                            warning = allergy_warning(
+                                await medication_allergies(db, user_id)
+                            )
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "allergy lookup failed; continuing", exc_info=True
+                        )
+                        record_fail_open("allergy_lookup")
+                    reply = build_drug_reply(
+                        drug, substitutes, allergy_warning=warning
+                    )
                     await _write_receipt(
                         db, user_id=user_id, session_id=session_id,
                         message=message, model_name=provider.model_name,
@@ -488,6 +631,7 @@ async def _dispatch(
                     )
         except Exception:  # noqa: BLE001 — drug lookup must never break a reply
             logger.warning("drug lookup failed; continuing to RAG", exc_info=True)
+            record_fail_open("drug_lookup")
 
     # 6) Symptom / educational RAG path (risk is none or high here).
     patient_text, user_codes = await build_patient_context(db, user_id)
@@ -505,6 +649,11 @@ async def _dispatch(
                 )
         except Exception:  # noqa: BLE001 — enrichment must never break a reply
             logger.warning("health snapshot failed; continuing", exc_info=True)
+            record_fail_open("health_snapshot")
+
+    # Per-user memory (profile, open episodes, past topics), read once through
+    # the SHARED assembly so both engines see all of it.
+    _memory = await memory_assembly.assemble(db, user_id)
 
     # Short-term memory: recent verbatim turns drive follow-up resolution. The
     # last entry is the current message (already persisted) — the PRIOR turns
@@ -512,13 +661,18 @@ async def _dispatch(
     compacted_summary, recent = await assemble_context(db, session_id)
     prior_turns = recent[:-1] if recent else []
 
-    codes = await resolve_scope(db, message, user_codes)
+    # Message-only scope FIRST, then union the pedigree codes in. The old
+    # shape called resolve_scope twice with the same message — a duplicate
+    # registry match and an extra round trip — because it needed both answers.
+    # Deriving one from the other gives both for one call.
+    message_codes = await resolve_scope(db, message, set())
+    codes = message_codes | await resolve_scope(db, "", user_codes)
     # Scope carry-forward: a follow-up like "is it serious?" names no condition
     # of its own, so inherit the topic from the reader's OWN recent questions.
-    # Keying on "did THIS message name a condition" (message-only scope) rather
-    # than on `codes` — which is never empty for users with a pedigree — so the
-    # topic carries for everyone. Union with `codes` keeps pedigree context.
-    message_named_condition = bool(await resolve_scope(db, message, set()))
+    # Keying on "did THIS message name a condition" rather than on `codes` —
+    # which is never empty for users with a pedigree — so the topic carries
+    # for everyone. Union with `codes` keeps pedigree context.
+    message_named_condition = bool(message_codes)
     if not message_named_condition and prior_turns:
         recent_user_text = " ".join(
             m["message"] for m in prior_turns[-6:] if m.get("role") == "user"
@@ -530,6 +684,11 @@ async def _dispatch(
               f"{sorted(carried)[:4]}")
     chunks = await retrieve_chunks(db, codes, message)
     used_rag = bool(chunks)
+    # Why this turn fell back, if it did. The agentic path has always recorded
+    # this; the legacy path did not, which left the degradation metric blind on
+    # the engine that currently answers real users. Declared here because both
+    # the extractive branch and the main RAG branch set it.
+    legacy_degraded: str | None = None
     try:
         _idx = await load_condition_index(db)
         _names = sorted(
@@ -539,18 +698,14 @@ async def _dispatch(
         _names = []
         _idx = None
 
-    # Long-term memory: record the topics discussed (code → display) and any
-    # red-flag terms, and recall past topics into the [P] context for this and
-    # future sessions. Fail-open — never breaks a reply.
-    if codes:
-        topics = {
-            c: (_idx.by_code[c].display_name if _idx and c in _idx.by_code else c)
-            for c in codes
-        }
-        await record_topics(db, user_id, topics, flags=tr.matched_terms)
-    recalled = await recall(db, user_id)
-    if recalled:
-        patient_text = f"{patient_text}\n\n{recalled}" if patient_text else recalled
+    # Per-user memory: profile, open episodes, and past topics. Read through
+    # the SHARED assembly so both engines see all of it — legacy used to read
+    # only the topic recall, so a reader's consent-gated profile never reached
+    # the prompt on the default engine. See app/chat/memory_assembly.py.
+    await memory_assembly.record(
+        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk
+    )
+    patient_text = _memory.append_to(patient_text)
     if _names:
         t("Knowledge scope", "matched conditions: " + ", ".join(_names[:4]))
     elif codes:
@@ -595,8 +750,9 @@ async def _dispatch(
             verdict = validate_reply(display, risk)
             if not verdict.ok:
                 t("Output validation",
-                  f"blocked ({verdict.reason}) — replaced with the safe reply")
-                display = safe_reply(risk)
+                  f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
+                display = safe_reply(risk, session_id)
+                legacy_degraded = "validation"
             else:
                 t("Output validation", "passed all safety checks")
             try:
@@ -636,6 +792,7 @@ async def _dispatch(
                     "used_rag": True,
                     "conditions": sorted(codes),
                     "chunks": [c.id for c in chunks],
+                    **({"degraded": legacy_degraded} if legacy_degraded else {}),
                 },
                 citations=extractive_citations or None,
                 language=lang,
@@ -645,7 +802,7 @@ async def _dispatch(
     # COMPACTED_CONTEXT_JSON (summary) + recent verbatim turns (both fetched
     # above) give the model long-window and short-window conversational memory.
     compacted_json = json.dumps(compacted_summary) if compacted_summary else None
-    system = build_system_prompt(
+    stable_rules, volatile_context = build_system_prompt(
         chunks, patient_text, compacted_json, recent_turns=prior_turns[-6:]
     )
     # The reply language always follows the LATEST message. With an active
@@ -657,7 +814,16 @@ async def _dispatch(
     directive = language_directive(
         "en" if (pivot is not None and pivot.active) else lang
     )
-    system = system + "\n\n" + directive
+    # Split, not joined: element 0 is byte-identical across turns and carries
+    # the prompt-cache breakpoint in the Anthropic adapter. Every other
+    # provider joins it straight back, so the model is told exactly the same
+    # thing either way. The language directive belongs in the VOLATILE half --
+    # it changes with the reader's language, and a per-reader prefix caches
+    # for nobody.
+    system: list[str] = [
+        stable_rules,
+        "\n\n".join(p for p in (volatile_context, directive) if p),
+    ]
 
     # A provider outage must degrade to the deterministic safe reply, never
     # crash a patient-facing endpoint.
@@ -668,6 +834,7 @@ async def _dispatch(
         answer = await provider.generate(system=system, user=message)
     except Exception:  # noqa: BLE001 — fail open
         logger.warning("LLM provider failed; safe reply", exc_info=True)
+        record_fail_open("provider")
         t("Generate", "provider failed — degrading to the deterministic safe reply")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
@@ -677,7 +844,7 @@ async def _dispatch(
         )
         action = "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
         return ChatResult(
-            response_message=safe_reply(risk),
+            response_message=safe_reply(risk, session_id),
             risk_level=risk,
             recommended_action=action,
             provenance={"path": "symptom_rag", "degraded": "provider_error"},
@@ -687,6 +854,10 @@ async def _dispatch(
 
     report: GroundingReport | None = None
     grounding_status = "n/a"
+    # (legacy_degraded is declared above, before the extractive branch that
+    # also sets it — the agentic path has always recorded this; the legacy
+    # path did not, leaving the degradation metric blind on the engine that
+    # currently answers real users.)
     try:
         report, grounded_answer = await _apply_grounding(
             provider, system, message, answer, chunks, patient_text
@@ -702,7 +873,8 @@ async def _dispatch(
                   f"({get_settings().grounding_mode} mode)")
         if grounded_answer is None:
             t("Safety net", "grounding could not be repaired — safe reply instead")
-            display = safe_reply(risk)
+            display = safe_reply(risk, session_id)
+            legacy_degraded = "grounding"
         else:
             display = strip_markers(grounded_answer)
             if risk == HIGH:
@@ -719,14 +891,17 @@ async def _dispatch(
             verdict = validate_reply(display, risk, extra)
             if not verdict.ok:
                 t("Output validation",
-                  f"blocked ({verdict.reason}) — replaced with the safe reply")
-                display = safe_reply(risk)
+                  f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
+                display = safe_reply(risk, session_id)
+                legacy_degraded = "validation"
             else:
                 t("Output validation", "passed all safety checks")
     except Exception:  # noqa: BLE001 — safety layers fail open
         logger.warning("grounding/validation failed; safe reply", exc_info=True)
-        display = safe_reply(risk)
+        record_fail_open("grounding")
+        display = safe_reply(risk, session_id)
         grounding_status = "error"
+        legacy_degraded = "guard_error"
 
     await _write_receipt(
         db, user_id=user_id, session_id=session_id, message=message,
@@ -747,6 +922,7 @@ async def _dispatch(
             "used_rag": used_rag,
             "conditions": sorted(codes),
             "chunks": [c.id for c in chunks],
+            **({"degraded": legacy_degraded} if legacy_degraded else {}),
         },
         grounding=report.to_dict() if report else None,
         citations=citations,
@@ -828,6 +1004,11 @@ async def handle_chat(
     whole pipeline see English) and the reply is translated back.
     """
     message = _sanitize_message(message)
+    # Commit before every model call, so a pooled connection is not pinned for
+    # the seconds the provider spends on the network. See app/chat/db_release.py
+    # -- this is the binding constraint on concurrency, and it is invisible
+    # from reading the endpoint.
+    provider = ReleasingProvider(provider, db)
     if translator is None:
         translator = get_translator()
     pivot = await pivot_inbound(message, translator)
@@ -837,7 +1018,27 @@ async def handle_chat(
         db, session_id, "user", message,
         extracted_intent={"risk": triage(work).level},
     )
-    result = await _dispatch(db, user_id, work, provider, session_id, pivot=pivot)
+    # Every path converges here, so this is the one place that sees the whole
+    # turn: how long it took, which engine ran it, and whether the reader got
+    # a real answer or a fallback. Label values come from bounded sets only —
+    # never the message, the user, or a condition name.
+    engine = get_settings().chat_engine
+    with timed(chat_latency, engine=engine):
+        result = await _dispatch(
+            db, user_id, work, provider, session_id, pivot=pivot
+        )
+
+    chat_turns.inc(engine=engine, risk=result.risk_level)
+    degraded = result.provenance.get("degraded")
+    if degraded:
+        # THE number that says whether the system is quietly answering badly.
+        degradations.inc(engine=engine, reason=str(degraded))
+    for name in result.provenance.get("tools", []) or []:
+        tool_calls.inc(tool=str(name))
+    usage = result.provenance.get("usage") or {}
+    for direction in ("input_tokens", "output_tokens"):
+        if usage.get(direction):
+            llm_tokens.inc(usage[direction], direction=direction)
     if pivot.active and result.response_message:
         translated = await pivot_outbound(
             result.response_message, pivot, translator
@@ -867,6 +1068,230 @@ async def handle_chat(
         db, session_id, "assistant", result.response_message,
         extracted_intent=assistant_meta,
     )
-    await maybe_compact(db, session_id)
+    await maybe_compact(db, session_id, provider)
     result.session_id = session_id
     return result
+
+
+async def _dispatch_agentic(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider,
+    session_id: uuid.UUID,
+    tr,
+    risk: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult:
+    """The tool-driven path.
+
+    Callers guarantee the triage floor, the scope guard, the emergency path and
+    the conversational path have ALREADY run — this is never reached for an
+    emergency, and the model is never the arbiter of one.
+    """
+    settings = get_settings()
+
+    patient_text, user_codes = await build_patient_context(db, user_id)
+    if is_personal_health_query(message):
+        try:
+            snapshot = await build_health_snapshot(db, user_id)
+            if snapshot:
+                patient_text = (
+                    f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
+                )
+        except Exception:  # noqa: BLE001 — enrichment must never break a reply
+            logger.warning("health snapshot failed; continuing", exc_info=True)
+            record_fail_open("health_snapshot")
+
+    # Per-user memory, through the SHARED assembly. Agentic used to read the
+    # profile and episodes but never the long-term topic recall, and never
+    # recorded topics at all. See app/chat/memory_assembly.py.
+    _memory = await memory_assembly.assemble(db, user_id)
+    patient_text = _memory.append_to(patient_text)
+
+    compacted, recent = await assemble_context(db, session_id)
+    prior_turns = recent[:-1] if recent else []
+
+    codes = await resolve_scope(db, message, user_codes)
+    chunks = await retrieve_chunks(db, codes, message)
+
+    # Remember what was raised, at the severity the FLOOR decided — never a
+    # severity the model inferred. Placed HERE, before generation, to match
+    # legacy: what the reader raised does not depend on whether the reply
+    # succeeded. Recording it after the guards (as this used to) meant an
+    # agent-loop failure silently forgot the symptom they just described.
+    await memory_assembly.record(
+        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk
+    )
+
+    asked = await questions_asked(db, session_id)
+    allow_questions = asked < settings.chat_max_clarifying_questions
+
+    stable, volatile = build_agentic_system_prompt(
+        patient_text,
+        json.dumps(compacted) if compacted else None,
+        recent_turns=prior_turns[-6:],
+        chunks=chunks,
+        allow_questions=allow_questions,
+    )
+    directive = language_directive("en" if lang != "en" else lang)
+    # Split, not joined: element 0 is byte-identical across every turn and
+    # carries the prompt-cache breakpoint in the Anthropic adapter. Every
+    # other provider joins it straight back, so the model is told exactly the
+    # same thing either way — only the billing differs.
+    #
+    # The language directive belongs in the VOLATILE half: it changes with the
+    # reader's language, and a per-reader prefix caches for nobody.
+    system: list[str] = [stable, "\n\n".join(p for p in (volatile, directive) if p)]
+
+    async def _executor(call):
+        return await execute_tool(db, user_id, call, session_id)
+
+    # Tools are offered only at NONE risk. A red flag stays on the safe path so
+    # nothing can delay or dilute an escalation.
+    offered = TOOL_SPECS if risk == NONE else ()
+
+    t("Generate", "asking the assistant, with access to your records")
+    try:
+        outcome = await run_agent(
+            provider, system, [UserMessage(message)], offered, _executor,
+            max_rounds=settings.llm_max_tool_rounds,
+        )
+    except Exception:  # noqa: BLE001 — fail open, never crash the endpoint
+        logger.warning("agent loop failed; safe reply", exc_info=True)
+        record_fail_open("agent")
+        t("Generate", "provider failed — degrading to the deterministic safe reply")
+        await _write_receipt(
+            db, user_id=user_id, session_id=session_id, message=message,
+            model_name=provider.model_name, grounding_status="provider_error",
+        )
+        return ChatResult(
+            response_message=safe_reply(risk, session_id),
+            risk_level=risk,
+            recommended_action=(
+                "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+            ),
+            provenance={"path": "agentic", "degraded": "provider_error"},
+            language=lang, trace=trace,
+        )
+
+    if outcome.tool_names:
+        t("Records", "looked up: " + ", ".join(
+            sorted({n.replace("_", " ") for n in outcome.tool_names})))
+
+    display = strip_markers(outcome.text)
+    if risk == HIGH:
+        display = f"{HIGH_ESCALATION} {display}"
+
+    degraded: str | None = None
+
+    try:
+        index = await load_condition_index(db)
+        extra_terms = index.diagnostic_terms() if index is not None else None
+    except Exception:  # noqa: BLE001
+        extra_terms = None
+
+    async def _try_recover(reason: str, detail: str = "") -> bool:
+        """One corrective retry before falling back. True if it worked.
+
+        Without this, a guard rejection throws the whole answer away and
+        substitutes one fixed sentence — the reader gets a non-answer with no
+        explanation and no path forward, and two in a row look like a broken
+        bot. The floor is unchanged; it is just reached less often.
+        """
+        nonlocal display
+        rewritten = await recover(
+            provider, system, outcome.messages, reason, detail
+        )
+        if not rewritten:
+            return False
+        candidate = strip_markers(rewritten)
+        if risk == HIGH:
+            candidate = f"{HIGH_ESCALATION} {candidate}"
+        retry_ok, _ = values_traceable(candidate, sources)
+        if not retry_ok:
+            return False
+        if not sources and unit_values(candidate):
+            return False
+        if not validate_reply(candidate, risk, extra_terms).ok:
+            return False
+        display = candidate
+        return True
+
+    # Fidelity FIRST: a drifted lab value is worse than a blocked reply, and it
+    # is the failure mode the validator cannot see.
+    sources = [*outcome.source_texts, *(c.content for c in chunks)]
+    if patient_text:
+        sources.append(patient_text)
+    ok, stray = values_traceable(display, sources)
+    if not ok:
+        logger.warning("numeric fidelity failure: %s", stray)
+        if await _try_recover("fidelity", ", ".join(stray)):
+            t("Value check", "a stated value was corrected on a second pass")
+        else:
+            t("Value check",
+              "a stated value did not match your records — replaced with the "
+              "safe reply")
+            display, degraded = safe_reply(risk, session_id), "fidelity"
+    elif not sources and unit_values(display):
+        # Nothing was retrieved and no tool ran, yet the reply states a
+        # clinical value or a dose. There is nothing behind it — the model
+        # made it up. This is the case values_traceable deliberately cannot
+        # judge (no sources to compare against), so the policy lives here.
+        stated = unit_values(display)
+        logger.warning("ungrounded clinical value with no sources: %s", stated)
+        if await _try_recover("ungrounded_value", ", ".join(stated)):
+            t("Value check", "an unsupported figure was removed on a second pass")
+        else:
+            t("Value check",
+              "a dose or measurement was stated with nothing to support it — "
+              "replaced with the safe reply")
+            display, degraded = safe_reply(risk, session_id), "ungrounded_value"
+    elif sources:
+        t("Value check", "every value matches your records")
+
+    if degraded is None:
+        verdict = validate_reply(display, risk, extra_terms)
+        if not verdict.ok:
+            if await _try_recover(verdict.reason):
+                t("Output validation",
+                  f"first attempt blocked ({redact_reason(verdict.reason)}); the rewrite "
+                  "passed")
+            else:
+                t("Output validation",
+                  f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
+                display, degraded = safe_reply(risk, session_id), "validation"
+        else:
+            t("Output validation", "passed all safety checks")
+
+    await _write_receipt(
+        db, user_id=user_id, session_id=session_id, message=message,
+        model_name=provider.model_name,
+        retrieved=[c.to_dict() for c in chunks] if chunks else None,
+        grounding_status="agentic", used_rag=bool(chunks),
+    )
+
+    provenance: dict = {
+        "path": "agentic",
+        "tools": outcome.tool_names,
+        "rounds": outcome.rounds,
+        "conditions": sorted(codes),
+        "usage": outcome.usage,
+    }
+    if outcome.forced:
+        provenance["forced_answer"] = True
+    if degraded:
+        provenance["degraded"] = degraded
+
+    return ChatResult(
+        response_message=display,
+        risk_level=risk,
+        recommended_action=(
+            "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+        ),
+        provenance=provenance,
+        language=lang,
+        trace=trace,
+    )
