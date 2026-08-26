@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -356,9 +357,19 @@ async def _dispatch(
     lang = pivot.display_language if pivot is not None else detect_language(message)
 
     trace: list[dict] = []
+    # Wall-clock since the turn began, stamped on every trace step. Without
+    # this the trace says WHAT happened and never WHERE the time went, so a
+    # 30-second turn and a 300ms one are indistinguishable after the fact.
+    # Staging measured 19-33s on LLM paths against 0.1-5s on deterministic
+    # ones, and nothing in the response said which stage was responsible.
+    _t0 = time.perf_counter()
 
     def t(step: str, detail: str) -> None:
-        trace.append({"step": step, "detail": detail})
+        trace.append({
+            "step": step,
+            "detail": detail,
+            "ms": round((time.perf_counter() - _t0) * 1000),
+        })
 
     if tr.matched:
         t("Safety triage",

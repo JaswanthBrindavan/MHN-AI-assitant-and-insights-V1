@@ -27,6 +27,22 @@ from app.triage.red_flags import EMERGENCY, HIGH, NONE, triage
         "what's 12 * 44?",
         "who is the president of france?",
         "debug this stack trace for me",
+        # Real-time lookups. Measured in staging: "what is the weather in
+        # Hyderabad today?" fell through to the RAG path and spent 29.8s on a
+        # full LLM round trip to say it could not answer. Correct reply, wrong
+        # route, and the reader waited half a minute for it.
+        "what is the weather in Hyderabad today?",
+        "what's the weather like?",
+        "how is the weather in Delhi",
+        "weather forecast tomorrow",
+        "forecast for mumbai",
+        "what's the latest news",
+        "show me today's news",
+        "what is the stock price of infosys",
+        "how much is bitcoin worth",
+        "directions to the nearest pharmacy",
+        "traffic on the outer ring road",
+        "what time is it",
     ],
 )
 def test_scope_declines_off_topic(message):
@@ -39,6 +55,19 @@ def test_scope_declines_off_topic(message):
         "what should I eat to manage blood sugar?",
         "my father has diabetes, should I be worried?",
         "I have a headache and a mild fever",
+        # The trap in the patterns above. "weather", "temperature", "time" and
+        # "traffic" are all ordinary health vocabulary, so the guard matches
+        # the SHAPE of a real-time lookup and never the topic word. Every one
+        # of these is a genuine health question and must reach the model.
+        "does cold weather make my asthma worse?",
+        "my joints ache when the weather changes",
+        "is it normal to feel dizzy in hot weather?",
+        "my temperature is 39 degrees",
+        "what time should I take my metformin?",
+        "what time of day is blood pressure highest?",
+        "I get breathless in traffic fumes",
+        "what is the price of my insulin without insurance?",
+        "the news about my diagnosis has been stressful",
     ],
 )
 def test_scope_allows_health(message):
