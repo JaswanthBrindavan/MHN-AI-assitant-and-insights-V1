@@ -20,6 +20,19 @@ _OFF_TOPIC_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bwhat('| i)s \d+\s*[\+\-\*/x]\s*\d+"),
     re.compile(r"\bcapital of\b|\bwho won\b|\bwho is the (president|prime minister)\b"),
     re.compile(r"\b(movie|film|actor|song|celebrity|football|cricket) (trivia|score|lyrics)\b"),
+    # --- Real-time lookups we have no source for -----------------------------
+    # Matched by REQUEST SHAPE, never by topic word. "weather" and
+    # "temperature" are health words: "does cold weather make my asthma worse?"
+    # and "my temperature is 39" must still reach the model. Asking FOR a
+    # forecast reads differently from asking about weather's effects on a body,
+    # and only the first is off topic.
+    re.compile(r"\b(what'?s|what is|how'?s|how is)\s+(the\s+)?weather\b"),
+    re.compile(r"\bweather (forecast|report|today|tomorrow)\b"),
+    re.compile(r"\bforecast (for|in) \w"),
+    re.compile(r"\b(latest|today'?s|breaking) news\b|\bnews headlines\b"),
+    re.compile(r"\b(stock|share) price\b|\b(bitcoin|ethereum|sensex|nifty)\b"),
+    re.compile(r"\bdirections to\b|\btraffic (on|in|near|report)\b"),
+    re.compile(r"\bwhat (time|day|date) is it\b"),
 )
 
 
