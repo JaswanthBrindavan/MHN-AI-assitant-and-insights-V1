@@ -58,3 +58,29 @@ def test_spread_never_invents_or_drops_below_k():
     assert len(spread_across_conditions(ranked, 4)) == 2  # only 2 available
     assert spread_across_conditions([], 4) == []
     assert spread_across_conditions(ranked, 0) == []
+
+
+def test_spreading_after_a_k_limited_rerank_would_be_a_no_op():
+    """The bug this guards: MMR asked for k returns k, and if all k came from
+    one profile there is nothing left for the spread to reach for.
+
+    So the reranker must ORDER the shortlist and let the spread SELECT. This
+    test pins the distinction — spreading a k-length single-condition list
+    cannot recover, which is why the call site passes len(shortlist).
+    """
+    from app.rag.retrieval import spread_across_conditions
+
+    # What MMR-limited-to-k hands over: four chunks, one condition.
+    k_limited = [_chunk("MC_T1DM", f"s{i}", 0.9 - i / 100, i) for i in range(4)]
+    assert len(spread_across_conditions(k_limited, 4)) == 4
+    assert {c.condition_code for c in spread_across_conditions(k_limited, 4)} == {
+        "MC_T1DM"
+    }, "nothing to spread — this is why the shortlist must be ordered, not cut"
+
+    # What ordering the whole shortlist hands over: the other profiles survive.
+    full = k_limited + [
+        _chunk("MC_T2DM", "overview", 0.5),
+        _chunk("MC_GDM", "overview", 0.4),
+    ]
+    out = spread_across_conditions(full, 4)
+    assert {c.condition_code for c in out} == {"MC_T1DM", "MC_T2DM", "MC_GDM"}

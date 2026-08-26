@@ -334,11 +334,19 @@ async def _hybrid_rank(
             for c in shortlist
             if by_id[c.id].embedding is not None
         }
-        order = mmr_rerank([c.id for c in shortlist], vectors, k)
+        # Order the WHOLE shortlist, not just k. MMR is asked for a ranking
+        # here, not a selection: `spread_across_conditions` does the selecting,
+        # and it can only give a second condition a slot if there is a second
+        # condition still on the list. Passing k here returned exactly k ids,
+        # so when MMR had already filled them from one profile the spread had
+        # nothing left to spread and silently did nothing.
+        order = mmr_rerank([c.id for c in shortlist], vectors, len(shortlist))
         by_chunk_id = {c.id: c for c in shortlist}
-        # MMR diversifies on EMBEDDING similarity, which is not the same thing
-        # as covering every condition the question matched — all k can still
-        # land on one profile. Spread first, then take k.
+        # MMR cannot do this itself: it never sees condition_code, and its
+        # similarity penalty works AGAINST condition coverage — having picked
+        # type-1 symptoms, type-2 symptoms is penalised for being about the
+        # same thing, while type-1 diagnosis is not. That is MMR working as
+        # designed; it is section diversity, not condition diversity.
         return spread_across_conditions(
             [by_chunk_id[cid] for cid in order], k
         )
