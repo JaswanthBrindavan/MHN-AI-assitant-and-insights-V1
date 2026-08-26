@@ -15,7 +15,7 @@
 > patient-facing answers wrong; a drug reply ignored the reader's allergies;
 > Davi's V7–V10 collided with mhn-spring's Flyway chain.
 >
-> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, **C6**, C7–C11,
+> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, **C6**, C7–C13,
 > and
 > everything in section B. See [`handover.md`](./handover.md) for the ordered
 > pick-up list.
@@ -210,6 +210,40 @@ harder); hash it; or accept it and correct the two claims. I did not change
 receipt contents unilaterally — that is an audit contract.
 
 Retention limits the exposure either way: receipts are purged at 400 days.
+
+### C13 — The two Flyway chains now INTERLEAVE — needs a decision
+**Measured against a real PostgreSQL** (pgvector/pgvector:pg16, the CI image),
+which this repo had never done before.
+
+`db/existing_schema.sql` **cannot load standalone**. mhn-spring's **V14** and
+**V19** both `REFERENCE drug_reference` — a table created by **Davi's own V6**,
+the one file `build_existing_schema.py` deliberately excludes. Load the dump on
+an empty database and it dies on `relation "public.drug_reference" does not
+exist`.
+
+So `test_coexistence.py`'s premise — *lay down their schema, then run Davi's
+chain on top* — no longer matches production, where Flyway applies
+**V1..V6(davi)..V19..V21(davi)** as ONE ordered chain. Their chain now depends
+on ours.
+
+The loader bug is fixed (it used `exec_driver_sql`, which hands psycopg2 an
+`immutabledict` and raises "not a sequence" — so this test could never have run
+even with a perfect dump). It now fails with the diagnostic above instead of a
+TypeError. **Three coexistence tests are therefore red locally**, for a real
+reason. They skip in CI, so nothing is blocked.
+
+Options, none taken:
+1. **Include V6 in the dump** at its chain position. Faithful to production —
+   but then Davi's Alembic chain re-creates those tables and collides, so the
+   test would have to assert idempotency instead of creation.
+2. **Stamp rather than upgrade**: load the full chain including V6, then
+   `alembic stamp head` and assert only that the models match the schema. Tests
+   agreement rather than applicability.
+3. **Retire the coexistence test** and rely on `test_flyway_parity` plus the
+   real Flyway run in staging.
+
+I would take (2): what actually needs guarding is "do Davi's models match the
+schema production really has", and that survives the chains interleaving.
 
 ### C12 — The coexistence check now runs nowhere automatically
 **Measured, not assumed.** With `db/` gitignored, a fresh clone collects **7**

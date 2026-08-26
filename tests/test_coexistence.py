@@ -95,7 +95,32 @@ def _load_production_schema(engine) -> None:
         conn.execute(text("CREATE SCHEMA public"))
         # One statement stream: the dump is ordered, and splitting it would
         # break the DO $$ blocks and multi-line inserts.
-        conn.exec_driver_sql(sql)
+        #
+        # Straight down to the DBAPI cursor. `exec_driver_sql(sql)` hands
+        # psycopg2 an `immutabledict()` for parameters and it raises
+        # "immutabledict is not a sequence"; `exec_driver_sql(sql, ())` then
+        # trips over the `%` signs in the dump. Neither ever worked, which is
+        # part of why this check had never actually run.
+        cursor = conn.connection.dbapi_connection.cursor()
+        try:
+            cursor.execute(sql)
+        except Exception as exc:  # noqa: BLE001
+            if "drug_reference" in str(exc):
+                raise AssertionError(
+                    "db/existing_schema.sql cannot load standalone: "
+                    "mhn-spring's V14 and V19 both REFERENCE "
+                    "drug_reference, which is created by Davi's own V6 -- "
+                    "the one file build_existing_schema.py deliberately "
+                    "excludes. The two Flyway chains now INTERLEAVE, so "
+                    "this test's premise (lay down their schema, then run "
+                    "Davi's chain on top) no longer matches production, "
+                    "where Flyway applies V1..V6(davi)..V19..V21(davi) as "
+                    "ONE ordered chain. See open-items.md C12 -- this "
+                    "needs a decision, not a patch."
+                ) from exc
+            raise
+        finally:
+            cursor.close()
 
 
 @pytest.mark.skipif(not PG_URL, reason="TEST_ALEMBIC_URL not set")

@@ -134,11 +134,24 @@ async def pg_engine():
     if not url:
         pytest.skip("TEST_DATABASE_URL not set — PostgreSQL tests skipped")
     eng = create_async_engine(url, future=True)
+
+    # The Flyway-owned enum types must exist BEFORE create_all. Davi binds them
+    # with `create_type=False` because production and the coexistence dump
+    # already have them -- so on a bare test database `create_all` emits
+    # `... vital_type vital_type_enum ...` against a type that was never made,
+    # and every pg test errors in fixture setup. This is why the pg job had
+    # never passed.
+    from app.models.coredata import PG_ENUMS
+
     async with eng.begin() as conn:
+        for enum in PG_ENUMS:
+            await conn.run_sync(enum.create, checkfirst=True)
         await conn.run_sync(Base.metadata.create_all)
     yield eng
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+        for enum in PG_ENUMS:
+            await conn.run_sync(enum.drop, checkfirst=True)
     await eng.dispose()
 
 

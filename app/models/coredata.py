@@ -19,6 +19,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db import Base
 from app.models.common import JSONColumn
 
+# Every Flyway-owned enum this module references. Production and the
+# coexistence dump both already have them; a bare test PostgreSQL does not, and
+# `Base.metadata.create_all` will not make them because of `create_type=False`.
+# The pg fixture creates these first -- see `tests/conftest.py::pg_engine`.
+PG_ENUMS: list = []
+
 
 def _pg_enum(name: str, *values: str):
     """String column that binds as the core app's PG enum type.
@@ -27,9 +33,9 @@ def _pg_enum(name: str, *values: str):
     reference it so parameter binds cast correctly ($1::<enum> not ::VARCHAR).
     SQLite (unit tests) sees a plain string.
     """
-    return sa.String(32).with_variant(
-        postgresql.ENUM(*values, name=name, create_type=False), "postgresql"
-    )
+    enum = postgresql.ENUM(*values, name=name, create_type=False)
+    PG_ENUMS.append(enum)
+    return sa.String(32).with_variant(enum, "postgresql")
 
 # Table names owned by the core app that this module maps (merged into
 # EXTERNAL_TABLES in app.models.core).

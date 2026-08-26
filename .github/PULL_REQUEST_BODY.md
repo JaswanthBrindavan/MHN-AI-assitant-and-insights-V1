@@ -206,6 +206,23 @@ Every safety fix is mutation-checked — reverting it fails its tests.
 **Not verified here:** anything needing a live API key (cache hit rate,
 provider bake-off, real quality numbers) or a PostgreSQL (`pg`-marked tests).
 
+**The Postgres CI job had never passed — fixed here.** `pg_engine` ran
+`Base.metadata.create_all` on a bare database, but Davi binds seven
+Flyway-owned enums with `create_type=False`, so `create_all` emitted
+`vital_type vital_type_enum` against a type nothing had created and every pg
+test errored in fixture setup. Pre-existing, not a regression from this branch:
+the enum bindings predate the pg job. Verified against a real
+`pgvector/pgvector:pg16` — the fixture now creates those enums first, and the
+job goes 3 errors → **3 passed**.
+
+**That same run found something bigger.** mhn-spring's V14 and V19 both
+`REFERENCE drug_reference`, which Davi's V6 creates — so the two Flyway chains
+now **interleave** and `db/existing_schema.sql` cannot load standalone.
+`test_coexistence.py` could never have run anyway (`exec_driver_sql` hands
+psycopg2 an `immutabledict`). The loader is fixed and it now fails with that
+diagnostic rather than a TypeError. It skips in CI, so nothing is blocked —
+but it needs a decision: open item **C13**.
+
 **And one of those does not run in CI either.** With `db/` gitignored, a fresh
 clone collects 7 `pg` tests and `test_coexistence.py` is not among them — it
 needs `db/existing_schema.sql`, which is generated from mhn-spring's chain and
