@@ -41,6 +41,7 @@ from app.coredata.service import (
     _MANUAL_UNIT,
     _RESOURCE_TYPE,
     DOCUMENT_KINDS,
+    active_medications,
     add_lifestyle_log,
     latest_body_measurement,
     latest_documents,
@@ -1459,6 +1460,31 @@ async def handle_tracker_query(
 
     since = window_start(query.period)
     window = _PERIOD_WORDS.get(query.period, "7 days")
+
+    if query.source == "medications":
+        meds = await active_medications(db, user_id)
+        if not meds:
+            reply = (
+                "I don't have any current medications on record for you. "
+                "Adding them under Medications lets me check them against "
+                "anything you ask about."
+            )
+        else:
+            reply = (
+                "Your current medications on record are: "
+                + "; ".join(meds)
+                + ". Private entries are not included, and this reflects what "
+                "is recorded here rather than anything I can verify myself."
+            )
+        return {
+            "reply": reply,
+            "action": "discuss_with_prescriber",
+            "provenance": {
+                "path": "tracker_query",
+                "source": "medications",
+                "count": len(meds),
+            },
+        }
 
     if query.source == "lifestyle":
         totals = await lifestyle_totals(db, user_id, since)
