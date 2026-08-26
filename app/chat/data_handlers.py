@@ -35,13 +35,16 @@ from app.chat.abilities import (
     parse_suggestion_query,
     parse_summary_query,
     parse_tracker_add,
+    parse_tracker_query,
 )
 from app.coredata.service import (
+    _MANUAL_UNIT,
     _RESOURCE_TYPE,
     DOCUMENT_KINDS,
     add_lifestyle_log,
     latest_body_measurement,
     latest_documents,
+    latest_manual_metrics,
     latest_vital,
     lifestyle_totals,
     list_family_connections,
@@ -1425,4 +1428,78 @@ async def handle_section_detail_query(
         "action": "none",
         "provenance": {"path": "section_detail", "kind": kind,
                        "document_id": doc.id},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Manual tracker lookups
+# --------------------------------------------------------------------------- #
+_TRACKER_PHRASE = {
+    "water": ("glass", "glasses"),
+    "coffee": ("cup", "cups"),
+    "tea": ("cup", "cups"),
+    "alcohol": ("drink", "drinks"),
+    "smoking": ("cigarette", "cigarettes"),
+}
+_PERIOD_WORDS = {"week": "7 days", "month": "30 days", "year": "year"}
+
+
+async def handle_tracker_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """Answer "how much water did I drink this week?" from the reader's logs.
+
+    These reached the LLM before: 4-12s and a paraphrase, for a number the
+    reader logged themselves and we already read for the [P] block. A lookup is
+    exact and roughly 150ms.
+    """
+    query = parse_tracker_query(message)
+    if query is None:
+        return None
+
+    since = window_start(query.period)
+    window = _PERIOD_WORDS.get(query.period, "7 days")
+
+    if query.source == "lifestyle":
+        totals = await lifestyle_totals(db, user_id, since)
+        amount = totals.get(query.key)
+        if not amount:
+            reply = (
+                f"You have not logged any {query.key} in the past {window}. "
+                "If you have been tracking it elsewhere, adding it here lets me "
+                "include it next time."
+            )
+        else:
+            singular, plural = _TRACKER_PHRASE.get(query.key, ("entry", "entries"))
+            noun = singular if float(amount) == 1 else plural
+            reply = (
+                f"You have logged {_g(amount)} {noun} of {query.key} in the past "
+                f"{window}. That is what is on record here, not a complete "
+                "picture of your intake."
+            )
+    else:
+        metrics = await latest_manual_metrics(db, user_id, since)
+        point = metrics.get(query.key)
+        if point is None:
+            reply = (
+                f"You have no {query.key} entries in the past {window}. "
+                "Once some are logged I can pull them up here."
+            )
+        else:
+            unit = point.unit or _MANUAL_UNIT.get(query.key, "")
+            when = point.at.strftime("%d %b") if point.at else "recently"
+            reply = (
+                f"Your most recent {query.key} entry is {_g(point.value)} "
+                f"{unit}, recorded {when}."
+            )
+
+    return {
+        "reply": reply,
+        "action": "self_care",
+        "provenance": {
+            "path": "tracker_query",
+            "source": query.source,
+            "metric": query.key,
+            "period": query.period,
+        },
     }

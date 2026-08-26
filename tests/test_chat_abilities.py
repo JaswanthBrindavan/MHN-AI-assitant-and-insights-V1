@@ -513,3 +513,90 @@ def test_parse_summary_summarize_verb():
 
 def test_parse_suggestion_suggest_verb():
     assert parse_suggestion_query("Suggest healthy habits for my PCOS.") is not None
+
+
+# --------------------------------------------------------------------------- #
+# Advice is not a lookup
+#
+# Measured in staging: "how can I lower my blood pressure naturally?" was
+# answered with "I couldn't find any blood pressure readings in your records
+# yet." It names a metric and says "my", so every guard let it through to the
+# data handler. The reader asked how to CHANGE a number, not what it is.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "message",
+    [
+        "how can I lower my blood pressure naturally?",
+        "how do I improve my sleep",
+        "what should I eat to lower my cholesterol",
+        "tips to reduce my weight",
+        "home remedies for my blood sugar",
+        "help me manage my blood pressure",
+    ],
+)
+def test_advice_does_not_hijack_the_metric_handler(message):
+    from app.chat.abilities import parse_metric_query
+
+    assert parse_metric_query(message) is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "what is my latest blood pressure reading?",
+        "my weight trend",
+        "show my latest hba1c",
+        "what was my last blood sugar",
+    ],
+)
+def test_real_metric_lookups_still_parse(message):
+    from app.chat.abilities import parse_metric_query
+
+    assert parse_metric_query(message) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Tracker lookups
+#
+# water / steps / coffee / smoking / sleep all reached the LLM: 4-12s and a
+# paraphrase, for numbers the reader logged themselves.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("message", "source", "key", "period"),
+    [
+        ("how much water did I drink this week?", "lifestyle", "water", "week"),
+        ("how many steps did I walk yesterday?", "manual", "steps", "week"),
+        ("how much coffee have I had this week?", "lifestyle", "coffee", "week"),
+        ("did I log any smoking this month?", "lifestyle", "smoking", "month"),
+        ("my sleep this month", "manual", "sleep", "month"),
+    ],
+)
+def test_tracker_lookups_parse(message, source, key, period):
+    from app.chat.abilities import parse_tracker_query
+
+    q = parse_tracker_query(message)
+    assert q is not None, message
+    assert (q.source, q.key, q.period) == (source, key, period)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # A question about the NORM, not about the reader's log. The suite
+        # caught this parser shipping without the guard the metric parser has:
+        # "how much water should I drink" matched "how much" + "water".
+        "how much water should I drink",
+        "how many steps are normal",
+        "what is the ideal sleep duration",
+        "am I drinking enough water",
+        # Advice about a habit is not a reading of it.
+        "how can I drink more water",
+        # And a WRITE must never be read as a lookup.
+        "log 2 glasses of water",
+        "I had 3 cups of coffee",
+    ],
+)
+def test_tracker_lookup_does_not_claim_norms_advice_or_writes(message):
+    from app.chat.abilities import parse_tracker_query
+
+    assert parse_tracker_query(message) is None

@@ -15,7 +15,7 @@
 > patient-facing answers wrong; a drug reply ignored the reader's allergies;
 > Davi's V7–V10 collided with mhn-spring's Flyway chain.
 >
-> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, **C6**, C7–C14,
+> **Still open:** A2 (Task 12 — staging), A3, A4, A7, C4, C5, **C6**, C7–C15,
 > and
 > everything in section B. See [`handover.md`](./handover.md) for the ordered
 > pick-up list.
@@ -210,6 +210,33 @@ harder); hash it; or accept it and correct the two claims. I did not change
 receipt contents unilaterally — that is an audit contract.
 
 Retention limits the exposure either way: receipts are purged at 400 days.
+
+### C15 — No reference range exists for body temperature
+**Needs a clinical decision, not a patch.**
+
+Staging: *"my temperature is 39 degrees"* returned `risk=none` and did NOT take
+the `value_check` path. It went to the LLM, which answered with general
+guidance — safe, but not the deterministic graded answer every other stated
+value gets.
+
+**Verified there is nowhere to get a range from:**
+- `temperature` is not in `_VALUE_METRIC_TERMS` (`app/chat/abilities.py`)
+- there is no local constant for it in `app/insights/constants.py`
+- **mhn-spring's V18 catalogue has no temperature parameter either** — grepped
+  all 193 rows
+
+So adding the value-check means *inventing* a fever threshold. Every piece of
+clinical content in this repo is DRAFT pending sign-off, and 39 °C is exactly
+the kind of number where "roughly right" is not good enough — the same value
+means different things in an infant, an adult, and someone immunosuppressed.
+
+Triage already covers the dangerous combination (`fever with a stiff neck` is
+an EMERGENCY phrase). What is missing is the graded single-value answer.
+
+**The ask:** a clinician-approved band for body temperature, ideally added to
+`traditional_health_parameters` so it arrives the same way every other range
+does and Davi does not carry its own copy. Once it exists, wiring it is one
+entry in `_VALUE_METRIC_TERMS`.
 
 ### C14 — `_context_memo` can serve a dead session's answer
 **Found while fixing the same bug elsewhere, and left deliberately.**

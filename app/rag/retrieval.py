@@ -124,6 +124,46 @@ def _section_boost(message_lower: str, chunk_type: str) -> float:
     return 0.0
 
 
+def spread_across_conditions(
+    ranked: list[RetrievedChunk], k: int
+) -> list[RetrievedChunk]:
+    """Give every matched condition a slot before any condition takes a second.
+
+    "Diabetes" resolves to SEVERAL profiles — type 1, type 2, gestational and
+    others all live in the corpus. Ranking is per-chunk and purely lexical, so
+    whichever profile happens to word its overview closest to the question can
+    take all k slots, and the reader gets an answer about type 1 for a question
+    that was not about type 1. That is what was reported, and it reads as the
+    assistant simply not knowing about the other documents.
+
+    Round-robin over conditions, preserving rank inside each. With one matched
+    condition this is a no-op, so the single-condition case is untouched.
+
+    Pure: no I/O, so it applies to the keyword path and the hybrid path alike.
+    """
+    if k <= 0 or len(ranked) <= 1:
+        return ranked[:k]
+    by_condition: dict[str, list[RetrievedChunk]] = {}
+    for chunk in ranked:  # `ranked` is already ordered, so each list is too
+        by_condition.setdefault(chunk.condition_code, []).append(chunk)
+    if len(by_condition) < 2:
+        return ranked[:k]
+
+    # Condition order follows each one's BEST chunk, so the strongest match
+    # still leads — this spreads the slots, it does not reorder by relevance.
+    queues = list(by_condition.values())
+    out: list[RetrievedChunk] = []
+    round_index = 0
+    while len(out) < k and any(len(q) > round_index for q in queues):
+        for queue in queues:
+            if len(queue) > round_index:
+                out.append(queue[round_index])
+                if len(out) == k:
+                    return out
+        round_index += 1
+    return out
+
+
 def _keyword_rank(rows: list[McpChunk], message: str) -> list[RetrievedChunk]:
     query_tokens = set(_tokens(message))
     message_lower = message.lower()
@@ -296,10 +336,15 @@ async def _hybrid_rank(
         }
         order = mmr_rerank([c.id for c in shortlist], vectors, k)
         by_chunk_id = {c.id: c for c in shortlist}
-        return [by_chunk_id[cid] for cid in order]
+        # MMR diversifies on EMBEDDING similarity, which is not the same thing
+        # as covering every condition the question matched — all k can still
+        # land on one profile. Spread first, then take k.
+        return spread_across_conditions(
+            [by_chunk_id[cid] for cid in order], k
+        )
     except Exception:  # noqa: BLE001 — reranking must never break retrieval
         logger.warning("MMR rerank failed; keeping fused order", exc_info=True)
-        return scored[:k]
+        return spread_across_conditions(scored, k)
 
 
 async def retrieve_chunks(
@@ -335,7 +380,7 @@ async def retrieve_chunks(
         if not rows:
             return []
         # Condition scope already establishes relevance; keep zero-score chunks.
-        return _keyword_rank(rows, message)[:k]
+        return spread_across_conditions(_keyword_rank(rows, message), k)
 
     rows = await _global_fallback_rows(db, message)
     if not rows:
