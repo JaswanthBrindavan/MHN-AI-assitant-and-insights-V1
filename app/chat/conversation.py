@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.memory import compact_messages, empty_summary, merge_summaries
@@ -71,6 +71,35 @@ async def add_message(
     db.add(msg)
     await db.flush()
     return msg
+
+
+async def _recent_messages(
+    db: AsyncSession, session_id: uuid.UUID, limit: int
+) -> list[ConversationMessage]:
+    """The last `limit` messages, oldest-first.
+
+    `assemble_context` wants the newest few and runs on EVERY turn. Reading the
+    whole session to slice the tail in Python costs one row — and one full
+    message body — per turn the reader has ever taken, so the cheapest turn in
+    a long conversation is still paying for the longest one.
+
+    DESC + LIMIT in SQL, then reversed, keeps the (created_at, id) ordering
+    contract that compaction's `covers_through_message_id` depends on: the same
+    tuple orders both directions, so the tail selected here is exactly the tail
+    `_ordered_messages` would have sliced.
+    """
+    rows = (
+        await db.execute(
+            select(ConversationMessage)
+            .where(ConversationMessage.session_id == session_id)
+            .order_by(
+                ConversationMessage.created_at.desc(),
+                ConversationMessage.id.desc(),
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+    return list(reversed(list(rows)))
 
 
 async def _ordered_messages(
@@ -168,10 +197,8 @@ async def assemble_context(
 ) -> tuple[dict | None, list[dict]]:
     """Return (compacted summary or None, last KEEP_VERBATIM messages verbatim)."""
     summary_row = await latest_summary(db, session_id)
-    messages = await _ordered_messages(db, session_id)
-    last = [
-        {"role": m.role, "message": m.message} for m in messages[-KEEP_VERBATIM:]
-    ]
+    messages = await _recent_messages(db, session_id, KEEP_VERBATIM)
+    last = [{"role": m.role, "message": m.message} for m in messages]
     return (summary_row.summary if summary_row else None), last
 
 
@@ -184,17 +211,26 @@ async def questions_asked(db: AsyncSession, session_id: uuid.UUID) -> int:
 
     Never raises: a counting failure must not cost the reader an answer, so it
     degrades to "already asked plenty", which suppresses further questions.
+
+    Counted in SQL. It used to pull every assistant message's full TEXT across
+    the whole session and count in Python — transferring the entire transcript
+    once per turn to learn a single integer.
     """
     try:
-        rows = (
+        # rtrim(col, chars) mirrors Python's str.rstrip() closely enough for a
+        # loop-stopping counter, and the two-argument form exists on both
+        # PostgreSQL and SQLite.
+        return (
             await db.execute(
-                select(ConversationMessage.message).where(
+                select(func.count())
+                .select_from(ConversationMessage)
+                .where(
                     ConversationMessage.session_id == session_id,
                     ConversationMessage.role == "assistant",
+                    func.rtrim(ConversationMessage.message, " \t\n\r").like("%?"),
                 )
             )
-        ).scalars().all()
+        ).scalar() or 0
     except Exception:  # noqa: BLE001 — never break a reply over a counter
         logger.warning("clarifying-question count failed", exc_info=True)
         return 999
-    return sum(1 for m in rows if (m or "").rstrip().endswith("?"))

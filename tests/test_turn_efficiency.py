@@ -103,3 +103,75 @@ async def test_scope_carry_forward_survived_the_dedup(db_session):
         db_session, user_id, "is it serious?", provider, session_id=sid
     )
     assert result.response_message
+
+
+# --------------------------------------------------------------------------- #
+# Session-length scaling
+#
+# Live staging measurement across ONE long session: 10s -> 19s -> 22s -> 30s ->
+# 43s -> 113s. Every turn re-read work proportional to the whole transcript, so
+# the cheapest turn in a long conversation still paid for the longest one.
+# --------------------------------------------------------------------------- #
+async def _seed_session(db, n: int):
+    from app.chat.conversation import add_message, ensure_session
+
+    user_id = uuid.uuid4()
+    session_id = await ensure_session(db, user_id, None)
+    for i in range(n):
+        await add_message(db, session_id, "user", f"question number {i}")
+        await add_message(db, session_id, "assistant", f"answer number {i}")
+    return session_id
+
+
+async def test_assemble_context_bounds_its_read_in_sql(db_session, engine):
+    """It wants the newest few; it must not read the whole session to get them."""
+    from app.chat.conversation import assemble_context
+
+    session_id = await _seed_session(db_session, 40)
+
+    seen: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        seen.append(" ".join(statement.split()))
+
+    await assemble_context(db_session, session_id)
+
+    msg_selects = [
+        s for s in seen
+        if "conversation_messages" in s and s.upper().startswith("SELECT")
+    ]
+    assert msg_selects, "no message SELECT was issued"
+    assert all("LIMIT" in s.upper() for s in msg_selects), (
+        f"assemble_context read conversation_messages unbounded: {msg_selects}"
+    )
+
+
+async def test_assemble_context_still_returns_the_right_tail(db_session):
+    """Bounding the read must not change WHICH messages come back, or their
+    order — compaction's covers_through_message_id depends on it."""
+    from app.chat.conversation import KEEP_VERBATIM, assemble_context
+
+    session_id = await _seed_session(db_session, 40)
+    _summary, recent = await assemble_context(db_session, session_id)
+
+    assert len(recent) == KEEP_VERBATIM
+    # Oldest-first, and ending on the very last message written.
+    assert recent[-1]["message"] == "answer number 39"
+    assert recent[-1]["role"] == "assistant"
+    assert recent[0]["message"] == "question number 36"
+
+
+async def test_questions_asked_counts_without_reading_the_transcript(db_session):
+    from app.chat.conversation import add_message, ensure_session, questions_asked
+
+    user_id = uuid.uuid4()
+    session_id = await ensure_session(db_session, user_id, None)
+    await add_message(db_session, session_id, "assistant", "How long has it hurt?")
+    await add_message(db_session, session_id, "assistant", "Any fever?\n")
+    await add_message(db_session, session_id, "assistant", "Here is some guidance.")
+    await add_message(db_session, session_id, "user", "and you? is it bad?")
+
+    # Two assistant questions; trailing newline still counts, the statement
+    # does not, and the USER's question mark is not the assistant's.
+    assert await questions_asked(db_session, session_id) == 2
