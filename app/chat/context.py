@@ -22,7 +22,7 @@ from app.coredata.service import (
     active_medications,
     latest_body_metrics,
     latest_manual_metrics,
-    latest_vital,
+    latest_vitals,
     lifestyle_totals,
     recent_lab_values,
     window_start,
@@ -244,17 +244,22 @@ async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
 
     # 3) Latest vitals.
     vitals: list[str] = []
-    bp = await latest_vital(db, user_id, "blood_pressure")
+    # ONE round trip for all four. These were four sequential queries on the
+    # path that runs for every personal question.
+    _v = await latest_vitals(
+        db, user_id, ("blood_pressure", "blood_sugar", "heart_rate", "spo2")
+    )
+    bp = _v.get("blood_pressure")
     if bp is not None:
         sec = f"/{int(bp.secondary)}" if bp.secondary is not None else ""
         vitals.append(f"blood pressure {int(bp.value)}{sec} {bp.unit or 'mmHg'}")
-    sugar = await latest_vital(db, user_id, "blood_sugar")
+    sugar = _v.get("blood_sugar")
     if sugar is not None:
         vitals.append(f"blood sugar {int(sugar.value)} {sugar.unit or 'mg/dL'}")
-    hr = await latest_vital(db, user_id, "heart_rate")
+    hr = _v.get("heart_rate")
     if hr is not None:
         vitals.append(f"heart rate {int(hr.value)} {hr.unit or 'bpm'}")
-    spo2 = await latest_vital(db, user_id, "spo2")
+    spo2 = _v.get("spo2")
     if spo2 is not None:
         vitals.append(f"SpO2 {int(spo2.value)}{spo2.unit or '%'}")
     if vitals:
