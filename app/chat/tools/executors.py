@@ -26,6 +26,7 @@ from app.chat.context import build_patient_context
 from app.chat.data_handlers import (
     handle_document_query,
     handle_family_list_query,
+    handle_medication_command,
     handle_metric_query,
     handle_report_param_ask,
     handle_suggestion_query,
@@ -252,3 +253,33 @@ async def analyze_image(
             "clinician needs to look properly."
         ),
     }
+
+
+async def _medication(action: str, db, user_id, args) -> dict | None:
+    """Shared executor for the three medication tools. Builds a phrase the
+    deterministic handler parses, so both engines run identical logic."""
+    name = str(args.get("name", "")).strip()
+    if not name:
+        return None
+    if action == "add":
+        strength = str(args.get("strength") or "").strip()
+        prn = " as needed" if args.get("as_needed") else ""
+        phrase = f"add medication {name} {strength}{prn}".strip()
+    elif action == "stop":
+        phrase = f"stopped medication {name}"
+    else:
+        phrase = f"remove medication {name}"
+    ability = await handle_medication_command(db, user_id, phrase)
+    return _unwrap(ability, action=action, name=name)
+
+
+async def add_medication(db, user_id, args, _session_id) -> dict | None:
+    return await _medication("add", db, user_id, args)
+
+
+async def stop_medication(db, user_id, args, _session_id) -> dict | None:
+    return await _medication("stop", db, user_id, args)
+
+
+async def remove_medication(db, user_id, args, _session_id) -> dict | None:
+    return await _medication("remove", db, user_id, args)

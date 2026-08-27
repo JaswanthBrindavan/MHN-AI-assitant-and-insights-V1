@@ -36,6 +36,9 @@ EXECUTORS = {
     "get_family_members": executors.get_family_members,
     "get_condition_guidance": executors.get_condition_guidance,
     "lookup_medicine": executors.lookup_medicine,
+    "add_medication": executors.add_medication,
+    "stop_medication": executors.stop_medication,
+    "remove_medication": executors.remove_medication,
     "analyze_image": executors.analyze_image,
 }
 

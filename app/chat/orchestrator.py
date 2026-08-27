@@ -39,6 +39,7 @@ from app.chat.data_handlers import (
     handle_doctor_consult_query,
     handle_document_query,
     handle_family_list_query,
+    handle_medication_command,
     handle_metric_query,
     handle_report_param_ask,
     handle_section_detail_query,
@@ -514,6 +515,9 @@ async def _dispatch(
                 ability = await handle_value_check(db, user_id, message, session_id)
                 if ability is None:
                     ability = await handle_tracker_add(db, user_id, message)
+                if ability is None:
+                    # An explicit add/stop/remove of a medication → mhn-spring.
+                    ability = await handle_medication_command(db, user_id, message)
                 if ability is None:
                     # AFTER tracker_add: "log 2 glasses of water" and "how much
                     # water did I drink" share every noun and differ only in

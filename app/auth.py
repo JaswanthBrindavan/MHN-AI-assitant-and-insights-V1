@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
+from contextvars import ContextVar
 from uuid import UUID
 
 from fastapi import Header, HTTPException, status
@@ -31,6 +32,34 @@ from app.config import get_settings
 
 # Stable dev identity used when AUTH_ENABLED=false and no header is supplied.
 DEV_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+# The raw end-user JWT for the current request, captured at the API layer so a
+# server-to-server call to mhn-spring can act AS the reader. Spring has no
+# service-token path — its only auth filter parses a user JWT and loads THAT
+# user (JwtAuthenticationFilter) — so a per-user write must present the
+# reader's own token. None outside a request, or when the caller reached Davi
+# via the service-token path (there is no user JWT to forward).
+_current_user_jwt: ContextVar[str | None] = ContextVar(
+    "current_user_jwt", default=None
+)
+
+
+def set_current_user_jwt(authorization: str | None) -> None:
+    """Stash the request's bearer token (JWT only, minus the scheme)."""
+    token: str | None = None
+    if authorization and authorization.lower().startswith("bearer "):
+        candidate = authorization.split(" ", 1)[1].strip()
+        # Do not forward Davi's OWN service token (service-to-server path):
+        # it is not a user JWT and Spring would reject it anyway.
+        settings = get_settings()
+        if candidate and candidate != settings.service_token:
+            token = candidate
+    _current_user_jwt.set(token)
+
+
+def current_user_jwt() -> str | None:
+    """The reader's JWT for outbound Spring calls, or None when unavailable."""
+    return _current_user_jwt.get()
 
 
 def _hmac_key(settings) -> str | bytes:

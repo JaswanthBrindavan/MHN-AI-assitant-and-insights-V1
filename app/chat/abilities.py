@@ -839,3 +839,116 @@ def parse_tracker_query(message: str) -> TrackerQuery | None:
         if re.search(pattern, low):
             return TrackerQuery(source=source, key=key, period=_tracker_period(low))
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Medication commands ("add metformin 500mg", "stopped my amoxicillin",
+# "remove atorvastatin") — the write goes to mhn-spring, never Davi's DB.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class MedicationCommand:
+    action: str  # "add" | "stop" | "remove"
+    name: str
+    strength: str | None = None  # "500 mg", "10mg"
+    is_prn: bool = False
+
+
+# Verb → action. Stop and complete/finish are the same thing to Spring (the
+# course ends); remove/delete erases it. "add/start/began taking" opens one.
+_MED_ADD_RE = re.compile(
+    r"\b(?:add|start(?:ed)?|began|begin|log|record|put me on|now (?:on|taking)|"
+    r"prescribed)\b",
+    re.IGNORECASE,
+)
+_MED_STOP_RE = re.compile(
+    r"\b(?:stop(?:ped)?|complet(?:e|ed)|finish(?:ed)?|done with|"
+    r"came off|got off|no longer (?:on|taking)|ended)\b",
+    re.IGNORECASE,
+)
+_MED_REMOVE_RE = re.compile(
+    r"\b(?:remove|delete|take (?:it |this )?off (?:my )?list|"
+    r"get rid of|clear)\b",
+    re.IGNORECASE,
+)
+# A medication signal must be present so "stop worrying" / "add sugar" never
+# parse as med commands: either a context word, or a real dose unit (mg/mcg/
+# ml/iu — NOT bare "units", which alcohol uses). The parser stays conservative
+# on purpose; the agentic engine's model handles the fuzzier phrasings
+# ("I stopped my amoxicillin") the deterministic path deliberately skips.
+_MED_CONTEXT_RE = re.compile(
+    r"\b(?:medication|medicine|med|meds|tablet|tablets|pill|pills|capsule|"
+    r"capsules|drug|dose|course|syrup|injection)\b",
+    re.IGNORECASE,
+)
+_DOSE_UNIT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s?(?:mg|mcg|ml|iu)\b", re.IGNORECASE
+)
+# "metformin 500 mg", "10mg atorvastatin" — strength is optional.
+_STRENGTH_RE = re.compile(
+    r"\b(\d+(?:\.\d+)?)\s?(mg|mcg|g|ml|iu|units?)\b", re.IGNORECASE
+)
+# The drug name: a word (optionally hyphenated) after the verb, before a
+# strength/frequency clause. Deliberately conservative — a real medicine name
+# is a single token here; multi-word brands are matched by the DB resolve step
+# when stopping/removing.
+_MED_NAME_RE = re.compile(
+    r"\b(?:my |the |this )?([a-z][a-z0-9\-]{2,40})\b", re.IGNORECASE
+)
+_MED_STOPWORDS = frozenset({
+    "add", "start", "started", "began", "begin", "log", "record", "stop",
+    "stopped", "complete", "completed", "finish", "finished", "remove",
+    "delete", "taking", "take", "took", "put", "now", "prescribed", "done",
+    "came", "got", "off", "longer", "ended", "get", "rid", "clear", "medication",
+    "medicine", "med", "meds", "tablet", "tablets", "pill", "pills", "capsule",
+    "capsules", "drug", "dose", "course", "syrup", "injection", "the", "this",
+    "that", "my", "for", "and", "with", "daily", "twice", "once", "every",
+    "morning", "night", "evening", "needed", "prn",
+})
+
+
+def _med_name(message: str, strength_match: re.Match[str] | None) -> str | None:
+    """First plausible drug-name token that is not a command/stop word."""
+    # Search the whole message; the strength (if any) marks a natural end but a
+    # name can also follow it ("500mg of metformin").
+    for m in _MED_NAME_RE.finditer(message):
+        token = m.group(1)
+        low = token.lower()
+        if low in _MED_STOPWORDS or low.isdigit():
+            continue
+        # Skip a pure unit token that the strength regex owns.
+        if re.fullmatch(r"mg|mcg|ml|iu|units?|g", low):
+            continue
+        return token
+    return None
+
+
+def parse_medication_command(message: str) -> MedicationCommand | None:
+    """Parse an add/stop/remove medication instruction, or None.
+
+    Requires BOTH an action verb AND a medication-context word, so ordinary
+    talk ("stop worrying", "tell me about metformin") never matches. "tell me
+    about X" has no action verb; "I take metformin" (bare statement) is left to
+    the model — only an explicit add/stop/remove is a command.
+    """
+    if not (_MED_CONTEXT_RE.search(message) or _DOSE_UNIT_RE.search(message)):
+        return None
+    if _MED_REMOVE_RE.search(message):
+        action = "remove"
+    elif _MED_STOP_RE.search(message):
+        action = "stop"
+    elif _MED_ADD_RE.search(message):
+        action = "add"
+    else:
+        return None
+    strength_match = _STRENGTH_RE.search(message)
+    name = _med_name(message, strength_match)
+    if name is None:
+        return None
+    strength = None
+    if strength_match:
+        strength = f"{strength_match.group(1)} {strength_match.group(2).lower()}"
+    is_prn = bool(re.search(r"\bas needed\b|\bprn\b|\bwhen (?:needed|required)\b",
+                            message, re.IGNORECASE))
+    return MedicationCommand(
+        action=action, name=name, strength=strength, is_prn=is_prn
+    )

@@ -231,6 +231,53 @@ ANALYZE_IMAGE = ToolSpec(
 )
 
 
+ADD_MEDICATION = ToolSpec(
+    name="add_medication",
+    description=(
+        "Record that the reader has STARTED a medication (they say 'add', "
+        "'started', 'now on', 'prescribed'). Writes to their medication list in "
+        "the app. Do NOT call this when they only mention a medicine or ask "
+        "about one — only when they are telling you to add it. Confirm back what "
+        "was added; if it could not be saved, say so, never pretend."
+    ),
+    input_schema=_obj(
+        {
+            "name": {"type": "string", "description": "Medicine name, e.g. 'metformin'."},
+            "strength": {"type": "string", "description": "e.g. '500 mg'. Optional."},
+            "as_needed": {"type": "boolean", "description": "True for PRN / as-needed."},
+        },
+        ["name"],
+    ),
+)
+
+STOP_MEDICATION = ToolSpec(
+    name="stop_medication",
+    description=(
+        "Mark a medication the reader is on as STOPPED or COMPLETED (they say "
+        "'stopped', 'finished', 'completed', 'no longer taking'). It stays in "
+        "their history but is no longer active. Confirm back; if there was no "
+        "active course by that name, say so."
+    ),
+    input_schema=_obj(
+        {"name": {"type": "string", "description": "Medicine name to stop."}},
+        ["name"],
+    ),
+)
+
+REMOVE_MEDICATION = ToolSpec(
+    name="remove_medication",
+    description=(
+        "Remove a medication from the reader's list entirely (they say 'remove', "
+        "'delete', 'take it off my list'). Confirm back; if there was nothing by "
+        "that name, say so."
+    ),
+    input_schema=_obj(
+        {"name": {"type": "string", "description": "Medicine name to remove."}},
+        ["name"],
+    ),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_LATEST_METRIC,
     GET_REPORT_PARAMETER,
@@ -241,5 +288,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_FAMILY_MEMBERS,
     GET_CONDITION_GUIDANCE,
     LOOKUP_MEDICINE,
+    ADD_MEDICATION,
+    STOP_MEDICATION,
+    REMOVE_MEDICATION,
     ANALYZE_IMAGE,
 )
