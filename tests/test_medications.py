@@ -90,7 +90,7 @@ async def test_add_course_forwards_user_jwt():
 
     async with _client(handler) as c:
         res = await med.add_course(USER, "metformin", strength="500 mg", client=c)
-    assert res.ok and res.course.tracking_id == 7
+    assert res.ok and res.course is not None and res.course.tracking_id == 7
     assert seen["auth"] == "Bearer user-jwt-123"  # the READER's token, forwarded
     assert seen["path"] == "/medicine/courses"
     import json
@@ -125,7 +125,7 @@ async def test_stop_resolves_name_then_stops():
 
     async with _client(handler) as c:
         res = await med.stop_course(USER, "amoxicillin", client=c)
-    assert res.ok and res.course.tracking_id == 3
+    assert res.ok and res.course is not None and res.course.tracking_id == 3
 
 
 async def test_stop_not_found():
