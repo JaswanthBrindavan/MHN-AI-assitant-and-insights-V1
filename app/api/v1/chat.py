@@ -8,7 +8,7 @@ import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -23,7 +23,7 @@ from app.api.v1.schemas import (
     ChatUploadResponse,
     UploadedDocumentInfo,
 )
-from app.auth import authorize_user, get_current_user_id
+from app.auth import authorize_user, get_current_user_id, set_current_user_jwt
 from app.chat.conversation import add_message, ensure_session, maybe_compact
 from app.chat.orchestrator import handle_chat
 from app.chat.replies import (
@@ -68,9 +68,13 @@ async def chat(
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
+    authorization: str | None = Header(default=None),
 ) -> ChatResponse:
     user_id = payload.user_id or current_user
     authorize_user(user_id, current_user)
+    # Capture the reader's JWT so data-write abilities (medications, …) can act
+    # AS the reader against mhn-spring, which has no service-token path.
+    set_current_user_jwt(authorization)
 
     result = await handle_chat(
         db, user_id, payload.message, provider, session_id=payload.session_id

@@ -19,6 +19,7 @@ from app.charts.svg import chart_payload
 from app.chat.abilities import (
     METRIC_REGISTRY,
     DocumentQuery,
+    MedicationCommand,
     MetricQuery,
     StatedValue,
     SummaryQuery,
@@ -28,6 +29,7 @@ from app.chat.abilities import (
     parse_doctor_consult_query,
     parse_document_query_fuzzy,
     parse_family_list_query,
+    parse_medication_command,
     parse_metric_query,
     parse_report_param_ask,
     parse_section_detail_query,
@@ -1529,3 +1531,74 @@ async def handle_tracker_query(
             "period": query.period,
         },
     }
+
+
+# --------------------------------------------------------------------------- #
+# Medication commands — the write is mhn-spring's (add/stop/remove a course)
+# --------------------------------------------------------------------------- #
+# Copy that never CONFIRMS a save that did not happen: a write failure says so.
+_MED_UNAVAILABLE = (
+    "I can't update your medications from here right now. You can add or "
+    "change them in the Medications section of the app."
+)
+
+
+async def handle_medication_command(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """"Add metformin 500 mg" / "stopped my amoxicillin" / "remove atorvastatin".
+
+    Calls mhn-spring's MedicineController AS the reader (forwarded JWT); Davi
+    never writes the row. Returns None only when the message is not a
+    medication command — a command that cannot be completed returns a reply
+    that says so, so the model is never left to invent a false confirmation.
+    """
+    cmd: MedicationCommand | None = parse_medication_command(message)
+    if cmd is None:
+        return None
+    from app.medicines.service import add_course, delete_course, stop_course
+
+    if cmd.action == "add":
+        result = await add_course(
+            user_id, cmd.name, strength=cmd.strength, is_prn=cmd.is_prn
+        )
+        verb = "add"
+    elif cmd.action == "stop":
+        result = await stop_course(user_id, cmd.name)
+        verb = "stop"
+    else:
+        result = await delete_course(user_id, cmd.name)
+        verb = "remove"
+
+    prov = {"path": "medication_command", "action": cmd.action,
+            "name": cmd.name, "ok": result.ok, "reason": result.reason}
+
+    if result.ok:
+        shown = (result.course.name if result.course and result.course.name
+                 else cmd.name)
+        strength = f" {cmd.strength}" if (cmd.action == "add" and cmd.strength) else ""
+        if verb == "add":
+            reply = (f"Added {shown}{strength} to your medications. You can see "
+                     "it in the Medications section.")
+        elif verb == "stop":
+            reply = (f"Marked {shown} as stopped. It will no longer show as an "
+                     "active medication.")
+        else:
+            reply = f"Removed {shown} from your medications."
+        return {"reply": reply, "action": "medication_updated", "provenance": prov}
+
+    # Not completed — be honest about which failure it was.
+    if result.reason in ("not_configured", "no_token"):
+        reply = _MED_UNAVAILABLE
+    elif result.reason == "not_found":
+        reply = (f"I couldn't find an active '{cmd.name}' in your medications, "
+                 "so there was nothing to change. You can check the list in the "
+                 "Medications section.")
+    elif result.reason == "ambiguous":
+        names = ", ".join(c.name for c in result.courses[:4])
+        reply = (f"You have more than one medication matching '{cmd.name}' "
+                 f"({names}). Which one did you mean?")
+    else:
+        reply = ("I couldn't update that just now — please try again in a "
+                 "moment, or use the Medications section of the app.")
+    return {"reply": reply, "action": "none", "provenance": prov}
