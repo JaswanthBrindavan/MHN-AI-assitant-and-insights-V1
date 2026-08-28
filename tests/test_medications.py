@@ -300,3 +300,31 @@ async def test_courses_parse_springs_real_field_names():
         res = await med.stop_course(USER, "insulin", client=c)
     assert res.ok and res.course is not None
     assert res.course.tracking_id == 11
+
+
+async def test_add_reply_never_doubles_a_bare_number_strength(
+    db_session, monkeypatch,
+):
+    """Live bug: confirming "add dolo 650" produced "Added dolo 650 650" —
+    the reply re-appended a strength the name already ends with."""
+    from app.chat.data_handlers import perform_medication_write
+
+    async def _ok(user_id, name, **kw):
+        return med.MedResult(
+            ok=True, course=med.Course(tracking_id=9, name="dolo 650"))
+
+    monkeypatch.setattr(med, "add_course", _ok)
+    r = await perform_medication_write(
+        db_session, USER, "add", "dolo 650", strength="650", is_prn=True)
+    assert "dolo 650 650" not in r["reply"]
+    assert "Added dolo 650, as needed" in r["reply"]
+
+    # A unit-bearing strength on a bare name still shows.
+    async def _ok2(user_id, name, **kw):
+        return med.MedResult(
+            ok=True, course=med.Course(tracking_id=10, name="Metformin"))
+
+    monkeypatch.setattr(med, "add_course", _ok2)
+    r2 = await perform_medication_write(
+        db_session, USER, "add", "metformin", strength="500 mg", is_prn=True)
+    assert "Metformin 500 mg" in r2["reply"]
