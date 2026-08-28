@@ -1543,44 +1543,60 @@ _MED_UNAVAILABLE = (
 )
 
 
-async def handle_medication_command(
-    db: AsyncSession, user_id: uuid.UUID, message: str
-) -> dict | None:
-    """"Add metformin 500 mg" / "stopped my amoxicillin" / "remove atorvastatin".
+_SLOT_WORDS = {"M": "morning", "A": "afternoon", "E": "evening", "N": "night"}
+_TIMES_WORD = {1: "once", 2: "twice", 3: "three times", 4: "four times"}
 
-    Calls mhn-spring's MedicineController AS the reader (forwarded JWT); Davi
-    never writes the row. Returns None only when the message is not a
-    medication command — a command that cannot be completed returns a reply
-    that says so, so the model is never left to invent a false confirmation.
+
+def _schedule_phrase(*, is_prn: bool, schedule_pattern: str | None) -> str:
+    """A human description of the dosing, for an honest confirmation reply."""
+    if is_prn or not schedule_pattern:
+        return "as needed"
+    slots = [s for s in schedule_pattern if s in _SLOT_WORDS]
+    if not slots:
+        return "as needed"
+    when = " and ".join(_SLOT_WORDS[s] for s in slots)
+    times = _TIMES_WORD.get(len(slots), f"{len(slots)} times")
+    return f"{times} daily ({when})"
+
+
+async def perform_medication_write(
+    db: AsyncSession, user_id: uuid.UUID, action: str, name: str, *,
+    strength: str | None = None, is_prn: bool = False,
+    schedule_pattern: str | None = None, day_pattern: str = "daily",
+) -> dict:
+    """Do one medication write AS the reader and return a validator-safe reply.
+
+    The structured entry point shared by the deterministic parser (legacy) and
+    the agentic add/stop/remove tools. Davi never writes the row — it calls
+    mhn-spring's MedicineController. A write that does not land is reported
+    honestly, so the model is never left to invent a false confirmation.
     """
-    cmd: MedicationCommand | None = parse_medication_command(message)
-    if cmd is None:
-        return None
     from app.medicines.service import add_course, delete_course, stop_course
 
-    if cmd.action == "add":
+    if action == "add":
         result = await add_course(
-            user_id, cmd.name, strength=cmd.strength, is_prn=cmd.is_prn
+            user_id, name, strength=strength, is_prn=is_prn,
+            schedule_pattern=schedule_pattern, day_pattern=day_pattern,
         )
-        verb = "add"
-    elif cmd.action == "stop":
-        result = await stop_course(user_id, cmd.name)
-        verb = "stop"
+    elif action == "stop":
+        result = await stop_course(user_id, name)
     else:
-        result = await delete_course(user_id, cmd.name)
-        verb = "remove"
+        result = await delete_course(user_id, name)
 
-    prov = {"path": "medication_command", "action": cmd.action,
-            "name": cmd.name, "ok": result.ok, "reason": result.reason}
+    prov = {"path": "medication_command", "action": action,
+            "name": name, "ok": result.ok, "reason": result.reason}
 
     if result.ok:
         shown = (result.course.name if result.course and result.course.name
-                 else cmd.name)
-        strength = f" {cmd.strength}" if (cmd.action == "add" and cmd.strength) else ""
-        if verb == "add":
-            reply = (f"Added {shown}{strength} to your medications. You can see "
-                     "it in the Medications section.")
-        elif verb == "stop":
+                 else name)
+        if action == "add":
+            dose = f" {strength}" if strength else ""
+            sched = _schedule_phrase(
+                is_prn=is_prn, schedule_pattern=schedule_pattern
+            )
+            reply = (f"Added {shown}{dose}, {sched}, to your medications. You "
+                     "can see it in the Medications section.")
+        elif action == "stop":
             reply = (f"Marked {shown} as stopped. It will no longer show as an "
                      "active medication.")
         else:
@@ -1591,14 +1607,33 @@ async def handle_medication_command(
     if result.reason in ("not_configured", "no_token"):
         reply = _MED_UNAVAILABLE
     elif result.reason == "not_found":
-        reply = (f"I couldn't find an active '{cmd.name}' in your medications, "
+        reply = (f"I couldn't find an active '{name}' in your medications, "
                  "so there was nothing to change. You can check the list in the "
                  "Medications section.")
     elif result.reason == "ambiguous":
         names = ", ".join(c.name for c in result.courses[:4])
-        reply = (f"You have more than one medication matching '{cmd.name}' "
+        reply = (f"You have more than one medication matching '{name}' "
                  f"({names}). Which one did you mean?")
     else:
         reply = ("I couldn't update that just now — please try again in a "
                  "moment, or use the Medications section of the app.")
     return {"reply": reply, "action": "none", "provenance": prov}
+
+
+async def handle_medication_command(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """"Add metformin 500 mg" / "stopped my amoxicillin" / "remove atorvastatin".
+
+    The legacy deterministic path: parse the phrase, then perform the write.
+    Returns None only when the message is not a medication command. The agentic
+    engine reaches the same writes through the add/stop/remove tools, which pass
+    structured frequency data ``perform_medication_write`` accepts directly.
+    """
+    cmd: MedicationCommand | None = parse_medication_command(message)
+    if cmd is None:
+        return None
+    return await perform_medication_write(
+        db, user_id, cmd.action, cmd.name,
+        strength=cmd.strength, is_prn=cmd.is_prn,
+    )

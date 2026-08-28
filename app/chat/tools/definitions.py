@@ -237,14 +237,31 @@ ADD_MEDICATION = ToolSpec(
         "Record that the reader has STARTED a medication (they say 'add', "
         "'started', 'now on', 'prescribed'). Writes to their medication list in "
         "the app. Do NOT call this when they only mention a medicine or ask "
-        "about one — only when they are telling you to add it. Confirm back what "
-        "was added; if it could not be saved, say so, never pretend."
+        "about one.\n"
+        "BEFORE calling, you MUST know how often they take it — how many times a "
+        "day, or whether it is as-needed. If they haven't said, ASK; do not "
+        "guess a frequency. Then CONFIRM the name, strength and frequency back "
+        "to them in one short question ('Add Metformin 500 mg, twice a day — "
+        "shall I add it?') and only call this tool after they say yes. If it "
+        "could not be saved, say so plainly; never pretend it was added."
     ),
     input_schema=_obj(
         {
             "name": {"type": "string", "description": "Medicine name, e.g. 'metformin'."},
             "strength": {"type": "string", "description": "e.g. '500 mg'. Optional."},
-            "as_needed": {"type": "boolean", "description": "True for PRN / as-needed."},
+            "times_per_day": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4,
+                "description": (
+                    "How many times a day, for a scheduled medication (1-4). "
+                    "Omit when it is as-needed."
+                ),
+            },
+            "as_needed": {
+                "type": "boolean",
+                "description": "True for PRN / as-needed (no fixed daily schedule).",
+            },
         },
         ["name"],
     ),

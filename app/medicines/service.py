@@ -157,12 +157,21 @@ async def list_courses(
 
 async def add_course(
     user_id: uuid.UUID, name: str, *, strength: str | None = None,
-    is_prn: bool = False, client: httpx.AsyncClient | None = None,
+    is_prn: bool = False, schedule_pattern: str | None = None,
+    day_pattern: str = "daily", client: httpx.AsyncClient | None = None,
 ) -> MedResult:
+    """Create a course. Spring needs EITHER isPrn OR a schedulePattern+dayPattern:
+    its non-PRN path calls MedicineSchedule.parsePattern(schedulePattern) and
+    throws on a null, so a schedule-less, non-PRN payload 500s. When neither a
+    schedule nor as-needed is given we fall back to as-needed, so a write is
+    always valid — the reader can set a schedule in the app."""
     payload: dict = {"name": name[:255]}
     if strength:
         payload["strength"] = strength[:100]
-    if is_prn:
+    if not is_prn and schedule_pattern:
+        payload["schedulePattern"] = schedule_pattern[:4]
+        payload["dayPattern"] = day_pattern
+    else:
         payload["isPrn"] = True
     got = await _request("POST", _COURSES, user_id, json=payload, client=client)
     if got is None:

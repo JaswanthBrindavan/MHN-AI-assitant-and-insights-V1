@@ -95,7 +95,45 @@ async def test_add_course_forwards_user_jwt():
     assert seen["path"] == "/medicine/courses"
     import json
     body = json.loads(seen["body"])
-    assert body == {"name": "metformin", "strength": "500 mg"}
+    # No schedule and not as-needed given -> defaults to as-needed so Spring's
+    # non-PRN path (which needs a schedulePattern) never 500s.
+    assert body == {"name": "metformin", "strength": "500 mg", "isPrn": True}
+
+
+async def test_add_course_scheduled_sends_pattern_not_prn():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.read().decode()
+        return httpx.Response(201, json={"trackingId": 8, "name": "Metformin"})
+
+    async with _client(handler) as c:
+        res = await med.add_course(
+            USER, "metformin", strength="500 mg",
+            schedule_pattern="ME", client=c,
+        )
+    assert res.ok
+    import json
+    body = json.loads(seen["body"])
+    assert body == {
+        "name": "metformin", "strength": "500 mg",
+        "schedulePattern": "ME", "dayPattern": "daily",
+    }
+    assert "isPrn" not in body  # a scheduled course is not as-needed
+
+
+async def test_add_course_as_needed_sends_prn():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = request.read().decode()
+        return httpx.Response(201, json={"trackingId": 9, "name": "Paracetamol"})
+
+    async with _client(handler) as c:
+        await med.add_course(USER, "paracetamol", is_prn=True, client=c)
+    import json
+    body = json.loads(seen["body"])
+    assert body == {"name": "paracetamol", "isPrn": True}
 
 
 async def test_no_token_means_no_write():
@@ -190,3 +228,52 @@ async def test_handler_not_found_is_honest(db_session, monkeypatch):
 
 async def test_handler_none_for_non_command(db_session):
     assert await handle_medication_command(db_session, USER, "tell me about metformin") is None
+
+
+# --------------------------------------------------------------------------- #
+# Agentic tool — structured frequency maps to a valid schedule, and confirms it
+# --------------------------------------------------------------------------- #
+def _capture_add(seen: dict):
+    async def _add(user_id, name, **kw):
+        seen.update(kw)
+        seen["name"] = name
+        return med.MedResult(ok=True, course=med.Course(tracking_id=1, name=name))
+    return _add
+
+
+async def test_tool_add_maps_times_per_day_to_slots(db_session, monkeypatch):
+    from app.chat.tools import executors
+
+    seen: dict = {}
+    monkeypatch.setattr(med, "add_course", _capture_add(seen))
+    out = await executors.add_medication(
+        db_session, USER,
+        {"name": "metformin", "strength": "500 mg", "times_per_day": 2}, None,
+    )
+    assert out is not None
+    assert seen["schedule_pattern"] == "ME"  # twice a day -> morning + evening
+    assert seen["is_prn"] is False
+    assert "twice daily (morning and evening)" in out["deterministic_reply"]
+
+
+async def test_tool_add_as_needed_maps_to_prn(db_session, monkeypatch):
+    from app.chat.tools import executors
+
+    seen: dict = {}
+    monkeypatch.setattr(med, "add_course", _capture_add(seen))
+    out = await executors.add_medication(
+        db_session, USER, {"name": "paracetamol", "as_needed": True}, None
+    )
+    assert out is not None
+    assert seen["is_prn"] is True and seen["schedule_pattern"] is None
+    assert "as needed" in out["deterministic_reply"]
+
+
+async def test_tool_add_unknown_frequency_defaults_to_prn(db_session, monkeypatch):
+    """A safety net: no frequency given still yields a VALID course, never a 500."""
+    from app.chat.tools import executors
+
+    seen: dict = {}
+    monkeypatch.setattr(med, "add_course", _capture_add(seen))
+    await executors.add_medication(db_session, USER, {"name": "metformin"}, None)
+    assert seen["is_prn"] is True and seen["schedule_pattern"] is None
