@@ -99,5 +99,15 @@ async def test_no_user_identifier_ever_reaches_a_label(client):
     )
     body = (await client.get("/api/v1/metrics")).text
     assert user_id not in body
-    assert "117" not in body
-    assert "sugar" not in body
+    # Check metric NAMES AND LABELS only — the sample VALUE at the end of a
+    # line is a count, and under random test ordering a counter legitimately
+    # accumulated to exactly 117, matching the canary and failing main's CI.
+    # PHI in a numeric sample value is not a failure mode this test can
+    # meaningfully police; labels and names are.
+    names_and_labels = "\n".join(
+        line.rsplit(" ", 1)[0]
+        for line in body.splitlines()
+        if line and not line.startswith("#")
+    )
+    assert "117" not in names_and_labels
+    assert "sugar" not in names_and_labels
