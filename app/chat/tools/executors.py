@@ -26,13 +26,13 @@ from app.chat.context import build_patient_context
 from app.chat.data_handlers import (
     handle_document_query,
     handle_family_list_query,
-    handle_medication_command,
     handle_metric_query,
     handle_report_param_ask,
     handle_suggestion_query,
     handle_summary_query,
     handle_tracker_add,
     handle_value_check,
+    perform_medication_write,
 )
 from app.coredata.service import document_owner
 from app.drugs.service import build_drug_reply, find_drug, find_substitutes
@@ -255,21 +255,34 @@ async def analyze_image(
     }
 
 
+# Doses/day -> the slot letters Spring's schedulePattern expects (M/A/E/N).
+_SLOTS_BY_COUNT = {1: "M", 2: "ME", 3: "MAE", 4: "MAEN"}
+
+
 async def _medication(action: str, db, user_id, args) -> dict | None:
-    """Shared executor for the three medication tools. Builds a phrase the
-    deterministic handler parses, so both engines run identical logic."""
+    """Shared executor for the three medication tools. Routes structured args
+    straight to the write, so a scheduled add carries its frequency (the model
+    gathers and confirms it before calling)."""
     name = str(args.get("name", "")).strip()
     if not name:
         return None
+    strength: str | None = None
+    is_prn = False
+    schedule_pattern: str | None = None
     if action == "add":
-        strength = str(args.get("strength") or "").strip()
-        prn = " as needed" if args.get("as_needed") else ""
-        phrase = f"add medication {name} {strength}{prn}".strip()
-    elif action == "stop":
-        phrase = f"stopped medication {name}"
-    else:
-        phrase = f"remove medication {name}"
-    ability = await handle_medication_command(db, user_id, phrase)
+        strength = str(args.get("strength") or "").strip() or None
+        tpd = args.get("times_per_day")
+        if args.get("as_needed"):
+            is_prn = True
+        elif isinstance(tpd, int) and not isinstance(tpd, bool) and 1 <= tpd <= 4:
+            schedule_pattern = _SLOTS_BY_COUNT[tpd]
+        else:
+            # Frequency unknown: a valid as-needed course, never a 500.
+            is_prn = True
+    ability = await perform_medication_write(
+        db, user_id, action, name,
+        strength=strength, is_prn=is_prn, schedule_pattern=schedule_pattern,
+    )
     return _unwrap(ability, action=action, name=name)
 
 
