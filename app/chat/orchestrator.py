@@ -40,7 +40,6 @@ from app.chat.data_handlers import (
     handle_doctor_consult_query,
     handle_document_query,
     handle_family_list_query,
-    handle_medication_command,
     handle_metric_query,
     handle_report_param_ask,
     handle_section_detail_query,
@@ -75,8 +74,10 @@ from app.config import get_settings
 from app.coredata.service import allergy_warning, medication_allergies
 from app.drugs.service import (
     NON_DRUG_TERMS,
+    build_dose_refusal,
     build_drug_reply,
     build_interaction_reply,
+    extract_dose_query,
     extract_drug_query_term,
     extract_interaction_query,
     find_drug,
@@ -363,6 +364,54 @@ async def _interaction_refusal(
     )
 
 
+async def _dosing_refusal(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider: LLMProvider,
+    session_id: uuid.UUID | None,
+    risk: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult | None:
+    """The deterministic reply to a dose/dosage question. None if not asked.
+
+    SHARED across both engines, like the interaction refusal and for the same
+    reason: there is no dosing dataset, so the only outputs possible are a
+    deterministic pharmacist/label routing or a model-invented mg figure —
+    and a hallucinated pediatric dose is the most dangerous sentence this
+    product could emit. Fires on phrasing; NON_DRUG_TERMS keeps "how much
+    water should I drink" on its normal path.
+    """
+    if risk != NONE:
+        return None  # the triage floor always wins
+    try:
+        term = extract_dose_query(message)
+    except Exception:  # noqa: BLE001 — a parser must never break a reply
+        logger.warning("dose extraction failed; continuing", exc_info=True)
+        record_fail_open("drug_dosing")
+        return None
+    if term is None or (term and term.lower() in NON_DRUG_TERMS):
+        return None
+
+    t("Dose question",
+      "deterministic check-the-label / ask-a-pharmacist reply "
+      "(no dosing data, no LLM)")
+    await _write_receipt(
+        db, user_id=user_id, session_id=session_id,
+        message=message, model_name=provider.model_name,
+    )
+    return ChatResult(
+        response_message=build_dose_refusal(term),
+        risk_level=risk,
+        recommended_action="discuss_with_prescriber",
+        provenance={"path": "drug_dose_query", "term": term or None},
+        language=lang,
+        trace=trace,
+    )
+
+
 async def _dispatch(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -515,6 +564,16 @@ async def _dispatch(
     if combination is not None:
         return combination
 
+    # 3.45) Dose/dosage questions. SHARED for the same reason as 3.4: no
+    #       dosing dataset exists, so a model answer would be invented — and a
+    #       hallucinated pediatric dose is the worst sentence this product
+    #       could produce.
+    dosing = await _dosing_refusal(
+        db, user_id, message, provider, session_id, risk, lang, trace, t
+    )
+    if dosing is not None:
+        return dosing
+
     # 3.5) Engine selection. Everything above — the triage floor, the scope
     #      guard, the emergency directive, the canned conversational replies
     #      and the drug-combination refusal — is SHARED and has already run,
@@ -543,9 +602,13 @@ async def _dispatch(
                 ability = await handle_value_check(db, user_id, message, session_id)
                 if ability is None:
                     ability = await handle_tracker_add(db, user_id, message)
-                if ability is None:
-                    # An explicit add/stop/remove of a medication → mhn-spring.
-                    ability = await handle_medication_command(db, user_id, message)
+                # Medication add/stop/remove is NOT handled here any more: the
+                # deterministic flow in the SHARED prologue (medication_flow)
+                # owns it on both engines, with guards this chain's regex
+                # parser never had — question framing, third-party, dose
+                # changes, conditionals, self-harm. A message that the flow
+                # RELEASED must not be re-parsed by a weaker parser: that is
+                # how "Can I stop taking my metformin?" became a real write.
                 if ability is None:
                     # AFTER tracker_add: "log 2 glasses of water" and "how much
                     # water did I drink" share every noun and differ only in

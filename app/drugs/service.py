@@ -339,22 +339,44 @@ def build_drug_reply(
 # with the generic safe fallback (a non-answer). Instead they get a dedicated
 # deterministic reply that names both items and routes to a pharmacist.
 _TERM = r"([a-z0-9][a-z0-9 \-\.]{1,60}?)"
+# Terms are bounded by punctuation or end-of-sentence, NOT end-of-message: the
+# original `$`-anchored forms were defeated by ANY trailing clause ("can I
+# take warfarin with aspirin, my head hurts") and handed the one question
+# class the codebase says can do the most harm to the LLM.
+_END = r"\s*(?:[?.!,;:]|$| (?:or|because|since|as|but|and my)\b)"
 _INTERACTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         rf"\bcan i (?:take|have|use) {_TERM} (?:and|with|along with) {_TERM}"
-        r"(?: together)?\s*[?.!]*$",
+        rf"(?: together)?{_END}",
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\bis it (?:safe|ok|okay) to (?:take|have|use|combine) {_TERM} "
-        rf"(?:and|with|along with) {_TERM}\s*[?.!]*$",
+        rf"\bis it (?:safe|ok|okay) to (?:take|have|use|combine|mix) {_TERM} "
+        rf"(?:and|with|along with) {_TERM}{_END}",
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\bdoes {_TERM} interact with {_TERM}\s*[?.!]*$", re.IGNORECASE
+        rf"\bdoes {_TERM} interact with {_TERM}{_END}", re.IGNORECASE
     ),
     re.compile(
         rf"\bcan {_TERM} (?:and|be taken with) {_TERM} be taken together\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:mix|mixing) {_TERM} (?:and|with) {_TERM}{_END}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bwhat happens if i (?:take|mix|combine) {_TERM} "
+        rf"(?:and|with|along with) {_TERM}{_END}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bis {_TERM} safe (?:with|to take with|alongside) {_TERM}{_END}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:taking|took) {_TERM} (?:and|with|along with) {_TERM} together\b",
         re.IGNORECASE,
     ),
 )
@@ -391,4 +413,97 @@ def build_interaction_reply(term_a: str, term_b: str) -> str:
         f"together. {MEDICATION_NOTE} This is general information, not "
         "medical advice for your specific situation — your doctor or "
         "pharmacist knows your context best."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Dose / dosage questions ("how much dolo can I give my child")
+# --------------------------------------------------------------------------- #
+# medicine_master carries no dosing data, and a model-invented mg figure —
+# especially a pediatric one — is the single most dangerous output class this
+# product could produce. Dose questions therefore get a deterministic
+# pharmacist/label routing, in the SHARED prologue, on both engines.
+# A drug name is 1-2 tokens (optionally a trailing number: "dolo 650") — a
+# bounded shape, not a lazy wildcard that stops at the minimum match.
+_DOSE_TERM = (r"(?:of\s+|for\s+)?"
+              r"([a-z][a-z0-9\-\.]{2,}(?:\s+[a-z0-9\-\.]{1,15})?)")
+_CHILD = (r"(?:child|children|kid|kids|baby|infant|toddler|son|daughter|"
+          r"\d+[- ]?(?:year|month|yr|mo)s?[- ]?old)")
+_DOSE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "what is the dose/dosage of X", "correct dosage for X"
+    re.compile(
+        rf"\b(?:what(?:'s| is)?|whats) (?:the )?(?:right |correct |safe |usual |recommended )?"
+        rf"dos(?:e|age)\s*{_DOSE_TERM}?\s*(?:[?.!,;:]|$)",
+        re.IGNORECASE,
+    ),
+    # "how much X can/should I take/give", "how much X for a 6 year old"
+    re.compile(
+        rf"\bhow much {_DOSE_TERM}\s*(?:can|should|do|to)?\s*"
+        rf"(?:i|we|you|one)?\s*(?:take|give|use|have)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bhow much {_DOSE_TERM}\s*for (?:a |my |an )?{_CHILD}\b",
+        re.IGNORECASE,
+    ),
+    # "how many mg/ml/tablets (of X)"
+    re.compile(
+        rf"\bhow many (?:mg|mcg|ml|tablets?|tabs?|pills?|drops?)\s*{_DOSE_TERM}?",
+        re.IGNORECASE,
+    ),
+    # "can/should I give my child X", "can I give X to my baby"
+    re.compile(
+        rf"\b(?:can|should|could) (?:i|we) give (?:my |the |a |an )?{_CHILD}"
+        r"\s+([a-z0-9][a-z0-9 \-\.]{1,40})\s*(?:[?.!,;:]|$)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:can|should|could) (?:i|we) give {_TERM} to (?:my |the |a |an )?{_CHILD}\b",
+        re.IGNORECASE,
+    ),
+    # "X dose for a child / for adults", "dolo dosage"
+    re.compile(
+        rf"\b{_TERM}\s+dos(?:e|age)\s+for\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def extract_dose_query(message: str) -> str | None:
+    """The asked-about term for a dose question; "" for a termless one
+    ("how much should I take?"); None when the message is not a dose ask."""
+    for pattern in _DOSE_PATTERNS:
+        m = pattern.search(message)
+        if m:
+            raw = (m.group(1) or "") if m.groups() else ""
+            term = raw.strip().strip("?.!,").strip()
+            term = _TERM_TRAILING_NOISE.sub("", term).strip()
+            # The 2-token shape can catch a following function word
+            # ("paracetamol can", "dolo for") — drop it.
+            parts = term.split()
+            if len(parts) == 2 and parts[1].lower() in {
+                "can", "should", "could", "for", "to", "per", "a", "the",
+                "my", "in", "with", "when", "if", "before", "after", "daily",
+                "at", "is", "be",
+            }:
+                term = parts[0]
+            # Grammar words captured by the looser shapes are not terms:
+            # "how much should I take" is a dose ask with NO named drug.
+            first = term.split()[0].lower() if term else ""
+            if first in {"should", "can", "could", "do", "does", "to", "i",
+                         "we", "you", "one", "it", "the", "a", "an", "my"}:
+                term = ""
+            return term
+    return None
+
+
+def build_dose_refusal(term: str) -> str:
+    """Deterministic, validator-safe reply for a dose question."""
+    what = f"the right amount of {term}" if term else "the right amount"
+    return (
+        f"I can't advise on {what} — safe dosing depends on age, body "
+        "weight, other conditions and other medicines, and for children it "
+        "changes with every kilogram. Please check the pack label and "
+        "confirm the dose with your pharmacist or prescriber before taking "
+        "or giving anything."
     )

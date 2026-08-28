@@ -72,9 +72,25 @@ async def test_clearing_the_memo_forces_a_recompute(db_session, engine):
     await build_patient_context(db_session, user_id)
     assert counter["n"] == 0
 
-    clear_patient_context_memo()
+    # The memo lives in db.info now, so clearing takes the session — there is
+    # no global to clear (that global served stale PHI after id() reuse).
+    clear_patient_context_memo(db_session)
     await build_patient_context(db_session, user_id)
     assert counter["n"] > 0
+
+
+async def test_memo_does_not_survive_the_session(db_session, engine):
+    """A NEW session must never see another session's memo — the id(db)
+    global once served a dead session's cached context after address reuse,
+    skipping the erasure gate."""
+    user_id = uuid.uuid4()
+    await build_patient_context(db_session, user_id)
+    assert clear_patient_context_memo(db_session) is None  # API sanity
+    # the memo is keyed inside THIS session object only
+    from app.chat.context import _MEMO_KEY
+    assert _MEMO_KEY not in db_session.info  # cleared above
+    await build_patient_context(db_session, user_id)
+    assert _MEMO_KEY in db_session.info
 
 
 async def test_a_full_turn_still_answers_correctly(db_session):

@@ -294,8 +294,40 @@ async def test_preview_absent_outside_dev(db_session, monkeypatch):
     from app.api.v1.documents import document_preview
 
     monkeypatch.setenv("APP_ENV", "prod")
+    # The startup guard refuses APP_ENV=prod with auth off / a default secret
+    # (audit fix) — satisfy it so THIS test can exercise the preview gate.
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("JWT_SECRET", "dGVzdC1zZWNyZXQtdGhhdC1pcy1sb25nLWVub3VnaA==")
     get_settings.cache_clear()
     with pytest.raises(HTTPException) as e:
         await document_preview("reports", 1, VIEWER, db_session)
     assert e.value.status_code == 404
     get_settings.cache_clear()
+
+
+def test_unsafe_prod_config_refuses_to_start(monkeypatch):
+    """APP_ENV != dev with auth off (or the default secret) must die at
+    startup — with auth off, X-User-Id IS the identity on a service sharing
+    the production database (audit critical)."""
+    import pydantic
+    import pytest as _pytest
+
+    from app.config import Settings
+
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    with _pytest.raises(pydantic.ValidationError, match="AUTH_ENABLED"):
+        Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    with _pytest.raises(pydantic.ValidationError, match="JWT_SECRET"):
+        Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
+
+    monkeypatch.setenv("JWT_SECRET", "c29tZS1yZWFsLXNlY3JldC12YWx1ZS1oZXJl")
+    Settings(_env_file=None)  # pyright: ignore[reportCallIssue]  # now valid
+
+    monkeypatch.setenv("APP_ENV", "dev")
+    monkeypatch.delenv("AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    Settings(_env_file=None)  # pyright: ignore[reportCallIssue]  # dev stays permissive for local work

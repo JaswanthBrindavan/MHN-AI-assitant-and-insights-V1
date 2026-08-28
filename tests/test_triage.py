@@ -59,9 +59,11 @@ def test_acs_co_occurrence_escalates_to_emergency():
     assert triage("chest tightness with sweating and nausea").level == EMERGENCY
 
 
-def test_chest_pain_alone_is_not_emergency():
-    # Plain chest pain with no associated feature does not hit the ACS rule.
-    assert triage("I have some chest pain").level == NONE
+def test_chest_pain_alone_is_high_not_emergency():
+    # Plain chest pain with no associated feature does not hit the ACS rule,
+    # but it is no longer NONE either: bare chest pain is a HIGH floor
+    # (audit fix — it used to sail through to scope/drug/LLM at NONE).
+    assert triage("I have some chest pain").level == HIGH
 
 
 def test_matched_terms_are_deduped_and_sorted():
