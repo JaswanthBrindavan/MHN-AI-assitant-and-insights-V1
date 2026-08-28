@@ -76,11 +76,36 @@ def test_a_prefix_clearly_under_the_minimum_is_called_a_no_op_not_borderline():
 
     Only one of them is a reason to go and measure; calling a definitive
     failure "borderline" invites someone to assume it is probably fine.
+
+    A SYNTHETIC prefix, deliberately: this test used to feed the LIVE prefix
+    and assert it was a NO-OP on Haiku 4.5, which quietly pinned the size of
+    the system prompt — the medication-tool rules grew it past the point where
+    "clearly under 4096" was still true, and the honest verdict became "too
+    close to call". The classifier is what this test owns; the live prefix
+    belongs to the deploy-model test below.
     """
-    prefix = cache_probe.measure_prefix()
-    report = cache_probe.render(prefix, "claude-haiku-4-5", None, None)
+    clearly_under = {
+        "system_chars": 3000,
+        "tools_chars": 3000,
+        "system_tokens_estimated": 1000,
+        "tools_tokens_estimated": 1000,
+        "total_tokens_estimated": 2000,  # 2000 * 1.25 = 2500 < 4096
+    }
+    report = cache_probe.render(clearly_under, "claude-haiku-4-5", None, None)
     assert "NO-OP" in report
     assert "TOO CLOSE TO CALL" not in report
+
+
+def test_the_live_prefix_still_caches_on_the_deploy_model():
+    """The invariant the app actually depends on: on claude-sonnet-5 (the
+    documented deploy model, 1024-token minimum) the REAL agentic prefix must
+    stay comfortably over the minimum even if the estimate over-counts — the
+    whole prompt-caching saving rides on it. If this fails, the prefix
+    shrank dramatically; find out why before trusting the cache."""
+    prefix = cache_probe.measure_prefix()
+    report = cache_probe.render(prefix, "claude-sonnet-5", None, None)
+    assert "comfortably above the minimum" in report
+    assert "NO-OP" not in report
 
 
 def test_a_prefix_near_the_line_says_go_and_measure():
