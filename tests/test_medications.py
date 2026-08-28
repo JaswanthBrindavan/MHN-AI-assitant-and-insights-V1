@@ -277,3 +277,26 @@ async def test_tool_add_unknown_frequency_defaults_to_prn(db_session, monkeypatc
     monkeypatch.setattr(med, "add_course", _capture_add(seen))
     await executors.add_medication(db_session, USER, {"name": "metformin"}, None)
     assert seen["is_prn"] is True and seen["schedule_pattern"] is None
+
+
+async def test_courses_parse_springs_real_field_names():
+    """Spring's CourseResponse serialises `id`, not `trackingId` (only the
+    URL path variable carries that name). Requiring trackingId made every
+    listed course parse to None — the list was always empty, so every
+    stop/remove/adherence said "couldn't find" for medications visibly on
+    the reader's list (live bug, caught by the user's app screenshot)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[
+                # the REAL Spring shape
+                {"id": 11, "name": "insulin", "isPrivate": False,
+                 "schedulePattern": "N", "stoppedAt": None},
+                {"id": 12, "name": "Dolo 650", "stoppedAt": None},
+            ])
+        assert request.url.path == "/medicine/courses/11/stop"
+        return httpx.Response(200, json={"id": 11, "name": "insulin"})
+
+    async with _client(handler) as c:
+        res = await med.stop_course(USER, "insulin", client=c)
+    assert res.ok and res.course is not None
+    assert res.course.tracking_id == 11
