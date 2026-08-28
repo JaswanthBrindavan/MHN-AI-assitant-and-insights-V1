@@ -198,7 +198,7 @@ def _name_quality(name: str) -> str:
 
 def _clean_name(raw: str) -> str:
     raw = re.sub(r"\b(?:tablet|tablets|tab|tabs|pill|pills|capsule|capsules|"
-                 r"syrup|from|to|my|the|medication|medicine|meds|list|now|anymore|"
+                 r"syrup|from|to|my|the|medications?|medicines?|meds?|lists?|now|anymore|"
                  r"already|today|yesterday|new|thanks?|thank you|please|pls|kindly|"
                  r"ok|okay|na)\b", " ",
                  raw, flags=re.I)
@@ -231,8 +231,17 @@ def _extract_name_strength(message: str, verb_re: str) -> tuple[str, str | None]
     tail = re.split(r"\b(?:once|twice|thrice|\d+\s*times?|as\s*needed|"
                     r"when needed|prn|morning|afternoon|evening|night|daily|"
                     r"a day|per day|every day)\b", tail, flags=re.I)[0]
+    # A trailing prepositional clause is DESTINATION, not name: "add dolo 650
+    # TO MY MEDICATIONS" was extracting the name "dolo 650 medications 650"
+    # (live bug) — the write then created a garbage-named course in Spring.
+    tail = re.split(r"\b(?:to|from|into|onto|off)\s+(?:my|our|the)\b",
+                    tail, flags=re.I)[0]
     name = _clean_name(tail)
-    if strength and name:
+    if (strength and name
+            # never re-append a strength the name already ends with —
+            # the bare-number branch leaves it in place ("dolo 650")
+            and not name.lower().endswith(strength.lower())
+            and strength.split()[0] not in name.split()):
         name = f"{name} {strength}".strip()
     return name, strength
 

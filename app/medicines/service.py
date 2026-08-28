@@ -209,7 +209,8 @@ async def _resolve(
                 "tablet", "tablets", "tab", "tabs", "pill", "pills",
                 "capsule", "capsules", "syrup", "drop", "drops", "injection",
                 "sachet", "sachets", "course", "dose", "medicine",
-                "medication", "med", "meds"}
+                "medicines", "medication", "medications", "med", "meds",
+                "prescription", "prescriptions", "list", "lists"}
     want_tokens = [t for t in re.split(r"[^a-z0-9]+", want)
                    if t and t not in _fillers]
     if not want_tokens:
