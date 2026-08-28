@@ -383,3 +383,18 @@ def test_the_legacy_split_says_the_same_thing_as_before():
     joined = join_system([stable, volatile])
     assert joined.startswith(stable)
     assert volatile in joined
+
+
+def test_agentic_prefix_permits_medication_record_keeping():
+    """The safety rules forbid ADVISING medication changes; the tool rules must
+    explicitly carve out RECORD-KEEPING, or the model refuses to call the
+    add/stop/remove tools (observed in production: 'I'm not able to add or
+    change medications from here')."""
+    from app.rag.prompt import build_agentic_system_prompt
+
+    stable, _ = build_agentic_system_prompt(patient_context="")
+    assert "Record-keeping is NOT medical advice" in stable
+    assert "add/stop/remove medication tools" in stable
+    # The advisory prohibition must ALSO still be present — the carve-out
+    # narrows it, it must not replace it.
+    assert "RECOMMENDING" in stable

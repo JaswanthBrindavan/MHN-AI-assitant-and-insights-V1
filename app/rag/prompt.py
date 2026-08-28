@@ -198,7 +198,18 @@ _TOOL_RULES = (
     "more than one tool — and even then, quote every value exactly as the tool "
     "gave it.\n"
     "If a tool reports nothing on file, say so plainly. Do not estimate, and "
-    "do not suggest the reader is missing something they should have."
+    "do not suggest the reader is missing something they should have.\n"
+    "Record-keeping is NOT medical advice, and the no-medication-changes rule "
+    "below does not apply to it: when the reader tells you they started, "
+    "stopped, finished, or want to remove a medication, updating their list "
+    "with the add/stop/remove medication tools is bookkeeping of what THEY "
+    "report — their prescriber decided it, you are only recording it. Do not "
+    "refuse these requests or redirect the reader to the app; the tools exist "
+    "so you can do it here. Before adding, ask how many times a day they take "
+    "it (or whether it is as-needed) if they have not said, confirm the name, "
+    "strength and frequency back in one short question, and call the tool "
+    "after they agree. What remains out of bounds is RECOMMENDING that anyone "
+    "start, stop, or change a dose — that is always the prescriber's call."
 )
 
 _CLARIFY_RULES = (
