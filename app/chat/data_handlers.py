@@ -1637,7 +1637,13 @@ async def perform_medication_write(
         shown = (result.course.name if result.course and result.course.name
                  else name)
         if action == "add":
-            dose = f" {strength}" if strength else ""
+            # Never re-append a strength the shown name already ends with —
+            # a bare-number strength lives inside the name ("dolo 650"), and
+            # the confirmation read "Added dolo 650 650" (live bug).
+            dose = (f" {strength}"
+                    if strength
+                    and not shown.lower().endswith(strength.lower())
+                    else "")
             sched = _schedule_phrase(
                 is_prn=is_prn, schedule_pattern=schedule_pattern
             )
