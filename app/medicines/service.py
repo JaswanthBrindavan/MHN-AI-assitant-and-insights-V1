@@ -185,10 +185,16 @@ async def add_course(
 
 
 async def _resolve(
-    user_id: uuid.UUID, name: str, client: httpx.AsyncClient | None
+    user_id: uuid.UUID, name: str, client: httpx.AsyncClient | None = None,
+    *, active_only: bool = True,
 ) -> MedResult:
-    """Find the active course whose name matches ``name``. Reused by stop/remove."""
-    listed = await list_courses(user_id, active_only=True, client=client)
+    """Find the course whose name matches ``name``. Reused by stop/remove.
+
+    ``active_only`` is True for STOP (you can only stop a running course) and
+    False for REMOVE (a course you already stopped must still be removable —
+    resolving remove against active-only was why 'remove X' after 'stop X'
+    reported nothing to remove)."""
+    listed = await list_courses(user_id, active_only=active_only, client=client)
     if not listed.ok:
         return listed
     want = name.strip().lower()
@@ -224,7 +230,8 @@ async def stop_course(
 async def delete_course(
     user_id: uuid.UUID, name: str, client: httpx.AsyncClient | None = None
 ) -> MedResult:
-    resolved = await _resolve(user_id, name, client)
+    # active_only=False: a stopped course is still removable.
+    resolved = await _resolve(user_id, name, client, active_only=False)
     if not resolved.ok or resolved.course is None:
         return resolved
     tid = resolved.course.tracking_id
