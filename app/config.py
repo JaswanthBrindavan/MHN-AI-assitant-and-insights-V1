@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("davi.config")
 
 
 class Settings(BaseSettings):
@@ -137,6 +141,40 @@ class Settings(BaseSettings):
     voice_base_url: str = ""
     voice_token: str = ""
     voice_timeout_seconds: float = 30.0
+
+    @model_validator(mode="after")
+    def _no_open_door_outside_dev(self) -> Settings:
+        """Refuse to start a non-dev deployment with auth off or a default
+        secret.
+
+        auth_enabled defaults to False for local work, and with auth off a
+        bare ``X-User-Id: <any uuid>`` header IS the identity — on a service
+        that shares the MHN production database, one forgotten env var would
+        let anyone read any user's chat history and profile. A misconfigured
+        deploy must die at startup, not serve.
+        """
+        if self.app_env != "dev":
+            problems = []
+            if not self.auth_enabled:
+                problems.append(
+                    "AUTH_ENABLED must be true (X-User-Id impersonation "
+                    "otherwise)"
+                )
+            if self.jwt_secret == "change-me-in-prod":
+                problems.append("JWT_SECRET is still the built-in default")
+            if problems:
+                raise ValueError(
+                    f"unsafe configuration for APP_ENV={self.app_env!r}: "
+                    + "; ".join(problems)
+                )
+        # Say which mode we are in, so a dev-auth deploy is visible in the
+        # very first log lines rather than discovered from behavior.
+        logger.info(
+            "auth mode: %s (app_env=%s)",
+            "enforced" if self.auth_enabled else "DISABLED — dev only",
+            self.app_env,
+        )
+        return self
 
 
 @lru_cache

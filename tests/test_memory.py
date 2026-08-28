@@ -53,7 +53,12 @@ def test_compact_messages_collects_sticky_and_capped():
     assert "T2DM" in s["topics"]
     assert s["open_questions"]  # the question was captured
     # timeline preserves first-mention order across flags/meds/topics.
-    assert s["timeline"][0] == "can't breathe"
+    # "can't breathe" now also trips the breathing-difficulty PATTERN label
+    # (sorted alongside the phrase), so the first entry is one of the two
+    # vocabulary rows for that same utterance.
+    assert s["timeline"][0] in ("can't breathe",
+                                "breathing difficulty (pattern)")
+    assert "can't breathe" in s["timeline"]
 
 
 def test_merge_sticky_unions_without_truncation():

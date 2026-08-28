@@ -11,7 +11,14 @@ This same vocabulary is reused by conversation compaction (one vocabulary).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+from app.triage.red_flags_i18n import (
+    I18N_EMERGENCY_PHRASES,
+    I18N_HIGH_PHRASES,
+    I18N_SELF_HARM_PHRASES,
+)
 
 # Ordered severity levels. "none" < "high" < "emergency".
 NONE = "none"
@@ -70,6 +77,23 @@ EMERGENCY_PHRASES: tuple[str, ...] = (
     "limp and blue",
     "turning blue and limp",
     "going blue and limp",
+    # Anaphylaxis (DRAFT).
+    "throat is closing",
+    "throat closing up",
+    "throat swelling up",
+    "throat is swelling shut",
+    # Overdose disclosure — needs the emergency department NOW (DRAFT). The
+    # SELF_HARM tier holds intent phrasing; a disclosed ingestion is a medical
+    # emergency first.
+    "overdose",
+    "overdosed",
+    "took too many pills",
+    "took too many tablets",
+    "took too many sleeping pills",
+    "taken too many pills",
+    "took all my pills",
+    "took all my tablets",
+    "swallowed all my pills",
     # --- Hindi / Hinglish (DRAFT — pending clinician + native-speaker review)
     "behosh",            # unconscious
     "बेहोश",
@@ -84,6 +108,12 @@ EMERGENCY_PHRASES: tuple[str, ...] = (
     "मिर्गी",
     "nabz nahi",         # no pulse
     "नब्ज़ नहीं",
+    # --- Other Indian languages, native + romanized (DRAFT — see
+    # red_flags_i18n.py; machine-authored, pending native-speaker + clinician
+    # review). Before these, the deterministic floor existed only in English
+    # and Hindi: a Telugu speaker typing "I can't breathe" in Telugu got no
+    # escalation at all.
+    *I18N_EMERGENCY_PHRASES,
 )
 
 HIGH_PHRASES: tuple[str, ...] = (
@@ -121,6 +151,18 @@ HIGH_PHRASES: tuple[str, ...] = (
     "stiff neck and fever",
     "stiff neck with fever",
     "neck stiffness and fever",
+    # Syncope reported after the fact (DRAFT) — HIGH, not EMERGENCY: the
+    # person is conscious enough to type, but a faint needs prompt review.
+    "fainted",
+    "blacked out",
+    "blacking out",
+    # Uncontrolled bleeding (DRAFT).
+    "bleeding heavily",
+    "bleeding a lot",
+    "bleeding won't stop",
+    "bleeding wont stop",
+    "won't stop bleeding",
+    "wont stop bleeding",
     # --- Hindi / Hinglish (DRAFT — pending clinician + native-speaker review)
     "seene mein tez dard",   # severe chest pain
     "seene me tez dard",
@@ -130,6 +172,7 @@ HIGH_PHRASES: tuple[str, ...] = (
     "खून की उल्टी",
     "saans lene mein bahut takleef",  # severe breathing difficulty
     "सांस लेने में बहुत तकलीफ",
+    *I18N_HIGH_PHRASES,
 )
 
 # ACS co-occurrence: chest pain PLUS an associated feature escalates to
@@ -163,6 +206,45 @@ ACS_ASSOCIATED_PHRASES: tuple[str, ...] = (
     "सांस फूल",
 )
 
+# --- Pattern tier (DRAFT — pending clinician sign-off) -----------------------
+# Stem families that substring rows cannot cover without a combinatorial
+# explosion of variants. Patterns run over the SAME normalized text as the
+# phrase tables (lowercased, apostrophes stripped — write "wont", not
+# "won't"). Only the fixed LABEL enters matched_terms, never user text, so
+# receipts stay PHI-free and the label set stays bounded.
+#
+# "heart attack" and "stroke" are deliberately NOT bare phrases: family
+# history ("my father died of a heart attack") and education ("what causes a
+# stroke?") are core product flows. Only having-one-NOW framings escalate.
+EMERGENCY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("breathing difficulty (pattern)", re.compile(
+        r"\b(?:trouble|difficulty|difficult|struggl\w*|hard|unable)\s+"
+        r"(?:to\s+)?breath\w*"
+        r"|\bcant\s+breathe?\b|\bcan\s?not\s+breathe?\b")),
+    ("heart attack now (pattern)", re.compile(
+        r"\b(?:having|has|getting|might be having)\s+a?\s*heart\s?attack\b"
+        r"|\bheart\s?attack\s+right\s+now\b"
+        r"|\bthink\b[^,.!?]{0,25}\bheart\s?attack\b")),
+    ("stroke now (pattern)", re.compile(
+        r"\b(?:having|is having|might be having)\s+a?\s*stroke\b"
+        r"|\bstroke\s+right\s+now\b"
+        r"|\bthink\b[^,.!?]{0,25}\bstroke\b")),
+    ("collapsed (pattern)", re.compile(
+        r"\bcollapsed?\b(?!\s+(?:into|onto|on\s+the\s+(?:bed|sofa|couch)|"
+        r"laughing|with\s+laughter|in\s+laughter))")),
+    ("unresponsive (pattern)", re.compile(
+        r"\b(?:wont|will\s+not|doesnt|does\s+not|isnt|is\s+not)\s+"
+        r"respond\w*|\bnot\s+responding\b")),
+)
+
+# Chest-pain stem pairs: "my chest hurts", "chest is paining" (standard Indian
+# English), "pain in chest". A bare hit is HIGH; with an ACS associate it is
+# EMERGENCY via the co-occurrence rule below.
+CHEST_STEM_RE = re.compile(
+    r"\bchest\b[^,.!?]{0,30}\b(?:pain\w*|hurt\w*|ach\w*|tight\w*|heav\w*|"
+    r"pressure|burning|squeez\w*)"
+    r"|\b(?:pain|ache|pressure|tightness|heaviness)\b[^,.!?]{0,20}\bchest\b")
+
 # Self-harm / suicide risk phrases (DRAFT — pending clinician sign-off).
 # Matching any of these is an EMERGENCY with a dedicated supportive directive.
 SELF_HARM_PHRASES: tuple[str, ...] = (
@@ -183,6 +265,17 @@ SELF_HARM_PHRASES: tuple[str, ...] = (
     "better off dead",
     "don't want to be here anymore",
     "dont want to be here anymore",
+    # Method-specific phrasing a distressed person actually types (DRAFT).
+    "cutting myself",
+    "been cutting",
+    "cut my wrists",
+    "cut my wrist",
+    "hang myself",
+    "hanging myself",
+    "shoot myself",
+    "jump off a",
+    "want to end it",
+    "going to end it",
     # Hindi / Hinglish (DRAFT)
     "khudkushi",
     "atmahatya",
@@ -198,6 +291,7 @@ SELF_HARM_PHRASES: tuple[str, ...] = (
     "खुद को नुकसान",
     "नुकसान पहुँचाना चाहता",
     "नुकसान पहुंचाना चाहता",
+    *I18N_SELF_HARM_PHRASES,
 )
 
 # The fixed directive that leads every EMERGENCY response.
@@ -222,9 +316,17 @@ class TriageResult:
         return self.level != NONE
 
 
+_APOSTROPHES = str.maketrans({
+    "'": "", "’": "", "ʼ": "", "‘": "",   # every apostrophe codepoint seen
+    " ": " ",                          # NBSP -> space
+    "​": "", "‌": "", "‍": "",  # zero-width chars
+})
+
+
 def _norm(s: str) -> str:
-    """Lowercase and drop apostrophes so 'can't', 'cant', 'can’t' all match."""
-    return s.lower().replace("'", "").replace("’", "")
+    """Lowercase, drop every apostrophe variant and zero-width character, and
+    fold NBSP to space — 'can't', 'cant', 'canʼt' must all match."""
+    return s.lower().translate(_APOSTROPHES)
 
 
 def _find(text: str, phrases: tuple[str, ...]) -> list[str]:
@@ -250,16 +352,29 @@ def triage(message: str) -> TriageResult:
         level = max_level(level, EMERGENCY)
         matched += emergency_hits
 
+    # Pattern tier: only the fixed label enters matched_terms, never the text.
+    for label, pattern in EMERGENCY_PATTERNS:
+        if pattern.search(text):
+            level = max_level(level, EMERGENCY)
+            matched.append(label)
+
     high_hits = _find(text, HIGH_PHRASES)
     if high_hits:
         level = max_level(level, HIGH)
         matched += high_hits
 
     chest_hits = _find(text, CHEST_PAIN_PHRASES)
+    if CHEST_STEM_RE.search(text):
+        chest_hits.append("chest pain (pattern)")
     assoc_hits = _find(text, ACS_ASSOCIATED_PHRASES)
     if chest_hits and assoc_hits:
         level = max_level(level, EMERGENCY)
         matched += chest_hits + assoc_hits
+    elif chest_hits:
+        # Bare chest pain was previously NONE — it is at least HIGH: prompt
+        # review, no reassurance, and downstream may still raise it.
+        level = max_level(level, HIGH)
+        matched += chest_hits
 
     # Deterministic, de-duplicated ordering for reproducible receipts/summaries.
     return TriageResult(

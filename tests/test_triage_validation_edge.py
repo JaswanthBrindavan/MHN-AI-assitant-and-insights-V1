@@ -173,8 +173,10 @@ def test_every_acs_pair_is_emergency(chest, assoc):
 
 
 @pytest.mark.parametrize("chest", CHEST_PAIN_PHRASES)
-def test_chest_pain_phrase_alone_is_none(chest):
-    assert triage(chest).level == NONE
+def test_chest_pain_phrase_alone_is_high(chest):
+    # A lone chest-pain phrase is a HIGH floor (was NONE — audit fix); only
+    # the ACS co-occurrence rule raises it to EMERGENCY.
+    assert triage(chest).level == HIGH
 
 
 @pytest.mark.parametrize("assoc", ACS_ASSOCIATED_PHRASES)
@@ -242,7 +244,8 @@ def test_hindi_text_mixed_with_english_flag():
 # --------------------------------------------------------------------------- #
 def test_matched_terms_sorted_and_deduped():
     result = triage("Chest pain! chest pain again, sweating, seizure, seizure.")
-    assert result.matched_terms == ["chest pain", "seizure", "sweating"]
+    assert result.matched_terms == [
+        "chest pain", "chest pain (pattern)", "seizure", "sweating"]
     assert result.matched_terms == sorted(set(result.matched_terms))
 
 

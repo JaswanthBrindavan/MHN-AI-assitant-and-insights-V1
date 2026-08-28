@@ -30,26 +30,30 @@ from app.coredata.service import (
 from app.models.core import PedigreeCondition
 from app.models.rules import InsightArtifact
 
-
-def _memo_key(db: AsyncSession, user_id: uuid.UUID) -> tuple[int, uuid.UUID]:
-    return (id(db), user_id)
-
-
 # Per-session memo. build_patient_context is called up to twice per chat turn
 # (once for the [P] block, once for suggestion scoping) and its inputs change
 # only on a pedigree write, so recomputing it is two wasted queries a turn.
-# Keyed on the SESSION object identity so it cannot leak across requests, and
-# cleared explicitly by recompute_insights' callers.
-_context_memo: dict[tuple[int, uuid.UUID], tuple[str, set[str]]] = {}
+#
+# Stored in ``db.info`` — the session's own scratch dict — NOT a module-global
+# keyed on id(db). The global version outlived its sessions: entries for dead
+# sessions stayed forever (unbounded growth), and when CPython recycled a
+# freed session's address for the same user, build_patient_context served the
+# DEAD session's cached context without re-running the erasure gate — stale
+# PHI, after the reader was told "Davi has stopped using your information".
+# db.info dies with the session, so neither failure mode exists.
+_MEMO_KEY = "davi_patient_context"
+
+
+def _memo(db: AsyncSession) -> dict[uuid.UUID, tuple[str, set[str]]]:
+    return db.info.setdefault(_MEMO_KEY, {})
 
 
 def clear_patient_context_memo(db: AsyncSession | None = None) -> None:
-    """Drop memoised context. Called after a pedigree write."""
-    if db is None:
-        _context_memo.clear()
-        return
-    for key in [k for k in _context_memo if k[0] == id(db)]:
-        del _context_memo[key]
+    """Drop memoised context for this session. Called after a pedigree write
+    or an erasure request. With no session (tests), nothing global exists to
+    clear any more — the memo lives and dies with each session."""
+    if db is not None:
+        db.info.pop(_MEMO_KEY, None)
 
 
 async def build_patient_context(
@@ -61,7 +65,7 @@ async def build_patient_context(
     active insight tiers, suitable for the [P] block. Condition codes are used
     to scope retrieval.
 
-    Memoised per session — see ``_context_memo``.
+    Memoised per session — see ``_memo`` (db.info).
 
     **Returns nothing while an erasure is pending.** `pedigree_conditions` and
     `insight_artifacts` are two of the eleven tables the erasure destroys, and
@@ -72,18 +76,18 @@ async def build_patient_context(
     here, into the model's prompt.
 
     The suppression is memoised like any other result: within one session
-    (`id(db)`) the pending state cannot change, because a forget-me request and
-    a chat turn are separate HTTP requests with separate sessions. Belt and
-    braces, `request_erasure` clears this memo, so even a caller that did both
-    on one session cannot serve a stale pre-request value.
+    the pending state cannot change, because a forget-me request and a chat
+    turn are separate HTTP requests with separate sessions. Belt and braces,
+    `request_erasure` clears this memo, so even a caller that did both on one
+    session cannot serve a stale pre-request value.
     """
-    key = _memo_key(db, user_id)
-    cached = _context_memo.get(key)
+    memo = _memo(db)
+    cached = memo.get(user_id)
     if cached is not None:
         return cached[0], set(cached[1])
 
     if await is_pending(db, user_id):
-        _context_memo[key] = ("", set())
+        memo[user_id] = ("", set())
         return "", set()
 
     conditions = (
@@ -107,7 +111,7 @@ async def build_patient_context(
     codes |= {a.condition_code for a in insights}
 
     if not conditions and not insights:
-        _context_memo[_memo_key(db, user_id)] = ("", set(codes))
+        memo[user_id] = ("", set(codes))
         return "", codes
 
     displays = sorted({c.condition_display for c in conditions})
@@ -118,7 +122,7 @@ async def build_patient_context(
         tiers = sorted({f"{a.condition_code} ({a.tier})" for a in insights})
         lines.append("Active family-history insights: " + ", ".join(tiers) + ".")
     result = (" ".join(lines), codes)
-    _context_memo[_memo_key(db, user_id)] = (result[0], set(codes))
+    memo[user_id] = (result[0], set(codes))
     return result
 
 
