@@ -195,6 +195,20 @@ I18N_EMERGENCY_PHRASES: tuple[str, ...] = (
     "gunde noppi",  # heart pain right now (also matches 'gunde noppig
     "గుండెల్లో నొప్పి",  # pain in the heart/chest  lay 'heart pain' phrasi
     "gundello noppi",  # pain in the heart/chest
+    # --- Odia (or) ---
+    "ବେହୋଶ ହୋଇଗଲ",  # became unconscious / fainted  stem matches  (neu
+    "ନିଶ୍ୱାସ ନେଇ ପାରୁନ",  # cannot breathe  stem matches  (colloquial),  (I/
+    "ଶ୍ୱାସ ବନ୍ଦ",  # breathing has stopped  catches    / ; not used i
+    "ଗଳାରେ ଅଟକି",  # stuck in the throat  choking; stem matches  /  /
+    "ମିରିଗି",  # seizure / fits  the lay Odia word (colloquial fo
+    "ବାତ ମାରି",  # stroke / paralysis attack  the lay Odia phrase (
+    "ହାର୍ଟ ଆଟାକ",  # heart attack  the English loanword as actually t
+    "ଛାତି ଫାଟି",  # chest is bursting  acute 'heart pain right now' 
+    "behosh hoigal",  # became unconscious  stem matches hoigala / hoiga
+    "niswas nei paruni",  # cannot breathe  most common WhatsApp typing; als
+    "nishwas nei paruni",  # cannot breathe  common alternate romanization of
+    "hati phati jau",  # chest is bursting (acute heart pain)  deliberate
+    "galare ataki",  # choking  stuck in the throat; stem matches 'gala
 )
 
 I18N_HIGH_PHRASES: tuple[str, ...] = (
@@ -331,6 +345,21 @@ I18N_HIGH_PHRASES: tuple[str, ...] = (
     "కడుపులో విపరీతమైన నొప్పి",  # severe stomach pain
     "kadupu noppi ekkuva",  # stomach pain is severe (matches 'kadupu noppi ek
     "kadupu noppi tattukoleka",  # unbearable stomach pain (matches 'tattukoleka po
+    # --- Odia (or) ---
+    "ଛାତିରେ ଭୀଷଣ",  # severe (pain) in the chest  stem catches the nat
+    "ରକ୍ତ ବାନ୍ତି",  # vomiting blood  'rakta banti (heuchhi)'; dominan
+    "ବାନ୍ତିରେ ରକ୍ତ",  # blood in the vomit  the other word order a frigh
+    "କାଶରେ ରକ୍ତ",  # blood in the cough / sputum
+    "କାଶିଲେ ରକ୍ତ",  # blood comes when (I/he) cough(s)  verb-form vari
+    "ଶ୍ୱାସ କଷ୍ଟ",  # breathing difficulty  the standard lay Odia term
+    "ପେଟରେ ଭୀଷଣ",  # severe (pain) in the stomach  stem catches  /  /
+    "hati re bahut",  # severe chest pain  deliberate stem so both 'chat
+    "hati re bhishan",  # severe chest pain  bhishan-intensifier variant, 
+    "rakta banti",  # vomiting blood  also matched inside 'rakta banti
+    "rakat banti",  # vomiting blood  very common alternate romanizati
+    "kasile rakta",  # blood when coughing  'kasile rakta paduchi'; NOT
+    "swasa kasta",  # breathing difficulty  romanization of  ; also ma
+    "peta re bahut",  # severe stomach pain  'peta re bahut kasta/jantra
 )
 
 I18N_SELF_HARM_PHRASES: tuple[str, ...] = (
@@ -470,4 +499,18 @@ I18N_SELF_HARM_PHRASES: tuple[str, ...] = (
     "ఉరి వేసుకుంటా",  # I will hang myself
     "uri vesukunta",  # I will hang myself (matches 'uri vesukuntanu')
     "uri veskunta",  # I will hang myself (texting contraction)
+    # --- Odia (or) ---
+    "ଆତ୍ମହତ୍ୟା",  # suicide  THE word people actually type; single w
+    "ମରିଯିବାକୁ ମନ",  # feel like dying  '  '; anchored on - so benign '
+    "ମରିଯିବାକୁ ଇଚ୍ଛା",  # wish to die  '  '
+    "ବଞ୍ଚିବାକୁ ଚାହୁଁନ",  # do not want to live  stem matches  / ; Odia verb
+    "ଜୀବନ ଶେଷ କରି",  # end (my) life  stem matches  /  / 
+    "ନିଜକୁ ମାରି",  # kill / harm myself  stem matches  /  / 
+    "ମରିଗଲେ ଭଲ",  # it would be better if (I) died  '   '; classic d
+    "mari jibaku mana",  # feel like dying  'mari jibaku mana heuchi'; mari
+    "banchibaku chahun",  # do not want to live  stem matches chahunni / cha
+    "jiban sesh kari",  # end (my) life  'jiban sesh karidebi/karibi'; anc
+    "nijaku mari",  # kill / harm myself  'nijaku mari debi' / 'nijaku
+    "marigale bhala",  # better if (I) died  joined spelling of 'mu marig
+    "mari gale bhala",  # better if (I) died  spaced spelling variant
 )
