@@ -24,10 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.context import build_patient_context
 from app.chat.data_handlers import (
+    handle_ai_result_query,
+    handle_doctor_consult_query,
     handle_document_query,
     handle_family_list_query,
     handle_metric_query,
     handle_report_param_ask,
+    handle_section_detail_query,
     handle_suggestion_query,
     handle_summary_query,
     handle_tracker_add,
@@ -159,7 +162,7 @@ async def get_condition_guidance(
 
 
 async def lookup_medicine(
-    db: AsyncSession, _user_id: uuid.UUID, args: dict, _session_id
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
 ) -> dict | None:
     name = str(args.get("name", "")).strip()
     if not name:
@@ -167,6 +170,17 @@ async def lookup_medicine(
     drug = await find_drug(db, name)
     if drug is None:
         return None
+    # The reader's recorded medication allergies — the one deterministic
+    # safety line the legacy drug path always includes and this executor
+    # silently dropped (audit high: engine asymmetry, the drug-interaction
+    # bug class). Fail-open like the legacy path.
+    warning = ""
+    try:
+        from app.coredata.service import allergy_warning, medication_allergies
+        async with db.begin_nested():
+            warning = allergy_warning(await medication_allergies(db, user_id))
+    except Exception:  # noqa: BLE001 — enrichment must never break the lookup
+        pass
     # medicine_master (Flyway V19) reshaped these: `uses` became `used_for`,
     # and side_effects became a ", "-joined TEXT column. Slicing that string
     # like the old list would hand the model a truncated WORD as a fact
@@ -174,7 +188,10 @@ async def lookup_medicine(
     # test catches it.
     substitutes = await find_substitutes(db, drug)
     return {
-        "deterministic_reply": build_drug_reply(drug, substitutes),
+        "deterministic_reply": build_drug_reply(
+            drug, substitutes, allergy_warning=warning),
+        # Structured too, so the model cannot summarise the warning away.
+        "allergy_warning": warning or None,
         "name": drug.name,
         "composition": [c for c in (drug.composition1, drug.composition2) if c],
         "uses": list(drug.used_for or [])[:5],
@@ -257,6 +274,46 @@ async def analyze_image(
 
 # Doses/day -> the slot letters Spring's schedulePattern expects (M/A/E/N).
 _SLOTS_BY_COUNT = {1: "M", 2: "ME", 3: "MAE", 4: "MAEN"}
+
+
+async def get_document_ai_result(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, session_id
+) -> dict | None:
+    phrase = str(args.get("request") or "insights for my report")
+    ability = await handle_ai_result_query(db, user_id, phrase, session_id)
+    return _unwrap(ability)
+
+
+async def get_section_details(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    kind = str(args.get("kind", "")).strip().lower()
+    if not kind:
+        return None
+    ability = await handle_section_detail_query(
+        db, user_id, f"details of my {kind}s"
+    )
+    return _unwrap(ability, kind=kind)
+
+
+async def get_doctor_consults(
+    db: AsyncSession, user_id: uuid.UUID, _args: dict, _session_id
+) -> dict | None:
+    ability = await handle_doctor_consult_query(
+        db, user_id, "my recent doctor consultations"
+    )
+    return _unwrap(ability)
+
+
+async def get_medication_adherence(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    name = str(args.get("name", "")).strip()
+    if not name:
+        return None
+    from app.chat.medication_flow import _handle_adherence
+    ability = await _handle_adherence(db, user_id, name)
+    return _unwrap(ability, name=name)
 
 
 async def _medication(action: str, db, user_id, args) -> dict | None:

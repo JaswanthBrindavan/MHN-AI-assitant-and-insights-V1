@@ -478,6 +478,17 @@ def _schedule_words(is_prn: bool, pat: str | None) -> str:
     return f"{times} a day ({when})"
 
 
+# Adherence asks ("how well am I taking my metformin", "have I been missing
+# doses of thyronorm") — a READ over Spring's dose log, safe on any framing.
+_ADHERENCE_RE = re.compile(
+    r"\bhow (?:well|regularly|consistently)\b.{0,30}\btak(?:ing|en)\b"
+    r"|\badherence\b|\bkeeping up with\b|\bmiss(?:ed|ing)\s+(?:any\s+)?doses?\b"
+    r"|\bhow many doses\b.{0,20}\bmiss", re.I)
+_ADHERENCE_NAME_RE = re.compile(
+    r"(?:taking|taken|with|of|for)\s+(?:my\s+)?([a-z][a-z0-9 .\-]{2,40})",
+    re.I)
+
+
 _MED_WORD_RE = re.compile(r"\bmed(?:ication|icine|s)?\b|\bpill|\btablet|"
                           r"\bcapsule|\bsyrup\b|\bdrops?\b|\binjection\b|"
                           r"\binhaler\b|\bsachets?\b|\bcream\b|\bointment\b",
@@ -495,6 +506,12 @@ def detect_intent(message: str) -> dict | None:
                      flags=re.I)
     if _SELF_HARM_RE.search(message):
         return None
+    if _ADHERENCE_RE.search(message):
+        m = _ADHERENCE_NAME_RE.search(message)
+        name = _clean_name(m.group(1)) if m else ""
+        if name and _name_quality(name) == "ok":
+            return {"action": "adherence", "name": name}
+        return None  # named nothing we can resolve — the engines handle it
     if _is_question(message):
         # A question must never fire a WRITE — but a question-shaped pure
         # list request ("what medications am I on?") is a safe READ.
@@ -870,6 +887,9 @@ async def handle_medication_turn(
             "aren't shown. Don't change or stop any of these on your own — "
             "discuss changes with your prescriber.")
 
+    if action == "adherence":
+        return await _handle_adherence(db, user_id, intent["name"])
+
     if action == "add":
         name = intent["name"]
         if "schedule_pattern" in intent or intent.get("is_prn"):
@@ -904,6 +924,35 @@ async def handle_medication_turn(
     )
     return await _handle_stop_remove(
         db, user_id, action, intent["name"], hard_signal=hard)
+
+
+async def _handle_adherence(db, user_id, name: str) -> dict:
+    """Adherence over Spring's dose log — deterministic, validator-safe.
+
+    The module existed with zero callers (audit high): the fetch, the
+    percentages and the rendered sentence were all built and unreachable.
+    """
+    from app.medicines.adherence import fetch_adherence, render_adherence
+    from app.medicines.service import _resolve
+
+    resolved = await _resolve(user_id, name, active_only=True)
+    if not resolved.ok or resolved.course is None:
+        if resolved.reason == "ambiguous":
+            names = ", ".join(c.name for c in resolved.courses[:4])
+            return _reply(
+                f"You have more than one medication matching '{name}' "
+                f"({names}). Which one did you mean?")
+        if resolved.reason == "not_found":
+            return _reply(
+                f"I couldn't find an active '{name}' in your medications, so "
+                "there's no adherence to report. You can check the "
+                "Medications section in the app.")
+        return await _unavailable(resolved.reason)
+    adh = await fetch_adherence(user_id, resolved.course.tracking_id)
+    if adh is None:
+        return await _unavailable("http_error")
+    return _reply(render_adherence(resolved.course.name, adh),
+                  action="medication_adherence")
 
 
 async def _handle_stop_remove(

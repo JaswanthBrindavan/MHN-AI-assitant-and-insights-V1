@@ -17,6 +17,7 @@ answer.
 from __future__ import annotations
 
 import logging
+import re as _re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, timedelta
@@ -109,6 +110,25 @@ async def open_or_touch(
         await db.flush()
     except Exception:  # noqa: BLE001 — bookkeeping must never cost an answer
         logger.warning("episode open/touch failed", exc_info=True)
+
+
+# Recovery phrasing (DRAFT) — deterministic, same one-vocabulary spirit as
+# triage. English + Hinglish; the i18n tables can extend this later.
+_RECOVERY_RE = _re.compile(
+    r"\b(?:feeling|feel|much|lot|is|are|it'?s|its)\s+(?:a lot |much )?better"
+    r"(?:\s+now)?\b"
+    r"|\bbetter now\b|\ball better\b|\b(?:is|it'?s|its) gone\b"
+    r"|\bresolved\b|\bsubsided\b|\bcleared up\b|\brecovered\b"
+    r"|\bno (?:longer|more) (?:hurts?|paining|there)\b"
+    r"|\btheek ho gay[ai]\b|\bthik ho gay[ai]\b|\baram (?:hai|aa gaya)\b",
+    _re.IGNORECASE,
+)
+
+
+def is_recovery_message(message: str) -> bool:
+    """The reader is saying a symptom improved — a close-out signal, not a
+    fresh complaint."""
+    return bool(_RECOVERY_RE.search(message or ""))
 
 
 async def resolve(db: AsyncSession, user_id: uuid.UUID, symptom: str) -> bool:

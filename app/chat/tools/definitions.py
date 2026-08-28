@@ -295,6 +295,67 @@ REMOVE_MEDICATION = ToolSpec(
 )
 
 
+GET_DOCUMENT_AI_RESULT = ToolSpec(
+    name="get_document_ai_result",
+    description=(
+        "Fetch the AI pipeline's processing result for a document the reader "
+        "uploaded — its filing status, extracted insights, and any failure "
+        "reason, including a patient-name mismatch (a document whose printed "
+        "name does not match the account is never filed; explain that rather "
+        "than suggesting a retry). Use when they ask about an upload's "
+        "insights, status, or why a report has not appeared."
+    ),
+    input_schema=_obj(
+        {"request": {
+            "type": "string",
+            "description": "The reader's ask, e.g. 'insights for my report'.",
+        }},
+        [],
+    ),
+)
+
+GET_SECTION_DETAILS = ToolSpec(
+    name="get_section_details",
+    description=(
+        "Detail fields from one health-wallet section — insurance (policy, "
+        "premium, validity), bills, vaccinations (doses, due dates), scans, "
+        "or prescriptions. Use when they ask about those specifics. Lab "
+        "REPORT values come from get_report_parameter instead."
+    ),
+    input_schema=_obj(
+        {"kind": {
+            "type": "string",
+            "enum": ["insurance", "bill", "vaccination", "scan",
+                     "prescription"],
+        }},
+        ["kind"],
+    ),
+)
+
+GET_DOCTOR_CONSULTS = ToolSpec(
+    name="get_doctor_consults",
+    description=(
+        "The reader's recent doctor consultations on record. Use for 'when "
+        "did I last see a doctor' style questions."
+    ),
+    input_schema=_obj({}, []),
+)
+
+GET_MEDICATION_ADHERENCE = ToolSpec(
+    name="get_medication_adherence",
+    description=(
+        "How consistently the reader has taken a named medication — the "
+        "percentage of scheduled doses taken over the recent window, from "
+        "the app's dose log. Use when they ask how well they are keeping up "
+        "with a medicine. Prefer the deterministic_reply verbatim."
+    ),
+    input_schema=_obj(
+        {"name": {"type": "string", "description": "Medicine name."}},
+        ["name"],
+    ),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_LATEST_METRIC,
     GET_REPORT_PARAMETER,
@@ -305,6 +366,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_FAMILY_MEMBERS,
     GET_CONDITION_GUIDANCE,
     LOOKUP_MEDICINE,
+    GET_DOCUMENT_AI_RESULT,
+    GET_SECTION_DETAILS,
+    GET_DOCTOR_CONSULTS,
+    GET_MEDICATION_ADHERENCE,
     ADD_MEDICATION,
     STOP_MEDICATION,
     REMOVE_MEDICATION,

@@ -121,7 +121,10 @@ from app.triage.red_flags import (
     EMERGENCY,
     EMERGENCY_DIRECTIVE,
     HIGH,
+    LEVEL_ORDER,
     NONE,
+    TriageResult,
+    max_level,
     triage,
 )
 
@@ -412,6 +415,73 @@ async def _dosing_refusal(
     )
 
 
+async def _drug_info_reply(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider: LLMProvider,
+    session_id: uuid.UUID | None,
+    risk: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult | None:
+    """Deterministic drug information from medicine_master. None if not asked.
+
+    SHARED across both engines (it lived inside the legacy chain, and the
+    agentic engine answered drug questions from its own weights — the same
+    bypass class as the interaction refusal). Only at NONE risk; fail-open.
+    """
+    if risk != NONE:
+        return None
+    try:
+        term = extract_drug_query_term(message)
+        drug = None
+        substitutes: list[str] = []
+        if term:
+            # SAVEPOINT: a lookup failure must leave the session usable.
+            async with db.begin_nested():
+                drug = await find_drug(db, term)
+                if drug is not None:
+                    substitutes = await find_substitutes(db, drug)
+        if term and drug is not None:
+            t("Drug lookup",
+              f"'{term}' matched {drug.name} in the validated medicines "
+              "database — deterministic reply (no LLM)")
+            # The reader's OWN medication allergies — nothing else on this
+            # early-return path would carry them. Fail-open.
+            warning = ""
+            try:
+                async with db.begin_nested():
+                    warning = allergy_warning(
+                        await medication_allergies(db, user_id)
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning("allergy lookup failed; continuing", exc_info=True)
+                record_fail_open("allergy_lookup")
+            reply = build_drug_reply(drug, substitutes, allergy_warning=warning)
+            await _write_receipt(
+                db, user_id=user_id, session_id=session_id,
+                message=message, model_name=provider.model_name,
+            )
+            return ChatResult(
+                response_message=reply,
+                risk_level=risk,
+                recommended_action="discuss_with_prescriber",
+                provenance={
+                    "path": "drug_query",
+                    "drug": drug.name,
+                    "source": "medicine_master",
+                },
+                language=lang,
+                trace=trace,
+            )
+    except Exception:  # noqa: BLE001 — drug lookup must never break a reply
+        logger.warning("drug lookup failed; continuing", exc_info=True)
+        record_fail_open("drug_lookup")
+    return None
+
+
 async def _dispatch(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -420,8 +490,25 @@ async def _dispatch(
     session_id: uuid.UUID,
     pivot: InboundPivot | None = None,
     pending_med: dict | None = None,
+    original_message: str | None = None,
 ) -> ChatResult:
     tr = triage(message)
+    # With an ACTIVE pivot, `message` is the MT English and the floor would
+    # otherwise be a function of MT phrasing — a paraphrase could lower it
+    # (audit high). Run triage over the reader's ORIGINAL text too and take
+    # the maximum: downstream may raise the floor, never lower it, and that
+    # must hold across the translation boundary.
+    if original_message is not None and original_message != message:
+        tr_orig = triage(original_message)
+        if LEVEL_ORDER[tr_orig.level] > LEVEL_ORDER[tr.level] or (
+            tr_orig.self_harm and not tr.self_harm
+        ):
+            merged_terms = sorted(set(tr.matched_terms + tr_orig.matched_terms))
+            tr = TriageResult(
+                level=max_level(tr.level, tr_orig.level),
+                matched_terms=merged_terms,
+                self_harm=tr.self_harm or tr_orig.self_harm,
+            )
     risk = tr.level
     # Every reply composes in English; when the pivot is active the sidecar
     # translates the final text into the user's language and script. lang is
@@ -514,7 +601,8 @@ async def _dispatch(
         # symptom-assessment flow. Fail-open, so remembering can never delay or
         # displace the directive the reader needs right now.
         await memory_assembly.record(
-            db, user_id, codes=(), flags=tr.matched_terms, risk=risk
+            db, user_id, codes=(), flags=tr.matched_terms, risk=risk,
+            message=message,
         )
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,
@@ -574,6 +662,14 @@ async def _dispatch(
     if dosing is not None:
         return dosing
 
+    # 3.46) Drug-information questions — deterministic from medicine_master,
+    #       SHARED so neither engine ever answers them from model weights.
+    drug_info = await _drug_info_reply(
+        db, user_id, message, provider, session_id, risk, lang, trace, t
+    )
+    if drug_info is not None:
+        return drug_info
+
     # 3.5) Engine selection. Everything above — the triage floor, the scope
     #      guard, the emergency directive, the canned conversational replies
     #      and the drug-combination refusal — is SHARED and has already run,
@@ -582,7 +678,8 @@ async def _dispatch(
     if get_settings().chat_engine == "agentic":
         t("Engine", "agentic — the assistant can look things up for itself")
         return await _dispatch_agentic(
-            db, user_id, message, provider, session_id, tr, risk, lang, trace, t
+            db, user_id, message, provider, session_id, tr, risk, lang,
+            trace, t, pivot=pivot,
         )
 
     # 4) Deterministic data abilities — documents, tracker adds, metric
@@ -706,62 +803,9 @@ async def _dispatch(
             trace=trace,
         )
 
-    # 5) Drug-information question — deterministic reply from the validated
-    #    drug database (never the LLM). Only at NONE risk: any red-flag match
-    #    stays on the symptom path so escalation is preserved. Fail-open.
-    if risk == NONE:
-        try:
-            term = extract_drug_query_term(message)
-            drug = None
-            substitutes: list[str] = []
-            if term:
-                # SAVEPOINT: a lookup failure must leave the session usable.
-                async with db.begin_nested():
-                    drug = await find_drug(db, term)
-                    if drug is not None:
-                        substitutes = await find_substitutes(db, drug)
-            if term:
-                if drug is not None:
-                    t("Drug lookup",
-                      f"'{term}' matched {drug.name} in the validated medicines "
-                      "database — deterministic reply (no LLM)")
-                    # The reader's OWN medication allergies. This path
-                    # returns before the [P] block is built and lives inside
-                    # the legacy branch, so nothing else would carry them.
-                    # Fail-open: a lookup failure must not cost the answer.
-                    warning = ""
-                    try:
-                        async with db.begin_nested():
-                            warning = allergy_warning(
-                                await medication_allergies(db, user_id)
-                            )
-                    except Exception:  # noqa: BLE001
-                        logger.warning(
-                            "allergy lookup failed; continuing", exc_info=True
-                        )
-                        record_fail_open("allergy_lookup")
-                    reply = build_drug_reply(
-                        drug, substitutes, allergy_warning=warning
-                    )
-                    await _write_receipt(
-                        db, user_id=user_id, session_id=session_id,
-                        message=message, model_name=provider.model_name,
-                    )
-                    return ChatResult(
-                        response_message=reply,
-                        risk_level=risk,
-                        recommended_action="discuss_with_prescriber",
-                        provenance={
-                            "path": "drug_query",
-                            "drug": drug.name,
-                            "source": "medicine_master",
-                        },
-                        language=lang,
-                        trace=trace,
-                    )
-        except Exception:  # noqa: BLE001 — drug lookup must never break a reply
-            logger.warning("drug lookup failed; continuing to RAG", exc_info=True)
-            record_fail_open("drug_lookup")
+    # (Step 5, the deterministic drug-information reply, moved to the SHARED
+    # prologue — the agentic engine used to bypass it entirely and answer
+    # drug questions from model weights, the audit's engine-parity bug class.)
 
     # 6) Symptom / educational RAG path (risk is none or high here).
     patient_text, user_codes = await _stage(
@@ -839,7 +883,8 @@ async def _dispatch(
     # only the topic recall, so a reader's consent-gated profile never reached
     # the prompt on the default engine. See app/chat/memory_assembly.py.
     await memory_assembly.record(
-        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk
+        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk,
+        message=message,
     )
     patient_text = _memory.append_to(patient_text)
     if _names:
@@ -1015,6 +1060,36 @@ async def _dispatch(
             display = strip_markers(grounded_answer)
             if risk == HIGH:
                 display = f"{HIGH_ESCALATION} {display}"
+            # Numeric fidelity — the SAME ladder the agentic engine has always
+            # run, on the engine that answers real users (audit high: drifted
+            # lab values, misquoted readings and invented doses passed here
+            # unchecked while the non-default engine would have caught them).
+            fid_sources = [c.content for c in chunks]
+            if patient_text:
+                fid_sources.append(patient_text)
+            fid_ok, stray = values_traceable(display, fid_sources)
+            if not fid_ok:
+                logger.warning(
+                    "numeric fidelity failure (legacy): %d stray value(s)",
+                    len(stray),
+                )
+                t("Value check",
+                  "a stated value did not match your records — replaced with "
+                  "the safe reply")
+                display = safe_reply(risk, session_id)
+                legacy_degraded = "fidelity"
+            elif not fid_sources and unit_values(display):
+                # Nothing retrieved, no patient context, yet the reply states
+                # a clinical value or dose — nothing stands behind it.
+                logger.warning(
+                    "ungrounded clinical value with no sources (legacy): "
+                    "%d value(s)", len(unit_values(display)),
+                )
+                t("Value check",
+                  "a dose or measurement was stated with nothing to support "
+                  "it — replaced with the safe reply")
+                display = safe_reply(risk, session_id)
+                legacy_degraded = "ungrounded_value"
             # Extend the diagnostic-assertion lexicon with the clinically-
             # validated registry names + aliases (paren-cleaned), fail-open.
             extra: tuple[str, ...] | None = None
@@ -1166,6 +1241,7 @@ async def handle_chat(
         result = await _dispatch(
             db, user_id, work, provider, session_id, pivot=pivot,
             pending_med=pending_med,
+            original_message=message if pivot.active else None,
         )
 
     chat_turns.inc(engine=engine, risk=result.risk_level)
@@ -1230,6 +1306,7 @@ async def _dispatch_agentic(
     lang: str,
     trace: list[dict],
     t,
+    pivot: InboundPivot | None = None,
 ) -> ChatResult:
     """The tool-driven path.
 
@@ -1269,7 +1346,8 @@ async def _dispatch_agentic(
     # succeeded. Recording it after the guards (as this used to) meant an
     # agent-loop failure silently forgot the symptom they just described.
     await memory_assembly.record(
-        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk
+        db, user_id, codes=codes, flags=tr.matched_terms, risk=risk,
+        message=message,
     )
 
     asked = await questions_asked(db, session_id)
@@ -1282,7 +1360,15 @@ async def _dispatch_agentic(
         chunks=chunks,
         allow_questions=allow_questions,
     )
-    directive = language_directive("en" if lang != "en" else lang)
+    # Same rule as the legacy engine (they diverged — the audit's engine-
+    # parity bug class): with an ACTIVE pivot the model answers in English and
+    # the sidecar translates back; with no sidecar, the directive names the
+    # reader's language so the model itself replies in it. The old line here
+    # was a tautology that always said "en", killing the documented no-sidecar
+    # fallback on this engine only.
+    directive = language_directive(
+        "en" if (pivot is not None and pivot.active) else lang
+    )
     # Split, not joined: element 0 is byte-identical across every turn and
     # carries the prompt-cache breakpoint in the Anthropic adapter. Every
     # other provider joins it straight back, so the model is told exactly the
@@ -1373,7 +1459,7 @@ async def _dispatch_agentic(
         sources.append(patient_text)
     ok, stray = values_traceable(display, sources)
     if not ok:
-        logger.warning("numeric fidelity failure: %s", stray)
+        logger.warning("numeric fidelity failure: %d stray value(s)", len(stray))
         if await _try_recover("fidelity", ", ".join(stray)):
             t("Value check", "a stated value was corrected on a second pass")
         else:
@@ -1387,7 +1473,9 @@ async def _dispatch_agentic(
         # made it up. This is the case values_traceable deliberately cannot
         # judge (no sources to compare against), so the policy lives here.
         stated = unit_values(display)
-        logger.warning("ungrounded clinical value with no sources: %s", stated)
+        logger.warning(
+            "ungrounded clinical value with no sources: %d value(s)", len(stated)
+        )
         if await _try_recover("ungrounded_value", ", ".join(stated)):
             t("Value check", "an unsupported figure was removed on a second pass")
         else:

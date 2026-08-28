@@ -186,6 +186,34 @@
    "expects_tools": [
     "remove_medication"
    ]
+  },
+  {
+   "name": "ai_result_status",
+   "message": "what happened to the report I uploaded — any insights yet?",
+   "expects_tools": [
+    "get_document_ai_result"
+   ]
+  },
+  {
+   "name": "section_insurance_details",
+   "message": "what's the premium and validity on my insurance policy?",
+   "expects_tools": [
+    "get_section_details"
+   ]
+  },
+  {
+   "name": "doctor_consults",
+   "message": "which doctor did I last consult?",
+   "expects_tools": [
+    "get_doctor_consults"
+   ]
+  },
+  {
+   "name": "med_adherence",
+   "message": "how well have I been taking my metformin lately?",
+   "expects_tools": [
+    "get_medication_adherence"
+   ]
   }
  ]
 }

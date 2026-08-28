@@ -33,6 +33,7 @@ from typing import Any, Protocol
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import current_user_jwt
 from app.config import get_settings
 from app.coredata.service import _RESOURCE_TYPE, can_view_document
 from app.models.common import utcnow
@@ -142,16 +143,26 @@ async def _presigned_url(
     """Ask Spring for a presigned GET. Davi never mints one itself."""
     base = _spring_base()
     settings = get_settings()
-    if not base or not settings.mhn_spring_token:
+    if not base:
+        return None
+
+    # Spring's ONLY auth filter parses a USER JWT (JwtAuthenticationFilter);
+    # it ignores static tokens and X-User-Id entirely. The original
+    # service-token + X-User-Id headers therefore got 401 on every call and
+    # vision was silently dead in production. Forward the reader's own JWT —
+    # the same fix medicines/service.py shipped — and refuse (None) when no
+    # JWT was captured, keeping the fail-closed semantics.
+    jwt = current_user_jwt()
+    if not jwt:
         return None
 
     url = base + _URL_PATH.format(
         resource_type=resource_type, resource_id=resource_id
     )
     headers = {
-        "Authorization": f"Bearer {settings.mhn_spring_token}",
-        # Spring authorizes the file read for THIS user, exactly as it does
-        # for the app's own requests.
+        "Authorization": f"Bearer {jwt}",
+        # Kept for parity with the other Spring clients; the JWT alone is
+        # what Spring authenticates.
         "X-User-Id": str(viewer_id),
     }
     try:

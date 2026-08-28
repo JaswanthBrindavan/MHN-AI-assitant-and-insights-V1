@@ -347,3 +347,34 @@ async def test_delete_resolves_against_all_courses_not_active_only(monkeypatch):
     # delete must NOT restrict to active-only, or a stopped course is unremovable
     assert seen["activeOnly"] is None
     assert res.ok
+
+
+async def test_adherence_ask_renders_the_percentage(db_session, monkeypatch):
+    """"how well am I taking my metformin" resolves the course and renders
+    Spring's adherence — the module had ZERO callers before (audit high)."""
+    from app.medicines import adherence as adh_mod
+    from app.medicines import service as med_svc
+
+    async def fake_list(user_id, *, active_only=True, client=None):
+        return med_svc.MedResult(
+            ok=True,
+            courses=(med_svc.Course(tracking_id=7, name="Metformin 500"),),
+        )
+
+    async def fake_fetch(user_id, tracking_id, *, days=None, client=None):
+        assert tracking_id == 7
+        return adh_mod.Adherence(
+            tracking_id=7, from_date="2026-08-14", to_date="2026-08-28",
+            total=28, taken=24, skipped=2, forgotten=2, pending=0,
+            percentage=85.7,
+        )
+
+    monkeypatch.setattr(med_svc, "list_courses", fake_list)
+    monkeypatch.setattr(adh_mod, "fetch_adherence", fake_fetch)
+
+    r = await mf.handle_medication_turn(
+        db_session, USER, "how well am I taking my metformin", None)
+    assert r is not None
+    assert "85.7%" in r["reply"]
+    assert "Metformin 500" in r["reply"]
+    assert r["action"] == "medication_adherence"

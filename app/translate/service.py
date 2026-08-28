@@ -162,6 +162,15 @@ async def pivot_inbound(
                 lang = str(det["language"])
         english = await translator.translate(message, lang, "to_english", "native")
         if english is not None:
+            # INBOUND digit guard (audit high): the outbound guard existed for
+            # exactly this failure ("IndicTrans2 will happily renumber
+            # things") but the inbound leg had none — a mistranslated sugar
+            # reading ("380" -> "38") got a confident deterministic
+            # assessment of a number the reader never typed. On mismatch the
+            # pivot goes INACTIVE: the pipeline sees the original text and
+            # the reply-language directive handles the answer.
+            if not digits_preserved(message, english):
+                return InboundPivot(lang, "native", message, active=False)
             return InboundPivot(lang, "native", english, active=True)
         return InboundPivot(lang, "native", message, active=False)
 
@@ -174,6 +183,8 @@ async def pivot_inbound(
     if lang in SUPPORTED_LANGUAGES and confidence >= MIN_DETECT_CONFIDENCE:
         english = await translator.translate(message, lang, "to_english", "latin")
         if english is not None:
+            if not digits_preserved(message, english):  # see native branch
+                return InboundPivot(lang, "latin", message, active=False)
             return InboundPivot(lang, "latin", english, active=True)
         return InboundPivot(lang, "latin", message, active=False)
     return InboundPivot("en", "latin", message, active=False)

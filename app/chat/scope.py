@@ -14,10 +14,24 @@ _OFF_TOPIC_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b(write|debug|refactor|compile) (me )?(a |some )?(code|program|script|function)\b"
     ),
-    re.compile(r"\b(python|javascript|typescript|java|c\+\+|sql|regex|html|css)\b"),
+    # A bare programming-language word is NOT enough: "a python bit me on my
+    # leg" is a health emergency, not a coding question. Require code context.
+    re.compile(
+        r"\b(python|javascript|typescript|java|c\+\+|sql|regex|html|css)\b"
+        r"(?=.*\b(?:code|coding|script|program|function|error|install|"
+        r"library|syntax|compile|bug|variable|loop)\b)"
+    ),
     re.compile(r"\bstack trace\b|\btraceback\b|\bsyntax error\b"),
     re.compile(r"\b(solve|calculate|compute|integral|derivative|factorial) .*\b(\d|equation|x)\b"),
-    re.compile(r"\bwhat('| i)s \d+\s*[\+\-\*/x]\s*\d+"),
+    # Arithmetic — but NOT the vitals ratio shape: "what's 120/80" is a blood
+    # pressure reading (2-3 digits / 2-3 digits), the canonical health
+    # question for this product, and it was being declined as division.
+    re.compile(
+        r"\bwhat('| i)s \d+\s*[\+\-\*x]\s*\d+"
+        r"(?!\s*(?:mean|on the|scale|out of|pain))"
+        r"|\bwhat('| i)s \d+\s*/\s*\d+(?!\d)(?<![\d/]\d\d)"
+        r"(?!\s*(?:mean|bp|blood|reading|on the|pain))"
+    ),
     re.compile(r"\bcapital of\b|\bwho won\b|\bwho is the (president|prime minister)\b"),
     re.compile(r"\b(movie|film|actor|song|celebrity|football|cricket) (trivia|score|lyrics)\b"),
     # --- Real-time lookups we have no source for -----------------------------
