@@ -276,18 +276,25 @@ async def test_chat_digit_corruption_falls_back_to_english(db_session):
     assert r.response_message == reply  # English kept — never corrupted digits
 
 
-async def test_chat_sidecar_down_degrades_to_directive_path(db_session):
+async def test_chat_sidecar_down_gives_validated_english_plus_notice(
+    db_session,
+):
+    """POLICY (audit high): the validator's guarantees exist only for English
+    text, so with the sidecar down the reply stays validated English and ONE
+    fixed Telugu sentence explains why — never an unvalidated Telugu reply."""
     fake = FakeTranslator(fail=True)
     provider = FakeProvider()
     r = await handle_chat(
         db_session, uuid.uuid4(), TELUGU, provider, translator=fake
     )
-    # No translation happened; the LLM got the original text plus the
-    # reply-language directive (pre-pivot behavior).
     assert provider.calls and provider.calls[0]["user"] == TELUGU
-    assert "Reply in Telugu" in provider.calls[0]["system"]
+    # Generation is instructed in English, not Telugu.
+    assert "Reply in Telugu" not in provider.calls[0]["system"]
     assert r.language == "te"
-    assert "translation" not in r.provenance
+    # The fixed native-language notice was appended after validation.
+    from app.i18n.notices import ENGLISH_FALLBACK_NOTICE
+    assert ENGLISH_FALLBACK_NOTICE["te"] in r.response_message
+    assert r.provenance["translation"]["status"] == "english_notice"
 
 
 async def test_english_followup_after_telugu_stays_english(db_session):

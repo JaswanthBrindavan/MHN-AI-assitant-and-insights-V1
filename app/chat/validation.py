@@ -94,6 +94,7 @@ def _diagnostic_pattern(condition_alternation: str) -> str:
     have_branch = (
         _CONDITIONAL_GUARDS
         + r"\byou(?:'ve got| are suffering from|'re suffering from"
+        + r"| suffer from| seem to have| appear to have"
         + r"|(?: most| almost)?"
         + r"(?: surely| certainly| clearly| obviously| probably| likely| definitely"
         + r"| may| might)? have)\b[^.?!]{0,40}?\b"
@@ -143,7 +144,8 @@ def _dynamic_diagnostic_re(extra_conditions: tuple[str, ...]) -> re.Pattern[str]
 
 # Numeric disease probability, e.g. "80% chance you have ...".
 _PROBABILITY_RE = re.compile(
-    r"\b\d{1,3}\s?%\s?(?:chance|probability|risk|likelihood)\b", re.IGNORECASE
+    r"\b\d{1,3}\s?(?:%|percent|per cent)\s?"
+    r"(?:chance|probability|risk|likelihood)\b", re.IGNORECASE
 )
 
 # Phrases that are diagnostic/med-causal regardless of condition token.
@@ -170,8 +172,8 @@ _BANNED_SUBSTRINGS = (
 # this is the last line of defense if a leak slips into generated text.
 # Word-boundaried: "SGPT" (liver enzyme) and "claudication" must never match.
 _PROVIDER_LEAK_RE = re.compile(
-    r"\b(?:anthropic|openai|chatgpt|gpt-\d[\w.-]*|claude|gemini|deepseek"
-    r"|mistral|grok|copilot)\b"
+    r"\b(?:anthropic|openai|chatgpt|gpt\s?-?\d[\w.-]*|gpt-4o|claude|sonnet"
+    r"|haiku|opus|gemini|deepseek|mistral|llama|qwen|grok|copilot)\b"
     r"|\b(?:large\s+)?language\s+model\b",
     re.IGNORECASE,
 )

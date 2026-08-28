@@ -26,8 +26,12 @@ def test_digits_preserved_rejects_a_dropped_dose():
     assert not digits_preserved("take 500 mg twice", "take twice")
 
 
-def test_digits_preserved_is_order_insensitive_but_count_sensitive():
-    assert digits_preserved("5 and 10", "10 and 5")
+def test_digits_preserved_is_order_sensitive():
+    # Order matters now (audit medium): "take 2 of the 500mg" vs "take 500 of
+    # the 2mg" share a digit multiset and only one is survivable. Legitimate
+    # clause reordering pays a false trip; the dose<->strength swap is the
+    # asymmetry that decides it.
+    assert not digits_preserved("5 and 10", "10 and 5")
     assert not digits_preserved("5 and 10", "5 and 10 and 10")
 
 

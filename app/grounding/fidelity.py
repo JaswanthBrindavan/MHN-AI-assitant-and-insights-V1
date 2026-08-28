@@ -19,7 +19,6 @@ it — see app/grounding/claims.py for the clinical-assertion check that does.
 from __future__ import annotations
 
 import re
-from collections import Counter
 
 _DIGITS_RE = re.compile(r"\d+")
 
@@ -39,16 +38,33 @@ _UNIT_VALUE_RE = re.compile(
 )
 
 
+# Devanagari, Bengali, Gujarati, Gurmukhi, Odia, Tamil, Telugu, Kannada and
+# Malayalam digit blocks, folded to ASCII before comparison — a translation
+# that (correctly) rendered "104" as "१०४" used to TRIP the guard and
+# permanently degrade digit-bearing translations, including the Tele-MANAS
+# helpline number (audit low).
+_INDIC_DIGIT_FOLD = {}
+for _base in (0x0966, 0x09E6, 0x0AE6, 0x0A66, 0x0B66, 0x0BE6, 0x0C66,
+              0x0CE6, 0x0D66):
+    for _d in range(10):
+        _INDIC_DIGIT_FOLD[_base + _d] = ord("0") + _d
+
+
 def digits_preserved(source: str, translated: str) -> bool:
     """True when every digit sequence survived a transformation unchanged.
 
     Used on the translation pivot: IndicTrans2 is a pure MT model and will
     happily renumber things. A mismatch fails the whole translation and the
     English reply is shown instead.
+
+    ORDER-SENSITIVE on purpose: "take 2 of the 500mg" and "take 500 of the
+    2mg" contain the same multiset of digit runs, and only one of them is a
+    dose the reader survives (audit medium — the Counter compare passed a
+    dose<->strength swap). Native-script digits are folded to ASCII first.
     """
-    return Counter(_DIGITS_RE.findall(source)) == Counter(
-        _DIGITS_RE.findall(translated)
-    )
+    src = source.translate(_INDIC_DIGIT_FOLD)
+    dst = translated.translate(_INDIC_DIGIT_FOLD)
+    return _DIGITS_RE.findall(src) == _DIGITS_RE.findall(dst)
 
 
 def _normalize(value: str) -> str:

@@ -341,6 +341,16 @@ GET_DOCTOR_CONSULTS = ToolSpec(
     input_schema=_obj({}, []),
 )
 
+LIST_MEDICATIONS = ToolSpec(
+    name="list_medications",
+    description=(
+        "The reader's ACTIVE medication courses from the app — names only. "
+        "Use before answering 'am I on X', or when composing an answer that "
+        "depends on what they take. Private entries are excluded."
+    ),
+    input_schema=_obj({}, []),
+)
+
 GET_MEDICATION_ADHERENCE = ToolSpec(
     name="get_medication_adherence",
     description=(
@@ -369,6 +379,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_DOCUMENT_AI_RESULT,
     GET_SECTION_DETAILS,
     GET_DOCTOR_CONSULTS,
+    LIST_MEDICATIONS,
     GET_MEDICATION_ADHERENCE,
     ADD_MEDICATION,
     STOP_MEDICATION,

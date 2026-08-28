@@ -244,7 +244,10 @@ async def stop_course(
     tid = resolved.course.tracking_id
     got = await _request("POST", f"{_COURSES}/{tid}/stop", user_id, client=client)
     if got is None:
-        return MedResult(ok=False, reason="no_token")
+        # The resolve just SUCCEEDED, so config and token are fine — this is
+        # a transport failure, and labelling it no_token routed the reader to
+        # the wrong apology (audit medium).
+        return MedResult(ok=False, reason="unreachable")
     status, _ = got
     if status not in (200, 204):
         return MedResult(ok=False, reason=f"http_{status}")
@@ -261,7 +264,7 @@ async def delete_course(
     tid = resolved.course.tracking_id
     got = await _request("DELETE", f"{_COURSES}/{tid}", user_id, client=client)
     if got is None:
-        return MedResult(ok=False, reason="no_token")
+        return MedResult(ok=False, reason="unreachable")  # see stop_course
     status, _ = got
     if status not in (200, 204):
         return MedResult(ok=False, reason=f"http_{status}")

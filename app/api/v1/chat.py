@@ -195,9 +195,15 @@ async def list_sessions(
     session_ids = [s.id for s, _, _ in rows]
     previews: dict[uuid.UUID, str] = {}
     if session_ids:
+        # Only the first 80 chars travel — the old query loaded EVERY user
+        # message of every listed session, full text, to build 80-char
+        # previews (audit medium).
         first_msgs = (
             await db.execute(
-                select(ConversationMessage)
+                select(
+                    ConversationMessage.session_id,
+                    func.substr(ConversationMessage.message, 1, 80),
+                )
                 .where(
                     ConversationMessage.session_id.in_(session_ids),
                     ConversationMessage.role == "user",
@@ -206,9 +212,9 @@ async def list_sessions(
                     ConversationMessage.created_at, ConversationMessage.id
                 )
             )
-        ).scalars().all()
-        for m in first_msgs:
-            previews.setdefault(m.session_id, m.message[:80])
+        ).all()
+        for sid, preview in first_msgs:
+            previews.setdefault(sid, preview or "")
 
     return [
         ChatSessionInfo(
@@ -243,14 +249,22 @@ async def list_messages(
         raise HTTPException(status_code=404, detail="Session not found")
     authorize_user(session.user_id, current_user)
 
-    messages = (
-        await db.execute(
-            select(ConversationMessage)
-            .where(ConversationMessage.session_id == session_id)
-            .order_by(ConversationMessage.created_at, ConversationMessage.id)
-            .limit(MESSAGE_LIST_LIMIT)
-        )
-    ).scalars().all()
+    # NEWEST window: the old ascending LIMIT returned the FIRST 200 messages,
+    # so the most recent turns of a long conversation — the ones a restoring
+    # client actually needs — were unreachable (audit medium).
+    messages = list(reversed(list(
+        (
+            await db.execute(
+                select(ConversationMessage)
+                .where(ConversationMessage.session_id == session_id)
+                .order_by(
+                    ConversationMessage.created_at.desc(),
+                    ConversationMessage.id.desc(),
+                )
+                .limit(MESSAGE_LIST_LIMIT)
+            )
+        ).scalars().all()
+    )))
     return [
         ChatMessageInfo(
             id=m.id, role=m.role, message=m.message, created_at=m.created_at,

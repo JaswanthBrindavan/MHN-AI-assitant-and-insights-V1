@@ -54,9 +54,6 @@ class Settings(BaseSettings):
     # model. Haiku 4.5 and every OpenAI-compatible endpoint reject it with a
     # 400, so it stays off unless the configured model is known to support it.
     llm_thinking: str = "off"
-    # Reply language: "auto" mirrors the user's language; or a fixed BCP-47ish
-    # code ("en", "hi").
-    reply_language: str = "auto"
 
     # Chat engine: "legacy" (deterministic handler chain) | "agentic" (the LLM
     # orchestrates the same abilities as tools). Both ship; legacy is the
@@ -167,6 +164,13 @@ class Settings(BaseSettings):
                     f"unsafe configuration for APP_ENV={self.app_env!r}: "
                     + "; ".join(problems)
                 )
+        if self.service_token and len(self.service_token) < 32:
+            # The auth layer refuses tokens under 32 chars — a short one is
+            # a service path that LOOKS configured and silently is not.
+            logger.warning(
+                "SERVICE_TOKEN is set but shorter than 32 characters — the "
+                "server-to-server path is DISABLED until it is lengthened"
+            )
         # Say which mode we are in, so a dev-auth deploy is visible in the
         # very first log lines rather than discovered from behavior.
         logger.info(

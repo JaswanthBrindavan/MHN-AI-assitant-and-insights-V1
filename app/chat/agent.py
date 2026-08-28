@@ -150,8 +150,22 @@ async def run_agent(
         # Results still travel together in ONE message — that is about the
         # wire shape, not the execution order, and splitting them teaches the
         # model to stop calling tools in parallel.
+        # Rounds are bounded but the CALLS per round were not — one model
+        # turn could queue unbounded sequential DB/HTTP work. Everything past
+        # the cap is answered with an error result the model can see.
+        MAX_CALLS_PER_ROUND = 8
+        overflow = list(turn.tool_calls[MAX_CALLS_PER_ROUND:])
+        turn_calls = list(turn.tool_calls[:MAX_CALLS_PER_ROUND])
         results = []
-        for call in turn.tool_calls:
+        for call in overflow:
+            results.append(_as_error(
+                call,
+                RuntimeError(
+                    f"too many tool calls in one round (max "
+                    f"{MAX_CALLS_PER_ROUND}); call fewer tools at once"
+                ),
+            ))
+        for call in turn_calls:
             try:
                 results.append(await executor(call))
             except Exception as exc:  # noqa: BLE001 — executors must not kill a turn

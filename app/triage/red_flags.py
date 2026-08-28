@@ -237,6 +237,17 @@ EMERGENCY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"respond\w*|\bnot\s+responding\b")),
 )
 
+# Negated / historical chest-pain mentions must not feed the ACS PAIRING:
+# "no chest pain, just sweating a lot" fired the full EMERGENCY directive.
+# Applied ONLY to the combination rule — the direct tables stay negation-
+# blind on purpose (recall first; a floor never guesses about "not").
+_CHEST_NEGATION_RE = re.compile(
+    r"\b(?:no|without|denies|denied|not having|dont have|do not have|"
+    r"never had)\s+(?:any\s+)?(?:chest|seene)"
+    r"|\bchest pain (?:is )?(?:gone|resolved|better|subsided)\b"
+    r"|\bhad chest pain\b[^,.!?]{0,20}\b(?:years?|months?|last year|"
+    r"back|ago)\b")
+
 # Chest-pain stem pairs: "my chest hurts", "chest is paining" (standard Indian
 # English), "pain in chest". A bare hit is HIGH; with an ACS associate it is
 # EMERGENCY via the co-occurrence rule below.
@@ -363,8 +374,9 @@ def triage(message: str) -> TriageResult:
         level = max_level(level, HIGH)
         matched += high_hits
 
-    chest_hits = _find(text, CHEST_PAIN_PHRASES)
-    if CHEST_STEM_RE.search(text):
+    chest_text = _CHEST_NEGATION_RE.sub(" ", text)
+    chest_hits = _find(chest_text, CHEST_PAIN_PHRASES)
+    if CHEST_STEM_RE.search(chest_text):
         chest_hits.append("chest pain (pattern)")
     assoc_hits = _find(text, ACS_ASSOCIATED_PHRASES)
     if chest_hits and assoc_hits:
