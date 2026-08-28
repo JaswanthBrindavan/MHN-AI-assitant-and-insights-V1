@@ -82,7 +82,13 @@ def _headers(user_id: uuid.UUID) -> dict[str, str] | None:
 
 
 def _course(payload: dict) -> Course | None:
-    tid = payload.get("trackingId")
+    # Spring's CourseResponse names the key "id" (MedicineDtos.CourseResponse:
+    # `Integer id, ...`) — only the URL path VARIABLE is called trackingId.
+    # Requiring "trackingId" here made every listed course parse to None, so
+    # the list was always empty and every stop/remove/adherence resolve said
+    # "couldn't find" — for medications visibly on the reader's list (live
+    # bug). Both keys are accepted for compatibility.
+    tid = payload.get("id", payload.get("trackingId"))
     if not isinstance(tid, int):
         return None
     return Course(
@@ -209,7 +215,8 @@ async def _resolve(
                 "tablet", "tablets", "tab", "tabs", "pill", "pills",
                 "capsule", "capsules", "syrup", "drop", "drops", "injection",
                 "sachet", "sachets", "course", "dose", "medicine",
-                "medication", "med", "meds"}
+                "medicines", "medication", "medications", "med", "meds",
+                "prescription", "prescriptions", "list", "lists"}
     want_tokens = [t for t in re.split(r"[^a-z0-9]+", want)
                    if t and t not in _fillers]
     if not want_tokens:

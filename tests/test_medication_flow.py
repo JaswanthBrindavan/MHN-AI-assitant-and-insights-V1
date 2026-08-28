@@ -378,3 +378,23 @@ async def test_adherence_ask_renders_the_percentage(db_session, monkeypatch):
     assert "85.7%" in r["reply"]
     assert "Metformin 500" in r["reply"]
     assert r["action"] == "medication_adherence"
+
+
+@pytest.mark.parametrize(
+    ("msg", "action", "name"),
+    [
+        # The LIVE bug: "to my medications" leaked into the name and the
+        # strength was appended twice — Spring stored a course literally
+        # named "dolo 650 medications 650".
+        ("add dolo 650 to my medications", "add", "dolo 650"),
+        ("remove dolo 650 from my medications", "remove", "dolo 650"),
+        ("add metformin 500mg to my medications", "add", "metformin 500 mg"),
+        ("Stop my insulin medication", "stop", "insulin"),
+        ("remove insulin from my medications", "remove", "insulin"),
+    ],
+)
+def test_destination_clause_never_pollutes_the_name(msg, action, name):
+    intent = mf.detect_intent(msg)
+    assert intent is not None
+    assert intent["action"] == action
+    assert intent["name"].lower() == name
