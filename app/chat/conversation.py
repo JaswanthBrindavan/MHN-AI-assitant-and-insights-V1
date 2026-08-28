@@ -202,6 +202,42 @@ async def assemble_context(
     return (summary_row.summary if summary_row else None), last
 
 
+async def last_pending_med(
+    db: AsyncSession, session_id: uuid.UUID | None
+) -> dict | None:
+    """The in-flight medication draft from the last assistant turn, if any.
+
+    Carried on ``extracted_intent.pending_med`` so the deterministic medication
+    flow survives across turns with no new table. Never raises — a lookup
+    failure just means "no draft", and the flow starts fresh.
+    """
+    if session_id is None:
+        return None
+    try:
+        row = (
+            await db.execute(
+                select(ConversationMessage.extracted_intent)
+                .where(
+                    ConversationMessage.session_id == session_id,
+                    ConversationMessage.role == "assistant",
+                )
+                .order_by(
+                    ConversationMessage.created_at.desc(),
+                    ConversationMessage.id.desc(),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 — a missing draft must never break a turn
+        logger.warning("pending-med lookup failed", exc_info=True)
+        return None
+    if isinstance(row, dict):
+        pm = row.get("pending_med")
+        if isinstance(pm, dict):
+            return pm
+    return None
+
+
 async def questions_asked(db: AsyncSession, session_id: uuid.UUID) -> int:
     """How many clarifying questions the assistant has already asked.
 

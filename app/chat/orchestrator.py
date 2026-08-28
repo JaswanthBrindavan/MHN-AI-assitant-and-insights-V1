@@ -31,6 +31,7 @@ from app.chat.conversation import (
     add_message,
     assemble_context,
     ensure_session,
+    last_pending_med,
     maybe_compact,
     questions_asked,
 )
@@ -50,6 +51,7 @@ from app.chat.data_handlers import (
     handle_value_check,
 )
 from app.chat.db_release import ReleasingProvider
+from app.chat.medication_flow import handle_medication_turn
 from app.chat.replies import (
     GREETING_REPLIES,
     HIGH_ESCALATION,
@@ -368,6 +370,7 @@ async def _dispatch(
     provider: LLMProvider,
     session_id: uuid.UUID,
     pivot: InboundPivot | None = None,
+    pending_med: dict | None = None,
 ) -> ChatResult:
     tr = triage(message)
     risk = tr.level
@@ -397,6 +400,31 @@ async def _dispatch(
     else:
         t("Safety triage", "no red flags detected")
     t("Language", LANGUAGE_NAMES.get(lang, lang))
+
+    # 0.9) Deterministic medication add/stop/remove/list. SHARED across both
+    #      engines and placed HERE — after the triage floor (so an emergency
+    #      typed mid-flow still wins) but BEFORE the scope guard (so a bare
+    #      answer like "yes, morning and night" is not declined as off-topic).
+    #      The whole transaction is deterministic so it completes every time,
+    #      instead of the model sometimes deflecting a medication write.
+    if risk == NONE:
+        med = await handle_medication_turn(
+            db, user_id, message, pending_med, provider)
+        if med is not None:
+            t("Medication flow", f"deterministic — {med.get('action')}")
+            await _write_receipt(
+                db, user_id=user_id, session_id=session_id, message=message,
+                model_name=provider.model_name,
+            )
+            return ChatResult(
+                response_message=med["reply"],
+                risk_level=NONE,
+                recommended_action=med.get("action", "medication_flow"),
+                provenance={**med.get("provenance", {}),
+                            "pending_med": med.get("pending_med")},
+                language=lang,
+                trace=trace,
+            )
 
     # 1) Off-topic decline — only when the triage floor did not match.
     if not tr.matched and is_off_topic(message):
@@ -1059,6 +1087,9 @@ async def handle_chat(
     pivot = await pivot_inbound(message, translator)
     work = pivot.english_text if pivot.active else message
     session_id = await ensure_session(db, user_id, session_id)
+    # The in-flight medication draft (if any) from the last assistant turn, so
+    # the deterministic flow resumes across turns with no new table.
+    pending_med = await last_pending_med(db, session_id)
     await add_message(
         db, session_id, "user", message,
         extracted_intent={"risk": triage(work).level},
@@ -1070,7 +1101,8 @@ async def handle_chat(
     engine = get_settings().chat_engine
     with timed(chat_latency, engine=engine):
         result = await _dispatch(
-            db, user_id, work, provider, session_id, pivot=pivot
+            db, user_id, work, provider, session_id, pivot=pivot,
+            pending_med=pending_med,
         )
 
     chat_turns.inc(engine=engine, risk=result.risk_level)
@@ -1103,12 +1135,18 @@ async def handle_chat(
     # the extracted_intent JSON column already exists for exactly this kind of
     # per-message metadata.
     assistant_meta: dict | None = None
-    if result.documents or result.recommended_action:
+    pending_next = result.provenance.get("pending_med")
+    if result.documents or result.recommended_action or pending_next:
         assistant_meta = {}
         if result.documents:
             assistant_meta["documents"] = result.documents
         if result.recommended_action:
             assistant_meta["action"] = result.recommended_action
+        # Carry the in-flight medication draft to the next turn (deterministic
+        # flow state — see app/chat/medication_flow.py). Absent once the flow
+        # completes or is abandoned, so it self-clears.
+        if pending_next:
+            assistant_meta["pending_med"] = pending_next
     await add_message(
         db, session_id, "assistant", result.response_message,
         extracted_intent=assistant_meta,
