@@ -1571,7 +1571,54 @@ async def perform_medication_write(
     mhn-spring's MedicineController. A write that does not land is reported
     honestly, so the model is never left to invent a false confirmation.
     """
-    from app.medicines.service import add_course, delete_course, stop_course
+    from app.medicines.service import (
+        _resolve,
+        add_course,
+        delete_course,
+        stop_course,
+    )
+
+    if action in ("remove_all", "stop_all"):
+        # Every course matching the name, one confirmed sweep (duplicates on
+        # the list are indistinguishable by name, so per-item prompts would
+        # be unanswerable). Each write still reports honestly.
+        base_action = action.split("_", 1)[0]
+        resolved = await _resolve(
+            user_id, name, active_only=(base_action == "stop"))
+        matches = list(resolved.courses) if resolved.courses else (
+            [resolved.course] if resolved.course else [])
+        from app.medicines.service import _request
+
+        done, failed = 0, 0
+        for course in matches:
+            # Delete/stop by the RESOLVED id, not by re-resolving the name —
+            # each removal changes what the name would resolve to.
+            path = (f"/medicine/courses/{course.tracking_id}/stop"
+                    if base_action == "stop"
+                    else f"/medicine/courses/{course.tracking_id}")
+            got = await _request(
+                "POST" if base_action == "stop" else "DELETE", path, user_id)
+            if got is not None and got[0] in (200, 204):
+                done += 1
+            else:
+                failed += 1
+        verb = "Stopped" if base_action == "stop" else "Removed"
+        prov = {"path": "medication_command", "action": action, "name": name,
+                "ok": failed == 0 and done > 0,
+                "reason": None if failed == 0 else "partial"}
+        if done and not failed:
+            reply = (f"{verb} all {done} matching entries of {name}. You can "
+                     "see the change in the Medications section.")
+        elif done:
+            reply = (f"{verb} {done} of {done + failed} matching entries — "
+                     f"{failed} could not be updated just now. Please check "
+                     "the Medications section.")
+        else:
+            reply = ("I couldn't update those just now — please try again in "
+                     "a moment, or use the Medications section of the app.")
+        return {"reply": reply,
+                "action": "medication_updated" if done else "none",
+                "provenance": prov}
 
     if action == "add":
         result = await add_course(

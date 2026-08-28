@@ -198,7 +198,8 @@ def _name_quality(name: str) -> str:
 
 def _clean_name(raw: str) -> str:
     raw = re.sub(r"\b(?:tablet|tablets|tab|tabs|pill|pills|capsule|capsules|"
-                 r"syrup|from|to|my|the|medications?|medicines?|meds?|lists?|now|anymore|"
+                 r"syrup|from|to|my|the|medications?|medicines?|meds?|lists?|both|each|"
+                 r"all|these|those|of|entry|entries|courses?|now|anymore|"
                  r"already|today|yesterday|new|thanks?|thank you|please|pls|kindly|"
                  r"ok|okay|na)\b", " ",
                  raw, flags=re.I)
@@ -543,12 +544,6 @@ def detect_intent(message: str) -> dict | None:
     if (re.search(_STOP_VERB, message, re.I)
             and re.search(_ADD_VERB, message, re.I)):
         return None
-    # A bulk request ("stop ALL my meds", "clear everything") must be
-    # arbitrated by the model, never resolved as one fake drug — and must not
-    # fall through to LIST.
-    if (_BULK_RE.search(message) and _MED_WORD_RE.search(message)
-            and re.search(_STOP_VERB + "|" + _REMOVE_VERB, message, re.I)):
-        return None
     # A negated verb is not a command ("I haven't stopped vitamin d3",
     # "don't remove it").
     message = re.sub(r"\b(?:haven'?t|hasn'?t|didn'?t|don'?t|won'?t|never|not)\s+"
@@ -561,6 +556,12 @@ def detect_intent(message: str) -> dict | None:
         if re.search(verb, message, re.I):
             name, strength = _extract_name_strength(message, verb)
             if not name:
+                # "stop ALL my meds" — a bulk ask with no name left after the
+                # quantifier/filler strip is the model's to arbitrate, and it
+                # must not fall through to the LIST branch.
+                if (action != "add" and _BULK_RE.search(message)
+                        and _MED_WORD_RE.search(message)):
+                    return None
                 continue
             # "stop ALL my meds" / "remove everything" is a bulk request; two
             # drugs joined by "and" need splitting. Both go to the LLM.
@@ -598,6 +599,12 @@ def detect_intent(message: str) -> dict | None:
                     return None
             sched = parse_schedule(message)
             out = {"action": action, "name": name, "strength": strength}
+            # "remove BOTH of the dolo 650 entries" / "stop all my dolo" —
+            # the quantifier means EVERY matching course, with one confirm.
+            if action in ("stop", "remove") and re.search(
+                r"\b(?:both|all)\b", message, re.I
+            ):
+                out["all_matches"] = True
             if action == "add" and sched is not None:
                 out["schedule_pattern"], out["is_prn"] = sched
             return out
@@ -932,7 +939,8 @@ async def handle_medication_turn(
                      r"\bsyrup|\bdose\b", message, re.I)
     )
     return await _handle_stop_remove(
-        db, user_id, action, intent["name"], hard_signal=hard)
+        db, user_id, action, intent["name"], hard_signal=hard,
+        all_matches=bool(intent.get("all_matches")))
 
 
 async def _handle_adherence(db, user_id, name: str) -> dict:
@@ -966,6 +974,7 @@ async def _handle_adherence(db, user_id, name: str) -> dict:
 
 async def _handle_stop_remove(
     db, user_id, action: str, name: str, *, hard_signal: bool = True,
+    all_matches: bool = False,
 ) -> dict | None:
     from app.chat.data_handlers import perform_medication_write
     from app.medicines.service import _resolve
@@ -974,7 +983,21 @@ async def _handle_stop_remove(
     resolved = await _resolve(user_id, name, active_only=(action == "stop"))
     if not resolved.ok:
         if resolved.reason == "ambiguous":
-            names = ", ".join(c.name for c in resolved.courses[:4])
+            courses = resolved.courses
+            distinct = {c.name.lower() for c in courses}
+            # "remove BOTH dolo 650" — or duplicates so identical that asking
+            # "which one" is unanswerable (live case: three courses all named
+            # Dolo 650). One confirm covers the whole matching set.
+            if all_matches or len(distinct) == 1:
+                verb = "remove" if action == "remove" else "stop"
+                shown = ", ".join(c.name for c in courses[:6])
+                nxt = {"stage": "confirm", "action": f"{action}_all",
+                       "name": name, "count": len(courses)}
+                return _reply(
+                    f"You have {len(courses)} matching entries ({shown}). "
+                    f"Shall I {verb} all {len(courses)} of them?",
+                    pending=nxt)
+            names = ", ".join(c.name for c in courses[:4])
             return _reply(
                 f"You have more than one medication matching '{name}' "
                 f"({names}). Which one did you mean?")

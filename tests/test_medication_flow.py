@@ -398,3 +398,57 @@ def test_destination_clause_never_pollutes_the_name(msg, action, name):
     assert intent is not None
     assert intent["action"] == action
     assert intent["name"].lower() == name
+
+
+async def test_remove_both_confirms_then_sweeps_all_matches(
+    db_session, monkeypatch,
+):
+    """The live case: several indistinguishable "Dolo 650" entries. "remove
+    both of the dolo 650 medications" must offer ONE remove-all confirm (per-
+    item "which one?" is unanswerable for identical names), then delete every
+    match by its resolved id."""
+    import httpx
+
+    from app.auth import set_current_user_jwt
+    from app.config import get_settings
+
+    monkeypatch.setenv("MHN_SPRING_BASE_URL", "http://spring.internal:8080")
+    get_settings.cache_clear()
+    set_current_user_jwt("Bearer user-jwt")
+    deleted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[
+                {"id": 1, "name": "Dolo 650"},
+                {"id": 2, "name": "Dolo 650"},
+                {"id": 3, "name": "dolo 650 medications 650"},
+            ])
+        deleted.append(request.url.path)
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *a, **kw: real_client(transport=transport,
+                                     **{k: v for k, v in kw.items()
+                                        if k != "transport"}),
+    )
+    try:
+        r = await mf.handle_medication_turn(
+            db_session, USER, "remove both of the dolo 650 medications", None)
+        assert r is not None
+        pm = r["pending_med"]
+        assert pm["action"] == "remove_all" and pm["count"] == 3
+        assert "all 3" in r["reply"]
+
+        r2 = await mf.handle_medication_turn(db_session, USER, "yes", pm)
+        assert r2 is not None
+        assert "Removed all 3" in r2["reply"]
+        assert sorted(deleted) == ["/medicine/courses/1", "/medicine/courses/2",
+                                   "/medicine/courses/3"]
+    finally:
+        set_current_user_jwt(None)
+        get_settings.cache_clear()
