@@ -137,6 +137,47 @@ async def test_nothing_recent_is_ever_touched(db_session):
         db_session, message_days=180, receipt_days=400
     )
 
-    assert result == {"messages_purged": 0, "receipts_purged": 0}
+    assert result == {
+        "messages_purged": 0, "receipts_purged": 0,
+        "summaries_superseded_purged": 0, "summaries_purged": 0,
+    }
     counts = await _counts(db_session)
     assert counts["messages"] == 3 and counts["receipts"] == 3
+
+
+async def test_superseded_and_stale_summaries_are_purged(db_session):
+    """Summaries are content, not audit: superseded versions go immediately,
+    and the survivor follows the MESSAGE retention window (audit high — they
+    used to outlive the transcript forever, questions verbatim included)."""
+    import uuid as _uuid
+    from datetime import timedelta
+
+    from app.chat.retention import purge_expired
+    from app.models.chat import ConversationSession, ConversationSummary
+    from app.models.common import utcnow
+
+    sid = _uuid.uuid4()
+    db_session.add(ConversationSession(id=sid, user_id=_uuid.uuid4()))
+    old = utcnow() - timedelta(days=400)
+    for version in (1, 2, 3):
+        db_session.add(ConversationSummary(
+            session_id=sid, version=version, summary={"v": version},
+        ))
+    await db_session.flush()
+    # age every version far past the message window
+    from sqlalchemy import update
+    await db_session.execute(
+        update(ConversationSummary).values(created_at=old)
+    )
+    await db_session.commit()
+
+    counts = await purge_expired(
+        db_session, message_days=180, receipt_days=400, batch_size=100
+    )
+    assert counts["summaries_superseded_purged"] == 2  # v1, v2
+    assert counts["summaries_purged"] == 1             # stale v3
+    from sqlalchemy import func, select
+    left = (await db_session.execute(
+        select(func.count()).select_from(ConversationSummary)
+    )).scalar()
+    assert left == 0

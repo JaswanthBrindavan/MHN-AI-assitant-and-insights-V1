@@ -35,7 +35,12 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.chat.episodes import open_episodes, open_or_touch
+from app.chat.episodes import (
+    is_recovery_message,
+    open_episodes,
+    open_or_touch,
+    resolve,
+)
 from app.chat.episodes import render_for_prompt as render_episodes
 from app.chat.erasure import is_pending
 from app.chat.long_term import recall, record_topics
@@ -167,6 +172,7 @@ async def record(
     codes: Iterable[str] = (),
     flags: list[str] | None = None,
     risk: str = "none",
+    message: str = "",
 ) -> None:
     """Write what this turn should be remembered for. Fails open.
 
@@ -185,6 +191,33 @@ async def record(
         except Exception:  # noqa: BLE001
             logger.warning("topic recording failed; continuing", exc_info=True)
             record_fail_open("record_topics")
+
+    # Close-out before open: "my chest pain is better now" mentions the
+    # symptom AND says it improved. resolve() had NO caller (audit high), so
+    # reporting recovery only re-touched the episode — the [P] block kept
+    # asserting an unresolved symptom for two more weeks, and telling Davi
+    # you were better could only EXTEND that.
+    if message and is_recovery_message(message):
+        resolved_any = False
+        for term in (flags or []):
+            try:
+                if await resolve(db, user_id, term):
+                    resolved_any = True
+            except Exception:  # noqa: BLE001
+                logger.warning("episode resolve failed; continuing",
+                               exc_info=True)
+        if not resolved_any and not flags:
+            # "I'm feeling better" with no symptom named: close the lone open
+            # episode if there is exactly one — with several, guessing which
+            # one recovered would be wrong more often than right.
+            try:
+                episodes = await open_episodes(db, user_id)
+                if len(episodes) == 1:
+                    await resolve(db, user_id, episodes[0].symptom)
+            except Exception:  # noqa: BLE001
+                logger.warning("episode resolve failed; continuing",
+                               exc_info=True)
+        return  # a recovery report never opens or extends an episode
 
     for term in (flags or [])[:MAX_EPISODES_PER_TURN]:
         try:

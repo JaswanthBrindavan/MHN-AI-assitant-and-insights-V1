@@ -94,12 +94,16 @@ def _ok_client(body=IMAGE_BYTES, content_type="image/jpeg", declared_length=None
 
 @pytest.fixture(autouse=True)
 def _spring_configured(monkeypatch):
+    from app.auth import set_current_user_jwt
     from app.config import get_settings
 
     monkeypatch.setenv("MHN_SPRING_BASE_URL", "http://spring.internal:8080")
-    monkeypatch.setenv("MHN_SPRING_TOKEN", "s" * 40)
+    # The presigned-URL call authenticates with the READER's forwarded JWT —
+    # Spring ignores service tokens (its only filter parses user JWTs).
+    set_current_user_jwt("Bearer user-jwt-for-tests")
     get_settings.cache_clear()
     yield
+    set_current_user_jwt(None)
     get_settings.cache_clear()
 
 
@@ -495,3 +499,20 @@ async def test_a_lying_content_length_does_not_get_a_free_pass(db_session):
     assert doc is None
     jobs = await _jobs(db_session)
     assert jobs[0].error == "too_large"
+
+
+async def test_no_forwarded_jwt_means_no_spring_call(db_session):
+    """Spring only accepts user JWTs; with none captured the fetch refuses
+    before any network call (fail-closed), instead of sending a service token
+    Spring would 401."""
+    from app.auth import set_current_user_jwt
+
+    set_current_user_jwt(None)
+    user_id = uuid.uuid4()
+    client = _ok_client()
+    got = await fetch_document_bytes(
+        db_session, viewer_id=user_id, owner_id=user_id, kind="report",
+        resource_id=42, is_private=False, client=client,
+    )
+    assert got is None
+    assert client.calls == []  # never even asked

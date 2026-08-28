@@ -35,6 +35,11 @@ def get_engine():
             "future": True,
             "pool_pre_ping": True,
             "pool_recycle": 300,
+            # A failed statement's traceback renders its bind parameters —
+            # user UUIDs next to health values — into application logs. With
+            # this, SQLAlchemy renders "[SQL parameters hidden]" instead;
+            # set echo/logging locally when a parameter is genuinely needed.
+            "hide_parameters": True,
         }
         # SQLite (tests) uses a pool that takes none of these.
         if not settings.database_url.startswith("sqlite"):

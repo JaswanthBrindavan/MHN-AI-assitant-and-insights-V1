@@ -223,9 +223,49 @@ def find_banned(
     return None
 
 
+# Care-discouraging phrasing that must never survive at HIGH/EMERGENCY —
+# even alongside an escalation banner, a body that talks the reader OUT of
+# care ("this is not an emergency, no need to see anyone") teaches them the
+# banner is boilerplate. (The old check was negation-blind: the word
+# "emergency" inside "not an emergency" COUNTED AS the escalation.)
+_CARE_DISCOURAGING_RE = re.compile(
+    r"\bnot?\s+(?:really\s+|actually\s+)?an?\s+emergency\b"
+    r"|\bno\s+emergency\b"
+    r"|\bno need to (?:see|go|call|visit|rush|consult)\b"
+    r"|\bnothing to worry\b"
+    r"|\b(?:don'?t|do not|doesn'?t|does not) "
+    r"(?:need (?:a|to see|to call|to go|to visit)|bother going)\b"
+    r"|\bno need (?:for|of) (?:a )?(?:doctor|hospital)\b"
+    r"|\bsettle on its own\b|\bnothing serious\b",
+    re.IGNORECASE,
+)
+
+_NEGATION_WINDOW_RE = re.compile(
+    r"\b(?:not?|isn'?t|doesn'?t|don'?t|needn'?t|never|without|no need to)\s*"
+    r"(?:\w+\s+){0,6}$"
+)
+
+
 def has_escalation(text: str) -> bool:
+    """True when a REAL escalation directive is present.
+
+    Negation-aware: a marker preceded by a nearby negation ("you do NOT need
+    to go to the nearest emergency department") is not an escalation.
+    """
     low = text.lower()
-    return any(m in low for m in _ESCALATION_MARKERS)
+    for m in _ESCALATION_MARKERS:
+        start = low.find(m)
+        while start != -1:
+            window = low[max(0, start - 30):start]
+            if not _NEGATION_WINDOW_RE.search(window):
+                return True
+            start = low.find(m, start + 1)
+    return False
+
+
+def discourages_care(text: str) -> bool:
+    """True when the text talks the reader OUT of seeking care."""
+    return bool(_CARE_DISCOURAGING_RE.search(text))
 
 
 def validate_reply(
@@ -241,8 +281,14 @@ def validate_reply(
     if banned is not None:
         return ValidationResult(False, f"banned:{banned}")
 
-    if risk_level in (HIGH, EMERGENCY) and not has_escalation(reply):
-        return ValidationResult(False, "missing-escalation")
+    if risk_level in (HIGH, EMERGENCY):
+        if discourages_care(reply):
+            # Pure reassurance at HIGH is the stated invariant this enforces;
+            # it fires even when an escalation banner is ALSO present, because
+            # a body that contradicts the banner teaches readers to ignore it.
+            return ValidationResult(False, "reassurance-at-high")
+        if not has_escalation(reply):
+            return ValidationResult(False, "missing-escalation")
 
     return ValidationResult(True)
 

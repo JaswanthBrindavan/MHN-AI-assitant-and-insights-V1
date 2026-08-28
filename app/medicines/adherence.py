@@ -37,6 +37,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from app.auth import current_user_jwt
 from app.config import get_settings
 from app.telemetry import record_fail_open
 
@@ -91,13 +92,19 @@ async def fetch_adherence(
     """
     base = _base()
     settings = get_settings()
-    if not base or not settings.mhn_spring_token:
+    if not base:
+        return None
+    # Spring's only auth filter parses a USER JWT — the old service-token +
+    # X-User-Id headers 401'd on every call. Forward the reader's own JWT
+    # (same fix as medicines/service.py); no JWT captured -> no call.
+    jwt = current_user_jwt()
+    if not jwt:
         return None
 
     url = base + _ADHERENCE_PATH.format(tracking_id=tracking_id)
     headers = {
-        "Authorization": f"Bearer {settings.mhn_spring_token}",
-        # Spring authorizes for THIS user and resolves their timezone from it.
+        "Authorization": f"Bearer {jwt}",
+        # Parity with the other Spring clients; the JWT is what authenticates.
         "X-User-Id": str(user_id),
     }
     params = {"days": days} if days else None

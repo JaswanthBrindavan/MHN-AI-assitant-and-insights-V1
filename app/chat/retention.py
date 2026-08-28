@@ -32,10 +32,15 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from app.models.chat import ConversationMessage, RagTurnReceipt
+from app.models.chat import (
+    ConversationMessage,
+    ConversationSummary,
+    RagTurnReceipt,
+)
 from app.models.common import utcnow
 
 logger = logging.getLogger("davi.retention")
@@ -70,6 +75,43 @@ async def _purge_older_than(
     return removed
 
 
+async def _purge_superseded_summaries(
+    db: AsyncSession, batch_size: int
+) -> int:
+    """Drop summary versions a newer version has replaced.
+
+    Compaction keeps every version forever (audit high): each version holds
+    the reader's questions verbatim, their medication list and an LLM
+    narrative — so superseded rows are pure PHI bloat with no reader-facing
+    or audit purpose. Only max(version) per session survives.
+    """
+    newer = aliased(ConversationSummary)
+    removed = 0
+    while True:
+        ids = (
+            await db.execute(
+                select(ConversationSummary.id)
+                .where(
+                    exists(
+                        select(1).where(
+                            newer.session_id == ConversationSummary.session_id,
+                            newer.version > ConversationSummary.version,
+                        )
+                    )
+                )
+                .limit(batch_size)
+            )
+        ).scalars().all()
+        if not ids:
+            break
+        result = await db.execute(
+            delete(ConversationSummary).where(ConversationSummary.id.in_(ids))
+        )
+        removed += getattr(result, "rowcount", 0) or len(ids)
+        await db.commit()
+    return removed
+
+
 async def purge_expired(
     db: AsyncSession,
     *,
@@ -93,5 +135,14 @@ async def purge_expired(
     )
     counts["receipts_purged"] = await _purge_older_than(
         db, RagTurnReceipt, now - timedelta(days=receipt_days), batch_size
+    )
+    # Summaries are CONTENT (verbatim questions, medications, an LLM
+    # narrative), not audit — so they follow the MESSAGE window, not the
+    # receipt window. Without this they outlived the transcript forever.
+    counts["summaries_superseded_purged"] = await _purge_superseded_summaries(
+        db, batch_size
+    )
+    counts["summaries_purged"] = await _purge_older_than(
+        db, ConversationSummary, now - timedelta(days=message_days), batch_size
     )
     return counts

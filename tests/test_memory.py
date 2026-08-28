@@ -76,3 +76,40 @@ def test_merge_caps_topics_and_open_questions():
     new = {"topics": [f"t{i}" for i in range(10, 20)], "open_questions": []}
     merged = merge_summaries(old, new)
     assert len(merged["topics"]) == CAP  # capped at 12
+
+
+async def test_recovery_report_resolves_the_episode_instead_of_extending_it(
+    db_session,
+):
+    """"my chest pain is better now" must CLOSE the chest-pain episode.
+    resolve() had no caller (audit high): recovery reports re-touched the
+    episode, so the [P] block kept asserting the symptom for two more weeks."""
+    import uuid as _uuid
+
+    from app.chat import memory_assembly
+    from app.chat.episodes import open_episodes, open_or_touch
+
+    user = _uuid.uuid4()
+    await open_or_touch(db_session, user, "chest pain", "high")
+    assert len(await open_episodes(db_session, user)) == 1
+
+    await memory_assembly.record(
+        db_session, user, codes=(), flags=["chest pain"], risk="high",
+        message="my chest pain is much better now",
+    )
+    assert await open_episodes(db_session, user) == []
+
+
+async def test_bare_feeling_better_closes_the_only_open_episode(db_session):
+    import uuid as _uuid
+
+    from app.chat import memory_assembly
+    from app.chat.episodes import open_episodes, open_or_touch
+
+    user = _uuid.uuid4()
+    await open_or_touch(db_session, user, "vomiting blood", "high")
+    await memory_assembly.record(
+        db_session, user, codes=(), flags=[], risk="none",
+        message="feeling better now, thanks",
+    )
+    assert await open_episodes(db_session, user) == []

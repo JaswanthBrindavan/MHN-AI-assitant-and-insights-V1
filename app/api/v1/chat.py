@@ -274,6 +274,7 @@ async def chat_stream(
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
+    authorization: str | None = Header(default=None),
 ) -> StreamingResponse:
     """Streamed chat.
 
@@ -293,6 +294,10 @@ async def chat_stream(
     """
     user_id = payload.user_id or current_user
     authorize_user(user_id, current_user)
+    # Same capture as POST /chat: without it, medication writes (and every
+    # other forwarded-JWT Spring call) silently failed on the streaming
+    # endpoint while working on the plain one.
+    set_current_user_jwt(authorization)
 
     result = await handle_chat(
         db, user_id, payload.message, provider, session_id=payload.session_id
@@ -396,6 +401,7 @@ async def chat_voice(
     current_user: uuid.UUID = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
     provider: LLMProvider = Depends(get_llm_provider),
+    authorization: str | None = Header(default=None),
 ) -> ChatResponse:
     """A spoken message.
 
@@ -409,6 +415,7 @@ async def chat_voice(
     phoneme and by everything else. The client re-sends with confirmed=true
     once the reader agrees.
     """
+    set_current_user_jwt(authorization)  # spoken med commands need it too
     sidecar = get_voice_sidecar()
     if sidecar is None:
         raise HTTPException(
