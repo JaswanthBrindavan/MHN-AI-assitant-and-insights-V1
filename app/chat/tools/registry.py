@@ -39,12 +39,19 @@ EXECUTORS = {
     "get_document_ai_result": executors.get_document_ai_result,
     "get_section_details": executors.get_section_details,
     "get_doctor_consults": executors.get_doctor_consults,
+    "list_medications": executors.list_medications,
     "get_medication_adherence": executors.get_medication_adherence,
     "add_medication": executors.add_medication,
     "stop_medication": executors.stop_medication,
     "remove_medication": executors.remove_medication,
     "analyze_image": executors.analyze_image,
 }
+
+# Tools that MUTATE state: their None is a failed action, never an empty read.
+WRITE_TOOLS = frozenset({
+    "add_medication", "stop_medication", "remove_medication",
+    "log_lifestyle_entry",
+})
 
 # Tools whose output a MODEL produced rather than a database returned. Their
 # values must never become sources for the numeric-fidelity guard: an OCR
@@ -92,6 +99,21 @@ async def execute_tool(
             payload = await fn(db, user_id, call.arguments, session_id)
 
         if payload is None:
+            if call.name in WRITE_TOOLS:
+                # A WRITE that produced nothing is a failure to act, not an
+                # empty read — the old read-shaped note coached the model to
+                # misreport a failed write as "nothing on file".
+                return ToolResult(
+                    call_id=call.id,
+                    content=json.dumps(
+                        {
+                            "ok": False,
+                            "note": "The update could not be made. Tell the "
+                            "reader plainly it was NOT saved; never imply it "
+                            "was.",
+                        }
+                    ),
+                )
             # Not an error — "nothing on file" is a real, useful answer.
             return ToolResult(
                 call_id=call.id,

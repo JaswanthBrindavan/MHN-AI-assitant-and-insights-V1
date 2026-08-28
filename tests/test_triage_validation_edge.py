@@ -184,14 +184,18 @@ def test_associated_phrase_alone_is_none(assoc):
     assert triage(assoc).level == NONE
 
 
-def test_negated_chest_pain_still_pairs_by_design():
-    # NOTE: the severity floor is intentionally negation-blind. Substring
-    # matching treats "no chest pain but sweating" as chest pain + associated
-    # feature and escalates to EMERGENCY — over-triage is the safe direction.
+def test_negated_chest_pain_no_longer_pairs():
+    # The direct tables stay negation-blind (recall first), but the ACS
+    # COMBINATION rule is negation-aware now: "no chest pain but sweating"
+    # fired the full EMERGENCY directive on a sentence that denies the
+    # cardinal symptom (audit medium).
     result = triage("no chest pain but sweating a lot")
-    assert result.level == EMERGENCY
-    assert "chest pain" in result.matched_terms
-    assert "sweating" in result.matched_terms
+    assert result.level == NONE
+
+    # An affirmed pairing still escalates.
+    assert triage("chest pain and sweating").level == EMERGENCY
+    # And a negated DIRECT emergency phrase still matches (deliberate).
+    assert triage("she is not unconscious").level == EMERGENCY
 
 
 # --------------------------------------------------------------------------- #

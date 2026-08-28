@@ -125,7 +125,12 @@ async def latest_summary(
         await db.execute(
             select(ConversationSummary)
             .where(ConversationSummary.session_id == session_id)
-            .order_by(ConversationSummary.version.desc())
+            # id DESC breaks the tie when two concurrent turns raced to the
+            # same version number — without it "latest" was whichever row the
+            # database happened to return first (audit medium; the unique
+            # (session_id, version) constraint is future schema work).
+            .order_by(ConversationSummary.version.desc(),
+                      ConversationSummary.id.desc())
         )
     ).scalars().first()
 
@@ -159,7 +164,21 @@ async def maybe_compact(
             return None
 
         new_part = compact_messages(
-            [{"role": m.role, "message": m.message} for m in to_fold]
+            [
+                {
+                    "role": m.role,
+                    # Compaction's extractors (triage vocabulary, medication
+                    # and topic patterns) are English/Hindi — for a pivoted
+                    # message the stored ENGLISH text is the one they can
+                    # actually read. History keeps the original words; this
+                    # only affects what compaction extracts.
+                    "message": (
+                        (m.extracted_intent or {}).get("english")
+                        or m.message
+                    ),
+                }
+                for m in to_fold
+            ]
         )
         old = summary_row.summary if summary_row else empty_summary()
         merged = merge_summaries(old, new_part)

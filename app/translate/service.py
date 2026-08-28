@@ -33,6 +33,7 @@ import httpx
 from app.config import get_settings
 from app.grounding.fidelity import digits_preserved
 from app.i18n.language import detect_language
+from app.telemetry import record_fail_open
 
 logger = logging.getLogger("davi.translate")
 
@@ -102,6 +103,7 @@ class SidecarTranslator:
             return data if isinstance(data, dict) else None
         except Exception:  # noqa: BLE001 — fail open, never crash a chat turn
             logger.warning("translator sidecar %s failed", path, exc_info=True)
+            record_fail_open("translator")
             return None
 
     async def detect(self, text: str) -> dict | None:
@@ -218,5 +220,6 @@ async def pivot_outbound(
         return None
     if not digits_preserved(english_text, out):
         logger.warning("digit mismatch after translation; keeping English")
+        record_fail_open("translator_digits")
         return None
     return out

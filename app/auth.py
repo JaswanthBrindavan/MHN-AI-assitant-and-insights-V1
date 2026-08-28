@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
+import logging
 from contextvars import ContextVar
 from uuid import UUID
 
@@ -31,6 +32,8 @@ from jose import JWTError, jwt
 from app.config import get_settings
 
 # Stable dev identity used when AUTH_ENABLED=false and no header is supplied.
+logger = logging.getLogger("davi.auth")
+
 DEV_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 # The raw end-user JWT for the current request, captured at the API layer so a
@@ -72,6 +75,13 @@ def _hmac_key(settings) -> str | bytes:
         try:
             return base64.b64decode(settings.jwt_secret, validate=True)
         except (binascii.Error, ValueError):
+            # Spring ALWAYS Base64-decodes its secret. Falling back silently
+            # meant a non-Base64 value verified nothing Spring signed — every
+            # request 401'd with no clue why (audit medium).
+            logger.warning(
+                "JWT_SECRET is not valid Base64 but JWT_SECRET_BASE64 is on; "
+                "using the raw string — Spring-signed tokens will NOT verify"
+            )
             return settings.jwt_secret
     return settings.jwt_secret
 

@@ -110,6 +110,15 @@ def is_factual(sentence: str) -> bool:
     return bool(
         _UNIT_RE.search(sentence)
         or _THRESHOLD_RE.search(sentence)
+        # A unit-less numeric RANGE in clinical context ("a normal reading is
+        # between 60 and 100") is a reference-range claim even without a unit
+        # token — hallucinated ranges never required a citation (audit medium).
+        or re.search(
+            r"\b(?:between|range|normal|typical|upper|lower|below|above|"
+            r"under|over)\b[^.?!]{0,30}\b\d+(?:\.\d+)?\s*"
+            r"(?:to|and|[–-])\s*\d+(?:\.\d+)?\b",
+            sentence, re.IGNORECASE,
+        )
         or assertion_kind(sentence)
     )
 
@@ -125,7 +134,10 @@ def _normalize(answer: str) -> str:
 
 def _sentences(answer: str) -> list[str]:
     normalized = _normalize(answer)
-    parts = re.split(r"(?<=[.!?])\s+", normalized.strip())
+    # Newlines and list markers are sentence boundaries too: bullet-formatted
+    # answers — the most likely LLM formatting for dosing and values — used to
+    # need only ONE trailing [n] to "ground" every line above it (audit high).
+    parts = re.split(r"(?<=[.!?])\s+|\n+\s*(?:[-*•]\s*)?", normalized.strip())
     return [p for p in parts if p.strip()]
 
 
@@ -143,8 +155,17 @@ def analyze_grounding(
     num_chunks: int,
     has_patient_context: bool,
     retrieval_happened: bool,
+    chunk_texts: list[str] | None = None,
+    patient_text: str = "",
 ) -> GroundingReport:
-    """Verify citations and flag ungrounded factual sentences."""
+    """Verify citations and flag ungrounded factual sentences.
+
+    With ``chunk_texts``, citations are verified by CONTENT, not just
+    existence: a sentence citing [n] whose unit-bearing values do not appear
+    in chunk n is an ``unsupported_value`` violation. Existence-only checking
+    let any in-range [n] legitimize a fabricated number even in enforce mode
+    (audit high — false assurance in the audit trail).
+    """
     provided = {str(i) for i in range(1, num_chunks + 1)}
     if has_patient_context:
         provided.add("P")
@@ -180,6 +201,29 @@ def analyze_grounding(
             violations.append(
                 {"type": "ungrounded_claim", "sentence": sentence.strip()}
             )
+
+        # Content check: every unit-bearing value in a [n]/[P]-cited sentence
+        # must literally appear in the cited source.
+        if chunk_texts is not None and markers:
+            from app.grounding.fidelity import unit_values
+
+            stated = unit_values(sentence)
+            if stated:
+                sources: list[str] = []
+                for marker in markers:
+                    if marker == "P":
+                        sources.append(patient_text)
+                    elif marker.isdigit():
+                        i = int(marker) - 1
+                        if 0 <= i < len(chunk_texts):
+                            sources.append(chunk_texts[i])
+                blob = " ".join(sources)
+                missing = [v for v in stated if v not in blob]
+                if missing and sources:
+                    violations.append({
+                        "type": "unsupported_value",
+                        "sentence": sentence.strip(),
+                    })
 
     status = "violations" if violations else "grounded"
     return GroundingReport(

@@ -143,7 +143,13 @@ def parse_document_query(message: str) -> DocumentQuery | None:
     if (
         relation is None
         and owner_name is None
-        and not re.search(r"\bmy\b|\bour\b|\bdo i have\b", low)
+        and not re.search(
+            # "show ALL reports" / "list the reports" imply the reader's own
+            # just as clearly as "my" — requiring the possessive dropped them
+            # to the LLM (audit low).
+            r"\bmy\b|\bour\b|\bdo i have\b|\ball\b|\bthe\b|\bevery\b",
+            low,
+        )
     ):
         return None
     return DocumentQuery(
@@ -245,7 +251,15 @@ def parse_tracker_add(message: str) -> TrackerAdd | None:
         if not m:
             continue
         qty = _parse_quantity(m.group(1))
-        if qty is None or qty <= 0 or qty > 100:
+        if qty is None or qty <= 0:
+            return None
+        # Volumes are denominated differently: "500 ml of water" is one
+        # bottle, not five hundred glasses — the flat 100 cap rejected every
+        # ml-phrased hydration entry (audit medium).
+        unit_hint = (m.group(2) or "").lower() if m.lastindex and m.lastindex >= 2 else ""
+        cap = 5000 if ("ml" in unit_hint or "litre" in unit_hint
+                       or "liter" in unit_hint) else 100
+        if qty > cap:
             return None
         if mode == "smoke":
             unit = _UNIT_CANON.get((m.group(2) or "cigarettes").lower(), "cigarette")
@@ -452,6 +466,19 @@ def parse_metric_query(message: str) -> MetricQuery | None:
 # --------------------------------------------------------------------------- #
 # Stated-value check ("my sugar is 117", "bp is 150/95", "hba1c 6.8")
 # --------------------------------------------------------------------------- #
+# "my mother's bp is 150/95" is HER reading — assessing it as the READER's
+# writes the wrong person's alarm into the conversation (audit medium).
+_THIRD_PARTY_VALUE_RE = re.compile(
+    r"\b(?:my|our)\s+(?:mother|mom|mum|father|dad|wife|husband|son|daughter|"
+    r"brother|sister|grand\w+|aunty?|uncle|friend|neighbou?r|baby)\b[^.?!]{0,30}"
+    r"\b(?:bp|blood pressure|sugar|glucose|spo2|hba1c|pulse|heart rate|"
+    r"cholesterol|h(?:a)?emoglobin)\b"
+    r"|\b(?:his|her|their)\s+(?:bp|blood pressure|sugar|glucose|spo2|hba1c|"
+    r"pulse|heart rate|cholesterol|h(?:a)?emoglobin)\b",
+    re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True)
 class StatedValue:
     metric: str                    # range key, or "blood_pressure"
@@ -467,9 +494,12 @@ _VALUE_METRIC_TERMS: tuple[tuple[str, str], ...] = (
     (r"\bhdl\b", "hdl"),
     (r"total cholesterol|cholesterol", "total_cholesterol"),
     (r"h(?:a)?emoglobin|\bhb\b|\bhg\b", "hemoglobin"),
-    (r"blood sugar|sugar|glucose|fasting sugar", "blood_sugar"),
+    (r"blood sugar|glucose|fasting sugar"
+     # bare "sugar" only when NOT dietary ("sugar intake is 50 grams")
+     r"|sugar(?!\s*(?:intake|consumption|grams?|gram\b|cubes?|spoons?|"
+     r"in my (?:tea|coffee|diet)))", "blood_sugar"),
     (r"heart rate|pulse|heartbeat", "heart_rate"),
-    (r"spo2|oxygen (?:level|saturation)|sat", "spo2"),
+    (r"spo2|oxygen (?:level|saturation)|\bsats?\b(?!urday)", "spo2"),
     (r"\bbmi\b", "bmi"),
 )
 # Plausible reading bounds per metric — also reject spurious number matches.
@@ -490,6 +520,8 @@ _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
 def parse_stated_value(message: str) -> StatedValue | None:
+    if _THIRD_PARTY_VALUE_RE.search(message):
+        return None  # a relative's reading, not the reader's
     """Parse a reading the user states about themselves ("my sugar is 117").
 
     Returns None when no metric+plausible-value pair is present. The value must

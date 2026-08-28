@@ -30,6 +30,7 @@ import httpx
 
 from app.config import get_settings
 from app.i18n.language import LANGUAGE_NAMES
+from app.telemetry import record_fail_open
 
 logger = logging.getLogger("davi.voice")
 
@@ -131,6 +132,7 @@ class VoiceSidecar:
             return data if isinstance(data, dict) else None
         except Exception:  # noqa: BLE001 — never crash a turn
             logger.warning("voice sidecar %s failed", path, exc_info=True)
+            record_fail_open("voice")
             return None
 
     async def transcribe(

@@ -90,6 +90,7 @@ from app.i18n.language import (
     detect_language,
     language_directive,
 )
+from app.i18n.notices import english_fallback_notice
 from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
 from app.llm.tools import UserMessage
@@ -108,7 +109,6 @@ from app.telemetry import (
     llm_tokens,
     record_fail_open,
     timed,
-    tool_calls,
 )
 from app.translate.service import (
     InboundPivot,
@@ -129,6 +129,15 @@ from app.triage.red_flags import (
 )
 
 logger = logging.getLogger("davi.chat")
+
+
+def lang_hint(pivot, message: str) -> str:
+    """The reader's language for notice selection — pivot detection first,
+    script-range detection as the fallback."""
+    if pivot is not None and pivot.language and pivot.language != "en":
+        return pivot.language
+    return detect_language(message)
+
 
 
 @dataclass
@@ -226,14 +235,22 @@ async def _apply_grounding(
         num_chunks=len(chunks),
         has_patient_context=bool(patient_text),
         retrieval_happened=bool(chunks),
+        # Content-verified citations: a cited sentence's values must appear
+        # in the cited chunk, not merely cite an existing number.
+        chunk_texts=[c.content for c in chunks],
+        patient_text=patient_text,
     )
     if mode == "log" or report.status == "grounded":
         if report.status == "violations":
-            logger.warning("grounding violations (log mode): %s", report.violations)
+            kinds = sorted({v.get("type", "?") for v in report.violations})
+            logger.warning(
+                "grounding violations (log mode): %d violation(s) [%s]",
+                len(report.violations), ", ".join(kinds),
+            )
         return report, answer
 
     # enforce: ONE corrective retry against the SAME retrieved context.
-    directive = build_correction_directive(report.violations)
+    directive = build_correction_directive(report.violations, answer)
     # append_directive, not `system + x`: on a split prompt the naive form
     # writes into the cached prefix, which is the one string that must not
     # change.
@@ -285,10 +302,11 @@ async def _interaction_refusal(
     so both engines must pass through it — see project_docs/
     task-25-drug-interactions.md.
     """
-    if risk != NONE:
-        # The triage floor always wins; a red flag stays on the escalation
-        # path rather than being answered as a medication question.
-        return None
+    if risk == EMERGENCY:
+        return None  # emergencies stay on the deterministic directive
+    # At HIGH the refusal STILL applies — these are the question classes an
+    # ungrounded answer harms most, and "HIGH" used to hand them to the LLM.
+    # The escalation banner is prepended below so the floor stays visible.
     # Combination questions ("can I take X and Y together"). There is
     # NO interaction dataset, so the only honest answer is a deterministic
     # one that names both items and routes to a pharmacist — never an
@@ -352,8 +370,11 @@ async def _interaction_refusal(
         db, user_id=user_id, session_id=session_id,
         message=message, model_name=provider.model_name,
     )
+    interaction_reply = build_interaction_reply(*names)
+    if risk == HIGH:
+        interaction_reply = f"{HIGH_ESCALATION} {interaction_reply}"
     return ChatResult(
-        response_message=build_interaction_reply(*names),
+        response_message=interaction_reply,
         risk_level=risk,
         recommended_action="discuss_with_prescriber",
         provenance={
@@ -387,8 +408,8 @@ async def _dosing_refusal(
     product could emit. Fires on phrasing; NON_DRUG_TERMS keeps "how much
     water should I drink" on its normal path.
     """
-    if risk != NONE:
-        return None  # the triage floor always wins
+    if risk == EMERGENCY:
+        return None  # the emergency directive always wins
     try:
         term = extract_dose_query(message)
     except Exception:  # noqa: BLE001 — a parser must never break a reply
@@ -405,8 +426,11 @@ async def _dosing_refusal(
         db, user_id=user_id, session_id=session_id,
         message=message, model_name=provider.model_name,
     )
+    dose_reply = build_dose_refusal(term)
+    if risk == HIGH:
+        dose_reply = f"{HIGH_ESCALATION} {dose_reply}"
     return ChatResult(
-        response_message=build_dose_refusal(term),
+        response_message=dose_reply,
         risk_level=risk,
         recommended_action="discuss_with_prescriber",
         provenance={"path": "drug_dose_query", "term": term or None},
@@ -430,7 +454,8 @@ async def _drug_info_reply(
 
     SHARED across both engines (it lived inside the legacy chain, and the
     agentic engine answered drug questions from its own weights — the same
-    bypass class as the interaction refusal). Only at NONE risk; fail-open.
+    bypass class as the interaction refusal). Only at NONE risk (a HIGH turn
+    needs the symptom path, not a product monograph); fail-open.
     """
     if risk != NONE:
         return None
@@ -992,9 +1017,12 @@ async def _dispatch(
     # explicit "reply in English" matters just as much, so a Telugu history
     # in the recent-turns context never drags an English question's answer
     # back into Telugu.
-    directive = language_directive(
-        "en" if (pivot is not None and pivot.active) else lang
-    )
+    # ALWAYS English (audit high / policy): the validator's guarantees — no
+    # diagnosis, no provider leak, no reassurance-at-high — only work on
+    # English text. With an active pivot the sidecar translates the VALIDATED
+    # English; without one, handle_chat appends a fixed native-language
+    # notice (app/i18n/notices.py) after validation.
+    directive = language_directive("en")
     # Split, not joined: element 0 is byte-identical across turns and carries
     # the prompt-cache breakpoint in the Anthropic adapter. Every other
     # provider joins it straight back, so the model is told exactly the same
@@ -1230,7 +1258,11 @@ async def handle_chat(
     pending_med = await last_pending_med(db, session_id)
     await add_message(
         db, session_id, "user", message,
-        extracted_intent={"risk": triage(work).level},
+        extracted_intent={
+            "risk": triage(work).level,
+            # The English pivot, when active — compaction extracts from it.
+            **({"english": work} if pivot.active else {}),
+        },
     )
     # Every path converges here, so this is the one place that sees the whole
     # turn: how long it took, which engine ran it, and whether the reader got
@@ -1249,12 +1281,22 @@ async def handle_chat(
     if degraded:
         # THE number that says whether the system is quietly answering badly.
         degradations.inc(engine=engine, reason=str(degraded))
-    for name in result.provenance.get("tools", []) or []:
-        tool_calls.inc(tool=str(name))
+    # (tool_calls is incremented once per execution in the tool registry,
+    # with an outcome label — a second label-less increment here doubled
+    # every count.)
     usage = result.provenance.get("usage") or {}
     for direction in ("input_tokens", "output_tokens"):
         if usage.get(direction):
             llm_tokens.inc(usage[direction], direction=direction)
+    if (not pivot.active and result.response_message
+            and (notice := english_fallback_notice(lang_hint(pivot, message)))):
+        # Reader wrote in a language we cannot serve right now: the reply is
+        # validated English plus ONE fixed sentence in their language saying
+        # so. Appended after validation — a constant cannot be corrupted.
+        result.response_message = f"{result.response_message}\n\n{notice}"
+        result.provenance["translation"] = {
+            "language": lang_hint(pivot, message), "status": "english_notice",
+        }
     if pivot.active and result.response_message:
         translated = await pivot_outbound(
             result.response_message, pivot, translator
@@ -1360,15 +1402,12 @@ async def _dispatch_agentic(
         chunks=chunks,
         allow_questions=allow_questions,
     )
-    # Same rule as the legacy engine (they diverged — the audit's engine-
-    # parity bug class): with an ACTIVE pivot the model answers in English and
-    # the sidecar translates back; with no sidecar, the directive names the
-    # reader's language so the model itself replies in it. The old line here
-    # was a tautology that always said "en", killing the documented no-sidecar
-    # fallback on this engine only.
-    directive = language_directive(
-        "en" if (pivot is not None and pivot.active) else lang
-    )
+    # Same rule as the legacy engine: ALWAYS English — see the legacy site.
+    # (An earlier fix had the model reply in the reader's language when no
+    # sidecar was up; that produced replies no validator could check, which
+    # the audit rated a high. The validated-English-plus-native-notice policy
+    # replaces it, identically on both engines.)
+    directive = language_directive("en")
     # Split, not joined: element 0 is byte-identical across every turn and
     # carries the prompt-cache breakpoint in the Anthropic adapter. Every
     # other provider joins it straight back, so the model is told exactly the

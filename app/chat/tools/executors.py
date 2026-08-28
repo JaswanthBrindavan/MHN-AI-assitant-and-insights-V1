@@ -305,6 +305,24 @@ async def get_doctor_consults(
     return _unwrap(ability)
 
 
+async def list_medications(
+    db: AsyncSession, user_id: uuid.UUID, _args: dict, _session_id
+) -> dict | None:
+    from app.medicines.service import list_courses
+    listed = await list_courses(user_id)
+    if not listed.ok:
+        return {
+            "available": False,
+            "note": "The medication list could not be read right now — say "
+            "so; do not guess at what the reader takes.",
+        }
+    return {
+        "medications": [c.name for c in listed.courses],
+        "note": "Active courses only; private entries are excluded. If you "
+        "name any of these, include the do-not-change-the-dose reminder.",
+    }
+
+
 async def get_medication_adherence(
     db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
 ) -> dict | None:

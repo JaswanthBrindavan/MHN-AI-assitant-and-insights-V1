@@ -32,8 +32,16 @@ AMBIGUITY_LIMIT = 3
 
 # Adjective-like first words of display names that must never become
 # standalone keywords ("Chronic X", "Allergic Y"). DRAFT.
+# All-caps abbreviations that collide with everyday English words when
+# lowercased — these match case-sensitively regardless of length.
+_WORDLIKE_ABBREVS = {
+    "aids", "care", "mass", "gas", "cold", "cast", "casts", "all", "aim",
+    "sad", "hand", "gift", "lab",
+}
+
 _GENERIC_HEAD_WORDS = {
     "chronic", "acute", "primary", "secondary", "congenital", "allergic",
+    "type",
     "severe", "benign", "malignant", "viral", "bacterial", "fungal",
     "hereditary", "autoimmune", "occupational", "seasonal", "gestational",
     "traumatic", "essential", "juvenile", "senile", "peripheral", "central",
@@ -161,8 +169,13 @@ class ConditionIndex:
             # Tolerate a simple English plural on the final word
             # ("migraines" → "migraine", "ulcers" → "ulcer").
             # 3-char abbreviations match CASE-SENSITIVELY: "ARM" (age-
-            # related maculopathy) must not fire on the word "arm".
-            if is_abbrev and len(kw_clean) == 3:
+            # related maculopathy) must not fire on the word "arm". Longer
+            # abbreviations whose lowercase form is an everyday word get the
+            # same treatment — "hearing aids" was scoping retrieval to
+            # HIV/AIDS (audit medium).
+            if is_abbrev and (
+                len(kw_clean) == 3 or kw_clean in _WORDLIKE_ABBREVS
+            ):
                 pattern = re.compile(r"\b" + re.escape(kw_stripped) + r"\b")
             else:
                 pattern = re.compile(

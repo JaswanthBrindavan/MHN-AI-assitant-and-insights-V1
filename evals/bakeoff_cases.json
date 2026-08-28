@@ -214,6 +214,13 @@
    "expects_tools": [
     "get_medication_adherence"
    ]
+  },
+  {
+   "name": "med_list_check",
+   "message": "am I on any blood pressure medication?",
+   "expects_tools": [
+    "list_medications"
+   ]
   }
  ]
 }
