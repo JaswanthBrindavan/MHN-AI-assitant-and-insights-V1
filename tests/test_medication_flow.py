@@ -229,6 +229,85 @@ async def test_llm_capture_fails_closed_on_bad_json(db_session):
 
 
 # --------------------------------------------------------------------------- #
+# Brutal-test fixes: false-positive stops, plural slots, confirm corrections
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "msg",
+    ["stop worrying so much", "I stopped smoking last month",
+     "delete this conversation", "remove my profile photo"],
+)
+async def test_no_signal_stop_remove_falls_through(db_session, msg):
+    """"stop X" with no medication marker and no matching course must NOT
+    hijack the turn — smoking goes to the tracker, worrying to the LLM."""
+    r = await mf.handle_medication_turn(db_session, USER, msg, None)
+    assert r is None
+
+
+@pytest.mark.parametrize(
+    ("msg", "expected"),
+    [("in the mornings", ("M", False)),
+     ("mornings and evenings", ("ME", False)),
+     ("not three times, twice a day", ("ME", False)),
+     ("not as needed, every morning", ("M", False))],
+)
+def test_plural_and_negated_schedules(msg, expected):
+    assert mf.parse_schedule(msg) == expected
+
+
+async def test_confirm_yes_with_schedule_correction_reconfirms(db_session, monkeypatch):
+    """"yes but twice a day not three times" must NOT write the old draft —
+    it updates the schedule and re-confirms."""
+    called = False
+
+    async def _write(*a, **k):
+        nonlocal called
+        called = True
+        return {"reply": "x", "action": "medication_updated", "provenance": {}}
+
+    import app.chat.data_handlers as dh
+    monkeypatch.setattr(dh, "perform_medication_write", _write)
+    pending = {"stage": "confirm", "action": "add", "name": "dolo 650",
+               "schedule_pattern": "MAE", "is_prn": False}
+    r = await mf.handle_medication_turn(
+        db_session, USER, "yes but twice a day not three times", pending)
+    assert called is False, "wrote the OLD schedule despite a correction"
+    pm = r["pending_med"]
+    assert pm["schedule_pattern"] == "ME" and pm["stage"] == "confirm"
+
+
+async def test_confirm_yes_with_unparseable_correction_never_writes(
+    db_session, monkeypatch
+):
+    """"correct, but it's Pan 40 not Pan 20" — yes + a correction we can't
+    parse deterministically: re-extract via LLM, never write the draft."""
+    called = False
+
+    async def _write(*a, **k):
+        nonlocal called
+        called = True
+        return {"reply": "x", "action": "medication_updated", "provenance": {}}
+
+    import app.chat.data_handlers as dh
+    monkeypatch.setattr(dh, "perform_medication_write", _write)
+
+    class _Extractor:
+        model_name = "fake"
+
+        async def generate(self, system, user):
+            return ('{"is_command": true, "action": "add", "name": "Pan 40", '
+                    '"strength": null, "times_per_day": null, '
+                    '"as_needed": false}')
+
+    pending = {"stage": "confirm", "action": "add", "name": "Pan 20",
+               "schedule_pattern": "M", "is_prn": False}
+    r = await mf.handle_medication_turn(
+        db_session, USER, "correct, but it's Pan 40 not Pan 20", pending,
+        _Extractor())
+    assert called is False
+    assert "pan 40" in r["pending_med"]["name"].lower()
+
+
+# --------------------------------------------------------------------------- #
 # Bug #2 — a stopped course must still be removable (delete resolves all)
 # --------------------------------------------------------------------------- #
 async def test_delete_resolves_against_all_courses_not_active_only(monkeypatch):

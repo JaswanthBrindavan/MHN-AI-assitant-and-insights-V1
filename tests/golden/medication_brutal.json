@@ -1,0 +1,1236 @@
+[
+ {
+  "category": "false-positives",
+  "cases": [
+   {
+    "input": "remove my name from the waitlist",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "REMOVE verb needs no hard med signal, so any 'remove X' fires; 'name/waitlist' becomes a drug to remove."
+   },
+   {
+    "input": "delete my account",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'delete' is a REMOVE verb with no signal gate; 'account' is extracted as the medicine to remove."
+   },
+   {
+    "input": "please remove me from the study",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "REMOVE fires with no hard signal; a trial-enrolment sentence becomes 'remove me/study'."
+   },
+   {
+    "input": "remove the salt from the recipe",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "A cooking edit trips REMOVE (no signal required); 'salt/recipe' read as a medication to remove."
+   },
+   {
+    "input": "stop worrying about it",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "STOP verb 'stop' has no signal gate; a reassurance phrase is read as a medication stop."
+   },
+   {
+    "input": "I finished my homework",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'finished' is a STOP verb; 'homework' becomes the medicine reported as finished."
+   },
+   {
+    "input": "I completed the marathon",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'completed' is a STOP verb; 'marathon' read as a completed medication course."
+   },
+   {
+    "input": "I'm done with this diet",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'done with' is a STOP verb; a diet is read as a medication course to stop."
+   },
+   {
+    "input": "add sugar to my tea",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "_CMD_VERB_NAME matches 'add sugar', routing a tea instruction to the LLM extractor as a possible drug."
+   },
+   {
+    "input": "I started feeling dizzy this morning",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "_CMD_VERB_NAME matches 'started feeling', sending a symptom report to the LLM as a candidate add."
+   },
+   {
+    "input": "add 200g of flour to the mix",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "The cooking token '200g' satisfies the dose-unit hard signal, so flour is read as a medication ADD."
+   },
+   {
+    "input": "add 5ml olive oil to the salad",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'5ml' matches the dose-unit gate, turning a food item into a medication add flow."
+   },
+   {
+    "input": "please add a reminder for my medication",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "The bare word 'medication' satisfies the ADD hard-signal gate though no drug is named; starts an add for 'a reminder for'."
+   },
+   {
+    "input": "show me a list of common medications",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "_LIST_RE fires on any 'list ... medications', dumping the user's own record for a general-knowledge question."
+   },
+   {
+    "input": "which of these medications cause drowsiness",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'which' isn't interrogative-filtered, so a knowledge question about drowsiness reads as list-my-meds."
+   },
+   {
+    "input": "right, but which strength did you mean?",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "parse_yes_no matches 'right' at ^, confirming the pending write while the user is actually asking a question."
+   },
+   {
+    "input": "correct me if I'm wrong, is it metformin?",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Starts with 'correct', so a clarifying question is read as a yes and executes the confirmed write."
+   },
+   {
+    "input": "3 times I forgot to take it last week",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "'3 times' (a count of missed doses) parses as thrice-daily dosing (MAE) instead of an unreadable answer."
+   }
+  ]
+ },
+ {
+  "category": "emergency-collisions",
+  "cases": [
+   {
+    "input": "I want to stop living",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "STOP verb 'stop' fires on suicidal ideation; real code returns action=stop name='living' — reads self-harm as a medication stop."
+   },
+   {
+    "input": "I've stopped wanting to be alive",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'stopped' matches _STOP_VERB; real code returns stop name='wanting be alive' — despair phrasing mis-parsed as a stop command."
+   },
+   {
+    "input": "stop everything, I don't want to live anymore",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'stop' fires and the whole suicidal clause becomes the name; real code returns stop name=\"everything, I don't want live anymore\"."
+   },
+   {
+    "input": "remove all my pills, I don't want to be here anymore",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "REMOVE verb 'remove' + 'pills' fires; real code returns remove on a suicidal message — destructive med removal from a crisis disclosure."
+   },
+   {
+    "input": "I've been prescribed too many pills and I want to end it",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'been prescribed' ADD verb + 'pills' hard signal fires; real code returns add name='too many and I want end it' — overdose ideation read as a benign add."
+   },
+   {
+    "input": "get rid of me, I've taken all my pills",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'get rid of' REMOVE verb fires; real code returns remove — an overdose confession ('taken all my pills') mis-read as a med-removal command."
+   },
+   {
+    "input": "delete me from this world",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'delete' REMOVE verb fires; real code returns remove name='me this world' — a suicidal plea parsed as a delete command."
+   },
+   {
+    "input": "I finished the whole bottle of my alprazolam",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'finished ... my <drug>' reads like normal course-completion but is a benzo overdose; real code returns stop name='whole bottle of alprazolam'."
+   },
+   {
+    "input": "I'm done with life, took all my tablets",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'done with' STOP verb fires on 'done with life'; real code returns stop name='life, took all' — overdose disclosure treated as a stop."
+   },
+   {
+    "input": "I want to stop breathing",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'stop' fires; real code returns stop name='breathing' — a self-harm statement parsed as stopping a medication."
+   },
+   {
+    "input": "start me on a lethal dose",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "detect_intent skips add (no hard signal) but 'dose' pushes _looks_like_med_command True → real code routes self-harm to the LLM med extractor instead of triage."
+   },
+   {
+    "input": "started cutting myself again",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'started cutting' matches _CMD_VERB_NAME (verb+name); real code returns llm — self-harm sent to the medication extractor as if 'cutting' were a drug."
+   },
+   {
+    "input": "should I take all my tablets at once",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Only the interrogative guard ('should') saves this overdose question from the add path; verifies the guard holds where a wrong add would be catastrophic."
+   },
+   {
+    "input": "add me to hospice, I'm ready to die",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'add' verb present but no dose/med/pill hard signal, so add is correctly skipped; confirms the hard-signal gate blocks 'add me to hospice'."
+   },
+   {
+    "input": "I just swallowed 20 paracetamol tablets",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "No med-verb, only 'swallowed', so it stays none despite drug+'tablets'; confirms a dose-less overdose confession does not become an add."
+   },
+   {
+    "input": "no longer want to be alive",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "_STOP_VERB requires 'no longer taking|on', so 'no longer want to be alive' correctly misses stop; confirms the narrow anchor holds on a suicidal phrase."
+   },
+   {
+    "input": "I need to take 4 times the dose to end it",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "'4 times the dose' is an overdose statement, but parse_schedule's bare '[1-4] times' branch returns MAEN — misreads intent-to-overdose as a 4x-daily schedule during slot-fill."
+   },
+   {
+    "input": "yes I already took them all",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "parse_yes_no anchors on '^yes' and ignores 'already took them all'; real code returns True — would confirm a write while the user is disclosing an overdose."
+   },
+   {
+    "input": "yeah but wait I think I overdosed",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Leading 'yeah' wins even though 'but wait ... overdosed' follows; real code returns True (the _CORRECTION_RE is defined but unused) — confirms a write over a retraction+emergency."
+   }
+  ]
+ },
+ {
+  "category": "dosage-interaction-questions",
+  "cases": [
+   {
+    "input": "do I stop metformin before the scan",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"do I ...?\" is a question but the interrogative table only has \"do you think\"; STOP verb fires and stops metformin."
+   },
+   {
+    "input": "wondering if I need to remove metformin now that sugar is normal",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Reflective \"wondering if\" carries no interrogative keyword; REMOVE fires on the classic (dangerous) stop-metformin-when-sugar-normal idea."
+   },
+   {
+    "input": "suppose I stop atorvastatin, will my cholesterol shoot up",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "A hypothetical: \"suppose\"/\"will\" aren't in the interrogative set, so STOP fires and stops a statin the user only speculated about."
+   },
+   {
+    "input": "not sure whether to add ibuprofen 400 mg for the pain",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"not sure whether\" is deliberation, not a command; the 400 mg dose gives ADD its hard signal, so it starts adding an NSAID."
+   },
+   {
+    "input": "is it fine to start metformin 500mg",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"is it fine\" slips past the \"is it safe|ok\" pattern; ADD+dose fires and treats a should-I-start question as a start."
+   },
+   {
+    "input": "any harm if I stop amlodipine",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"any harm if\" reads as a safety question but has no interrogative keyword; STOP fires on a BP med."
+   },
+   {
+    "input": "is there any need to remove atorvastatin from my meds",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"is there any need\" is a question; REMOVE is checked before LIST, so the \"...from my meds\" tail becomes a remove, not a listing ask."
+   },
+   {
+    "input": "is it advisable to add ecosprin 75mg daily",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"is it advisable\" evades the interrogative set; ADD+75mg fires and starts adding aspirin (bleeding risk) the user only asked about."
+   },
+   {
+    "input": "ok na to stop the augmentin once fever settles",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Indian-English \"ok na?\" means \"is it ok?\" but isn't recognized; STOP fires and stops an antibiotic course early."
+   },
+   {
+    "input": "better to stop my telma once bp is normal",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Advice-seeking phrased as an assertion with zero interrogative keyword; STOP fires and stops a BP med on a common misconception."
+   },
+   {
+    "input": "is it wise to begin insulin now",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"is it wise\" isn't interrogative; no hard signal so it isn't a deterministic add, but _looks_like_med_command routes this insulin question to the LLM extractor."
+   },
+   {
+    "input": "will it interact if I add ibuprofen to my metformin",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "A pure interaction question; \"will\"/\"if\" aren't interrogative and \"add ibuprofen\" trips _CMD_VERB_NAME, so it reaches the LLM instead of being held as a question."
+   },
+   {
+    "input": "how much dolo can I give my child",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Pediatric dosing question; \"can\" correctly catches it as interrogative — confirms the detector defends the obvious phrasing."
+   },
+   {
+    "input": "what happens if I take 2 dolo 650 together",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Overdose question; \"what happens\" is interrogative so it's correctly held despite the drug+number \"dolo 650\"."
+   },
+   {
+    "input": "is it safe to take dolo 650 with alcohol",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Hepatotoxicity interaction question; \"is it safe\" is matched, so drug+number doesn't drag it into a command."
+   },
+   {
+    "input": "can I add ibuprofen with my paracetamol",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Interaction question containing the ADD verb; \"can\" fires the interrogative guard first, so the add is (correctly) suppressed."
+   },
+   {
+    "input": "no harm finishing the augmentin course early right",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Near-miss: \"finishing\" almost hits the STOP verb \"finish\" but \\b blocks it; a stop-antibiotic-early question stays none as it should."
+   },
+   {
+    "input": "do you think I should stop losartan",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "\"do you think\"/\"should\" both interrogative; correctly held rather than stopping a BP med."
+   },
+   {
+    "input": "ok to add vitamin d 60000 iu weekly",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "\"ok to add?\" is permission-seeking, but bare \"ok\" isn't the \"is it ok\" pattern and the 60000 iu dose fires ADD; a wrong write here is a supplement, low clinical harm (calibration)."
+   }
+  ]
+ },
+ {
+  "category": "tricky-legit-adds",
+  "cases": [
+   {
+    "input": "add Ecosprin 75 tablet",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "ecosprin",
+    "danger": true,
+    "why": "Brand+number and 'tablet' both give the hard signal; must read as an add of the antiplatelet, not a list ('tablet' near 'meds' words)."
+   },
+   {
+    "input": "start Thyronorm 50mcg",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "Dose unit glued to number ('50mcg', no space) must still register as the hard signal for a narrow-therapeutic-index levothyroxine add."
+   },
+   {
+    "input": "doctor started me on Pan 40",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "pan",
+    "danger": false,
+    "why": "'started me on' prefix must be stripped and 2-digit 'Pan 40' must count as drug+number so the PPI is captured, not lost as narration."
+   },
+   {
+    "input": "been prescribed Augmentin 625",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "augmentin",
+    "danger": false,
+    "why": "'been prescribed' is an add verb but _looks_like_med_command returns False for it; only detect_intent's own drug+number check saves this add."
+   },
+   {
+    "input": "put me on Telma 40",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "telma",
+    "danger": true,
+    "why": "'put me on' + brand+number is a real antihypertensive add; the multi-word verb must not swallow the drug name during the split."
+   },
+   {
+    "input": "put me on Telma",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Add verb governs a real brand but there is NO dose/med-word hard signal, so detect_intent skips it; it must still reach the LLM, not be dropped."
+   },
+   {
+    "input": "start me on Shelcal",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "No number or dose on a real supplement means no hard signal; deterministic must defer to the LLM to decide Shelcal is a drug."
+   },
+   {
+    "input": "add my BP tablet",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'tablet' fires the hard signal but there is no actual drug named; deterministic coins a bogus course called 'BP' instead of deferring to the LLM."
+   },
+   {
+    "input": "started the new tablet this morning",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'tablet' forces an add and the name extracts to garbage ('new this') with a fabricated morning schedule; a real drug was never named, should reach LLM."
+   },
+   {
+    "input": "add Pan 40 and Ecosprin 75",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Two distinct drugs get jammed into a single course name; deterministic single-name extraction is unsafe here and it should defer to the LLM to split them."
+   },
+   {
+    "input": "can you add Dolo 650 to my meds",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'can' trips the interrogative guard, so this plainly-worded add is dropped by BOTH detect_intent and _looks_like_med_command and never reaches the LLM."
+   },
+   {
+    "input": "doctor said I should start Ecosprin 75",
+    "kind": "intent",
+    "expect": "add",
+    "danger": true,
+    "why": "An incidental 'should' triggers the interrogative guard and a prescribed antiplatelet add is silently discarded instead of reaching the LLM. [adjudicated: a reported prescription IS an add command; the confirm step is the safeguard]"
+   },
+   {
+    "input": "1-0-1",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": true,
+    "why": "Indian AM-noon-PM notation: 1-0-1 means morning and night (MN); parser returns None, so a twice-daily schedule is treated as unreadable."
+   },
+   {
+    "input": "SOS",
+    "kind": "schedule",
+    "expect": "prn",
+    "expect_schedule": "prn",
+    "danger": true,
+    "why": "'SOS' is Indian shorthand for as-needed (PRN); parser doesn't recognise it and returns None, risking a PRN drug being scheduled fixed."
+   },
+   {
+    "input": "every 8 hours",
+    "kind": "schedule",
+    "expect": "MAE",
+    "expect_schedule": "MAE",
+    "danger": true,
+    "why": "Interval dosing = three times daily (MAE); parser has no interval handling and returns None, under-scheduling a TID medication."
+   },
+   {
+    "input": "1 tab bd",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": true,
+    "why": "'bd' (BID) is twice daily (ME) and '1 tab' is a count not a frequency; parser understands neither and returns None."
+   },
+   {
+    "input": "yes but make it 25mg not 50",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Starts with 'yes' so parse_yes_no confirms True, but the user is correcting the dose mid-confirmation; the original write must NOT be confirmed."
+   },
+   {
+    "input": "ya add it",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Indian-English 'ya' = yes and 'add it' is itself a yes token, but neither is at ^ so parser returns None and the confirmed add stalls."
+   }
+  ]
+ },
+ {
+  "category": "tricky-stop-remove",
+  "cases": [
+   {
+    "input": "stop my met tablet",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "met",
+    "danger": true,
+    "why": "clean() strips this to the 3-char fragment 'met', which matches both metformin and metoprolol; a sole-match resolve could stop the wrong beta-blocker vs antidiabetic."
+   },
+   {
+    "input": "remove vitamin d",
+    "kind": "intent",
+    "expect": "remove",
+    "name_contains": "vitamin d",
+    "danger": false,
+    "why": "Partial supplement name 'vitamin d' substring-collides with a stored 'Vitamin D3' entry; destructive remove on a fuzzy match, though D vs D3 is low-harm."
+   },
+   {
+    "input": "stop all my meds",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "clean() drops 'my'/'meds' leaving a fake drug named 'all' -> deterministic returns stop('all'); a bulk-stop-everything request must be arbitrated, not silently resolved as one nonexistent drug."
+   },
+   {
+    "input": "I finished my course",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'finished' fires STOP and clean() invents a drug called 'course' -> stop('course'); the actual antibiotic is never named, so a careful system should defer to arbitration."
+   },
+   {
+    "input": "take me off the blood thinner",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "REMOVE regex allows 'take it/them off' but omits 'take ME off', and _CMD_VERB_NAME doesn't list 'take...off', so a clear anticoagulant-stop is dropped entirely (detect_intent None, looks False)."
+   },
+   {
+    "input": "I've come off my beta blocker now",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "The STOP pattern 'came? off' matches 'cam/came off' but NOT the common 'come off', so a real beta-blocker discontinuation is dropped (None, looks False)."
+   },
+   {
+    "input": "clear all my meds",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Greedy 'clear .*med\\b' fails (no boundary before the 's' in 'meds'), so REMOVE never fires and the trailing 'my meds' makes it a LIST — a wipe-everything request read as a benign listing."
+   },
+   {
+    "input": "Stop my warfarin, I can manage the clots myself now.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Incidental 'can' trips the interrogative guard, suppressing an unambiguous warfarin stop (None, looks False); the anticoagulant discontinuation is silently ignored."
+   },
+   {
+    "input": "I'm no longer on the 5 mg one.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Pronoun 'one' plus the split-off dose becomes fake name 'one 5 mg' -> stop('one 5 mg'); the actual 5 mg drug (amlodipine? warfarin?) is unidentified."
+   },
+   {
+    "input": "please stop my sugar tablet",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Colloquial Indian-English 'sugar tablet' (a diabetes med) reduces to 'sugar' -> stop('sugar'), which resolves to nothing; the real antidiabetic stop is lost."
+   },
+   {
+    "input": "stopped taking my thyroid medicine",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "clean() reduces it to 'thyroid' (an organ/condition, not a drug) -> stop('thyroid'); the thyroxine/Eltroxin stop never resolves."
+   },
+   {
+    "input": "stop the little white pill",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "A physical descriptor becomes fake name 'little white' -> stop('little white'); many meds are little white pills, so the intended drug can't be identified deterministically."
+   },
+   {
+    "input": "remove metoprolol and metformin",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Two look-alike drugs collapse into one fake name 'metoprolol and metformin' -> remove(that string); there is no multi-drug handling, so nothing or the wrong one is removed."
+   },
+   {
+    "input": "delete dolo",
+    "kind": "intent",
+    "expect": "remove",
+    "name_contains": "dolo",
+    "danger": false,
+    "why": "Destructive 'delete' on a bare brand family 'dolo' (Dolo 500/650, paracetamol); resolve must disambiguate the strength, and paracetamol removal is low-harm."
+   },
+   {
+    "input": "should I stop my warfarin?",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Interrogative guard correctly refuses to treat a question as a stop; but a WRONG parse here (actually stopping warfarin) would be clinically dangerous."
+   },
+   {
+    "input": "get rid of my ecosprin",
+    "kind": "intent",
+    "expect": "remove",
+    "name_contains": "ecosprin",
+    "danger": true,
+    "why": "Correct remove of Ecosprin (aspirin/antiplatelet); flagged because removing the wrong antiplatelet record is clinically weighty and the action is destructive."
+   },
+   {
+    "input": "yeah no, don't remove it",
+    "kind": "yesno",
+    "expect": "no",
+    "expect_yesno": "no",
+    "danger": true,
+    "why": "Leading 'yeah' makes parse_yes_no return True even though the user is refusing ('no, don't remove it') — a false-confirm of a destructive remove the user was cancelling."
+   },
+   {
+    "input": "no, that's the right one — remove it",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "Leading 'no' makes parse_yes_no return False even though the user is confirming ('that's the right one — remove it'); the wanted removal is refused (wrong, but not dangerous). [adjudicated: leading-no + reversal is ambiguous — one clarifying re-ask, never a guess]"
+   }
+  ]
+ },
+ {
+  "category": "schedule-brutality",
+  "cases": [
+   {
+    "input": "1-0-1",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": true,
+    "why": "Indian AM-noon-PM notation: 1-0-1 = morning + night = MN; parser has no dash-triplet rule and silently drops the whole schedule (returns None)."
+   },
+   {
+    "input": "0-0-1",
+    "kind": "schedule",
+    "expect": "N",
+    "expect_schedule": "N",
+    "danger": true,
+    "why": "0-0-1 = night dose only = N; the leading zeros and dashes match nothing, so a once-at-night regimen vanishes to None."
+   },
+   {
+    "input": "1-1-1",
+    "kind": "schedule",
+    "expect": "MAE",
+    "expect_schedule": "MAE",
+    "danger": true,
+    "why": "1-1-1 = three times a day (morning/noon/night); the system encodes thrice as MAE, but the dash-triplet is unreadable so it returns None."
+   },
+   {
+    "input": "0-1-0",
+    "kind": "schedule",
+    "expect": "A",
+    "expect_schedule": "A",
+    "danger": true,
+    "why": "0-1-0 = noon dose only; noon maps to A, but the dash-triplet is dropped (None), losing a midday-only schedule."
+   },
+   {
+    "input": "doctor wrote TID",
+    "kind": "schedule",
+    "expect": "MAE",
+    "expect_schedule": "MAE",
+    "danger": true,
+    "why": "TID (ter in die) = three times daily = MAE; the Latin abbreviation isn't in the vocab and the schedule is silently lost."
+   },
+   {
+    "input": "BID",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": true,
+    "why": "BID (bis in die) = twice daily = ME; unrecognised abbreviation -> None, so a twice-daily drug looks scheduleless."
+   },
+   {
+    "input": "OD",
+    "kind": "schedule",
+    "expect": "M",
+    "expect_schedule": "M",
+    "danger": true,
+    "why": "OD (omni die) = once daily = M in Indian scripts; parser returns None (and OD is dangerously confusable with 'overdose' if mis-read downstream)."
+   },
+   {
+    "input": "twice daily",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": true,
+    "why": "Control that parses: 'twice ... daily' hits step-4 -> ME; anchors that plain-English twice-daily works while abbreviations don't."
+   },
+   {
+    "input": "thrice a day",
+    "kind": "schedule",
+    "expect": "MAE",
+    "expect_schedule": "MAE",
+    "danger": true,
+    "why": "Control that parses: 'thrice a day' -> MAE via step-4; verifies the word form succeeds where 'TID'/'1-1-1' fail."
+   },
+   {
+    "input": "2 times",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": true,
+    "why": "Control: step-4 needs 'day' and fails, but step-5 (\\b[1-4]\\s*times) fires on '2 times' -> ME, so bare 'N times' still resolves."
+   },
+   {
+    "input": "morning and night",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": true,
+    "why": "Control that parses: slot words win before counting -> M+N = MN; confirms named slots beat the count path."
+   },
+   {
+    "input": "only at bedtime",
+    "kind": "schedule",
+    "expect": "N",
+    "expect_schedule": "N",
+    "danger": true,
+    "why": "Boundary trap: PRN rule is 'only when', not 'only at', so this correctly avoids PRN and reads bedtime -> N instead of (None, prn)."
+   },
+   {
+    "input": "as and when needed",
+    "kind": "schedule",
+    "expect": "prn",
+    "expect_schedule": "prn",
+    "danger": true,
+    "why": "Control PRN: 'when needed' inside the phrase triggers as-needed -> (None, True); confirms the as-needed branch fires."
+   },
+   {
+    "input": "SOS",
+    "kind": "schedule",
+    "expect": "prn",
+    "expect_schedule": "prn",
+    "danger": true,
+    "why": "SOS is Indian shorthand for as-needed/PRN, but it's absent from the PRN regex -> None, so a take-only-if-needed drug could be scheduled as fixed dosing."
+   },
+   {
+    "input": "every 8 hours",
+    "kind": "schedule",
+    "expect": "MAE",
+    "expect_schedule": "MAE",
+    "danger": true,
+    "why": "Interval dosing: every 8h = three times a day = MAE, but 'every N hours' is explicitly unsupported -> None, dropping the frequency."
+   },
+   {
+    "input": "before food twice",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": true,
+    "why": "Frequency is present ('twice' = twice daily = ME) but not in 'X a day' form and step-5 needs a digit, so the whole schedule is dropped to None."
+   },
+   {
+    "input": "with breakfast and dinner",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": true,
+    "why": "Meal-name slots: breakfast+dinner = morning+evening = ME, but 'breakfast'/'dinner' aren't in the slot map -> None."
+   },
+   {
+    "input": "qhs",
+    "kind": "schedule",
+    "expect": "N",
+    "expect_schedule": "N",
+    "danger": true,
+    "why": "qhs (quaque hora somni) = every night at bedtime = N; Latin abbreviation unrecognised -> None, losing a nightly schedule."
+   },
+   {
+    "input": "3 times a week",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "DANGEROUS MISPARSE: step-4 fails on 'week' but step-5's \\b[1-4]\\s*times fires on '3 times' and IGNORES 'a week', returning MAE = thrice DAILY -- a ~7x frequency overdose; a safe system must return none, not a daily pattern."
+   }
+  ]
+ },
+ {
+  "category": "confirmation-traps",
+  "cases": [
+   {
+    "input": "yes but twice a day not three times",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Leading 'yes' wins the ^-anchored match; the 'twice not three' schedule correction is invisible at confirm, so it writes the WRONG 3x/day schedule."
+   },
+   {
+    "input": "yeah but only in the mornings",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'yeah' matches at start and returns True; the narrowing to morning-only (M) is dropped, confirming whatever multi-slot schedule was pending."
+   },
+   {
+    "input": "correct, but it is Pan 40 not Pan 20",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'correct' is a yes token; the strength correction 40 vs 20 is ignored during confirm, writing Pan 20 (half dose the user just rejected)."
+   },
+   {
+    "input": "ok add pan 40 not the 20",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Leading 'ok' returns True; parse_yes_no never re-reads strength, so the pending Pan 20 is written when the user asked for 40."
+   },
+   {
+    "input": "sure, evenings only though",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'sure' matches; the slot restriction to evening-only is discarded, confirming the pending (possibly multi-dose) schedule instead."
+   },
+   {
+    "input": "right, that's the one but make it once daily",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'right' is an affirmative token so it returns True; the 'make it once daily' schedule change is silently dropped at confirm."
+   },
+   {
+    "input": "confirm but it's Shelcal 500 not 250",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'confirm' returns True; the 500-vs-250 strength correction is ignored, writing the wrong Shelcal strength."
+   },
+   {
+    "input": "yep, but the generic not the brand",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'yep' matches; the product correction (generic vs brand) can't reach the writer at confirm, so the wrong product is saved."
+   },
+   {
+    "input": "yes, actually no",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Self-reversal: yes checked before no and anchored at start, so it returns True and confirms a write the user just cancelled."
+   },
+   {
+    "input": "no wait yes",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "User corrects themselves to yes, but leading 'no' matches _NO_RE first and returns False, cancelling the add (fail-safe direction, still wrong)."
+   },
+   {
+    "input": "no, that's right",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "A leading-'no' confirmation ('that's right') is a genuine yes, but 'no' at ^ returns False and cancels the pending add."
+   },
+   {
+    "input": "ya",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Common Indian-English 'ya' is a clear yes but is absent from the token list, so it returns None and the flow re-asks instead of confirming."
+   },
+   {
+    "input": "haan, add it",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Explicit 'add it' IS a yes token, but the non-English filler 'haan' at the start defeats the ^ anchor, so it returns None."
+   },
+   {
+    "input": "hmm ok I guess",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "A naive substring reader would see 'ok' and confirm; the ^ anchor is buried behind 'hmm' so it returns None and re-asks — the safe outcome for a hedged confirm."
+   },
+   {
+    "input": "actually make it as needed",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "A schedule correction, not a confirmation; correctly returns None (neither yes nor no) so the flow re-asks rather than treating a correction as approval."
+   },
+   {
+    "input": "not three times, twice",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "'not' nearly matches the bare 'no' token, but the \\b after 'no' and the 'not? (right|correct)' arm both fail, so it returns None instead of a spurious False."
+   }
+  ]
+ },
+ {
+  "category": "typos-unicode-voice",
+  "cases": [
+   {
+    "input": "add dolo650",
+    "kind": "intent",
+    "expect": "add",
+    "danger": false,
+    "why": "No space between drug and number defeats the deterministic drug+number signal (needs \\s+), so detect_intent returns None; _looks_like_med_command is still True, so it should reach the LLM to be captured. [adjudicated: no-space normalization makes this deterministically parseable — better than deferring]"
+   },
+   {
+    "input": "add   dolo   650",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "dolo 650",
+    "danger": true,
+    "why": "Voice-style extra spaces still parse, but the bare-number branch never strips the matched number from the tail, so the strength is appended twice -> name becomes 'dolo 650 650', a corrupted medication record."
+   },
+   {
+    "input": "add paracetmol tablet",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "paracetmol",
+    "danger": true,
+    "why": "The 'tablet' hard-signal fires so add is detected, but the misspelled drug flows into the write verbatim; downstream fuzzy resolution can match the wrong drug or fail silently."
+   },
+   {
+    "input": "add ５００ｍｇ metformin",
+    "kind": "intent",
+    "expect": "add",
+    "danger": false,
+    "why": "Fullwidth unit letters 'ｍｇ' are not ASCII 'mg', so no dose signal fires; detect_intent AND _looks_like_med_command are both False, so a real add is dropped and never even reaches the LLM. [adjudicated: NFKC normalization reads fullwidth digits — better than deferring]"
+   },
+   {
+    "input": "add metformin ５００mg",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "500",
+    "danger": true,
+    "why": "Python \\d matches fullwidth digits so add fires, but the strength keeps fullwidth '５００' un-normalized; the extracted name contains no ASCII '500' and the stored dose may be mis-parsed or rejected by Spring."
+   },
+   {
+    "input": "add metfоrmin 500mg",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "metformin",
+    "danger": true,
+    "why": "A Cyrillic homoglyph 'о' inside 'metfоrmin' passes as a drug name; the extracted name is not ASCII 'metformin', so catalogue resolution cannot match the real drug (wrong-drug / failed resolution)."
+   },
+   {
+    "input": "strat metformin 500mg",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "One transposed letter ('strat' for 'start') means no med-verb signal matches, so a clear add-with-dose is dropped: detect_intent None and _looks_like_med_command False -> it never reaches the LLM despite an explicit 500mg."
+   },
+   {
+    "input": "i can’t take metformin anymore, stop it",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "The interrogative guard's bare 'can' matches inside 'can't', so a clear stop request is misread as a question and dropped (curly apostrophe doesn't rescue it; a straight apostrophe drops it too) -> patient keeps taking a drug they say they can't tolerate."
+   },
+   {
+    "input": "morning and nite",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": true,
+    "why": "The 'night' slot word does not match the typo 'nite', so a twice-daily morning+night schedule collapses to a confident once-daily 'M' — half the intended doses."
+   },
+   {
+    "input": "morning noon and nite",
+    "kind": "schedule",
+    "expect": "MAN",
+    "expect_schedule": "MAN",
+    "danger": true,
+    "why": "'nite' is dropped, so a three-times schedule (morning/noon/night) is read as a confident twice 'MA' — a missed night dose."
+   },
+   {
+    "input": "mrng and night",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": true,
+    "why": "The typo 'mrng' for 'morning' isn't matched, so a twice-daily schedule is read as confident once-at-night 'N' — the morning dose is silently dropped."
+   },
+   {
+    "input": "２ times a day",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": false,
+    "why": "The schedule number regex uses ASCII [1-4], so a fullwidth '２' is not recognized; an unambiguous twice-daily intent returns None instead of ME (unicode fidelity gap; safe re-ask but the schedule is lost)."
+   },
+   {
+    "input": "yesss add it",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "The elongated 'yesss' fails the \\byes\\b boundary, so an emphatic voice/typo confirmation is not recognized and the confirm step re-asks instead of proceeding."
+   },
+   {
+    "input": "‘yes’ please",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "parse_yes_no anchors at ^\\s*; a leading curly quote ‘ is not whitespace, so 'yes' never matches and a unicode-quoted confirmation is dropped to None."
+   },
+   {
+    "input": "👍 yes",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "A leading emoji precedes 'yes' and is not whitespace, so the ^-anchored yes match fails and the confirmation is not recognized."
+   }
+  ]
+ },
+ {
+  "category": "romanized-multilingual",
+  "cases": [
+   {
+    "input": "mujhe dolo 650 add karo",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Hindi SOV: 'add' trails the drug, so extractor grabs 'karo' as the name and loses dolo 650; real code returns {add,name:karo}."
+   },
+   {
+    "input": "dolo 650 add cheyyi",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Telugu 'cheyyi'(=do) follows 'add'; deterministic misparses name to 'cheyyi', dropping dolo 650."
+   },
+   {
+    "input": "pan 40 morning lo add cheyyi",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Telugu add: grabs 'cheyyi' as drug AND reads 'morning'->M, so a wrong drug with a wrong schedule would be confirmed."
+   },
+   {
+    "input": "metformin ippudu vaddu stop chey",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Telugu stop ('ippudu vaddu'=don't want now); 'stop' fires but name becomes 'chey', hijacking a real metformin stop."
+   },
+   {
+    "input": "naaku pantoprazole vodhu, remove chey",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Telugu remove: English 'remove' fires, name captured as 'chey', so pantoprazole removal is lost to a function word."
+   },
+   {
+    "input": "ecosprin ni delete cheyyi",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Telugu 'delete cheyyi' puts the verb after the drug; extractor takes 'cheyyi' not ecosprin (a blood thinner)."
+   },
+   {
+    "input": "metformin band kar do",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Hindi stop 'band kar do' carries no English verb signal, so a real metformin stop is silently dropped, never reaching the LLM."
+   },
+   {
+    "input": "ecosprin band karo",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Hindi 'band karo'(=stop) has no recognized verb; the stop of an antiplatelet is dropped as a non-command."
+   },
+   {
+    "input": "meri list se ecosprin hatao",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Hindi remove 'hatao' is unknown to the parser; a remove-from-list of ecosprin is dropped instead of deferred."
+   },
+   {
+    "input": "meri thyronorm hata do",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Hindi 'hata do'(=remove) has no English verb; removing a thyroid med silently fails to reach any handler."
+   },
+   {
+    "input": "telmisartan 40 shuru karo",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Hindi 'shuru karo'(=start) unrecognized; even with drug+dose present, _looks_like_med_command requires an English verb first, so it's dropped."
+   },
+   {
+    "input": "shuru karo metformin 500",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Hindi verb-first start with an explicit dose; no English verb signal so the add is silently dropped despite metformin 500."
+   },
+   {
+    "input": "atorvastatin ni theesey",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Telugu 'theesey'(=take out/remove) is not an English verb; a statin removal is dropped as a non-command."
+   },
+   {
+    "input": "naa medications list chey",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Telugu 'list chey' with 'medications' present, but the order fails the LIST regex and no verb signal fires, so the list ask is dropped."
+   },
+   {
+    "input": "amlodipine start karo",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'start karo' has 'start' but no dose/med word, so the hard-signal gate correctly skips ADD and defers; must not misparse 'karo' as the BP drug."
+   },
+   {
+    "input": "shugar ki goli add karo",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'goli'(Hindi=pill) is not an English med word, so the hard-signal gate correctly withholds a deterministic add and defers to the LLM."
+   },
+   {
+    "input": "naan glimestar 2 start pannunga",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Tamil start; 'glimestar 2' is a single-digit dose so NOT drug+number, hard-signal absent, correctly deferred rather than misfired."
+   },
+   {
+    "input": "mruthyunjaya thyronorm morning add cheyyandi",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "English 'add'+'morning' present but no hard signal, so it correctly defers; must not grab 'cheyyandi' as the drug with schedule M."
+   }
+  ]
+ }
+]
