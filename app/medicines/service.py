@@ -23,6 +23,7 @@ confirm a save that did not happen.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 
@@ -198,8 +199,31 @@ async def _resolve(
     if not listed.ok:
         return listed
     want = name.strip().lower()
-    matches = [c for c in listed.courses if want in c.name.lower()
-               or c.name.lower() in want]
+    # TOKEN-based matching, not raw substring: "stop the tablets in the
+    # morning" once extracted the name "in", and "in" substring-matched
+    # Ecosprin — a beta-blocker-class wrong-drug hazard. Every meaningful
+    # token of the want must prefix-match a token of the course name
+    # ("dolo" -> "Dolo 650", "d3 drops" -> "Vitamin D3", "vitamin d" ->
+    # "Vitamin D3"), and fillers/form words don't count as tokens.
+    _fillers = {"for", "me", "my", "the", "a", "an", "of", "to", "from",
+                "tablet", "tablets", "tab", "tabs", "pill", "pills",
+                "capsule", "capsules", "syrup", "drop", "drops", "injection",
+                "sachet", "sachets", "course", "dose", "medicine",
+                "medication", "med", "meds"}
+    want_tokens = [t for t in re.split(r"[^a-z0-9]+", want)
+                   if t and t not in _fillers]
+    if not want_tokens:
+        return MedResult(ok=False, reason="not_found")
+
+    def _tokens(course_name: str) -> list[str]:
+        return [t for t in re.split(r"[^a-z0-9]+", course_name.lower()) if t]
+
+    def _matches(course: Course) -> bool:
+        ctoks = _tokens(course.name)
+        return all(any(ct.startswith(wt) for ct in ctoks)
+                   for wt in want_tokens)
+
+    matches = [c for c in listed.courses if _matches(c)]
     if not matches:
         return MedResult(ok=False, reason="not_found")
     if len(matches) > 1:

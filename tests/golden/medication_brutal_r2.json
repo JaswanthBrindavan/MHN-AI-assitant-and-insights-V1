@@ -1,0 +1,1372 @@
+[
+ {
+  "category": "third-party-meds",
+  "cases": [
+   {
+    "input": "add metformin 500mg for my mother",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Third-party add: 'for my mother' is invisible to the deterministic layer. _clean_name strips only 'my', leaving name 'metformin for mother' (3 ok-quality words), and the 500mg dose unit satisfies the hard add signal, so a deterministic add flow opens on the READER's record for the mother's diabetes drug. Correct: defer to the extractor, which can see the third party."
+   },
+   {
+    "input": "add dolo 650 for my daughter",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Drug+number ('dolo 650') is a hard add signal and 'dolo 650 for daughter' passes name quality, so the deterministic layer starts adding a child's fever medicine to the adult reader's list — who already has Dolo 650 on record, so a duplicate course with a possibly different schedule lands on the wrong person."
+   },
+   {
+    "input": "the doctor started my son on augmentin 325",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'started' is an ADD verb and 'augmentin 325' a drug+number signal; the tail 'my son on augmentin 325' cleans to 'son on augmentin 325' which passes name quality (3 words), so the son's antibiotic prescription becomes an add flow on the parent's own record. 'put my son on' is dodged (only 'put me on' matches) but 'started my son on' is not."
+   },
+   {
+    "input": "my dad was prescribed ecosprin 75",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'prescribed' is an ADD verb regardless of WHO was prescribed; 'ecosprin 75' is a drug+number hard signal, so dad's new aspirin script opens an add flow on the reader — who already has Ecosprin 75 active, risking a duplicate antiplatelet entry on the wrong person's record."
+   },
+   {
+    "input": "add azithromycin 500mg for my sister twice a day",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Worst-case third-party add: dose unit plus a parseable in-message schedule ('twice a day' -> ME) means the deterministic flow skips the schedule question and jumps STRAIGHT to 'shall I add it?' — a single distracted yes writes the sister's antibiotic onto the reader's list with a daily schedule."
+   },
+   {
+    "input": "add vitamin d3 60000 iu for my mother once a week",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "The weekly frequency is (rightly) refused by parse_schedule, but the intent still fires deterministically: '60000 iu' is a dose signal and 'vitamin d3 for mother' passes name quality, so the flow asks the READER 'how often do you take it?' for mother's weekly 60,000 IU bolus — the reader is already on daily Vitamin D3, and any daily answer sets up a toxic daily bolus dose on the wrong record."
+   },
+   {
+    "input": "my mother stopped metoprolol yesterday",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "A report about the mother extracts bare name 'metoprolol' (only 'yesterday' is cleaned), which needs no hard signal because it RESOLVES by substring against the reader's own Metoprolol 25mg -> 'Did you mean Metoprolol 25mg? Shall I stop it?' A shared drug between relative and reader turns a family anecdote into a confirm-to-stop of the reader's beta-blocker."
+   },
+   {
+    "input": "my wife stopped taking thyronorm",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "The leading-'taking' strip leaves bare 'thyronorm', which resolves non-exactly against the reader's Thyronorm 50mcg -> stop confirm on the READER's thyroid medication because the wife stopped hers. No possessive marker survives extraction, so the course-list gate that should protect this case is the very thing that fires it."
+   },
+   {
+    "input": "i need to stop my mother's ecosprin 75",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "The possessive DOES survive here (name 'mother's ecosprin 75 75'), but _resolve matches bidirectionally: the course name 'ecosprin 75' is a substring of the want, so it still resolves to the READER's own Ecosprin 75 -> 'Did you mean Ecosprin 75? Shall I stop it?' A caregiver managing mum's meds is one yes away from stopping their own antiplatelet."
+   },
+   {
+    "input": "i stopped giving my mother her dolo 650",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Caregiver-administration phrasing: the swallowed clause becomes name 'giving mother her dolo 650 650' (exactly 4 words, so not deferred as vague), and the substring rule 'course.name in want' resolves it to the reader's own Dolo 650 -> confirm-to-stop the reader's paracetamol because they stopped handing it to their mother."
+   },
+   {
+    "input": "grandma finished her antibiotic tablets",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'her' is not in _VAGUE_WORDS, so 'her antibiotic' passes name quality as a mixed name instead of deferring to the LLM; 'tablets' is a hard med signal, so instead of releasing, the flow hijacks the turn with \"I couldn't find an active 'her antibiotic' in your medications, so there's nothing to stop\" — treating grandma's completed course as an operation on the reader's record."
+   },
+   {
+    "input": "remove my son's augmentin from the med list",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Bare 'med' is not stripped by _clean_name (only medication/medicine/meds are), giving name \"son's augmentin med\" (4 words, ok quality); 'med' is also the hard signal, so a remove targeting the SON's entry runs deterministically against the reader's list and hijacks the turn with a couldn't-find remove reply instead of letting the model see whose list is meant."
+   },
+   {
+    "input": "mom has to stop her sugar medicine",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'sugar' alone would be vague-only and defer to the LLM, but the pronoun 'her' (absent from every vocabulary) makes 'her sugar' a mixed ok-quality name; 'medicine' supplies the hard signal, so the deterministic layer answers about the READER's medications ('couldn't find her sugar') instead of the model reading a report about the mother's diabetes drug."
+   },
+   {
+    "input": "my father stopped his bp tablet yesterday",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Same pronoun gap on the male side: 'his bp' passes name quality because 'his' is in no vocabulary even though 'bp' is vague; 'tablet' is a hard signal, so a report about the father's antihypertensive is deterministically processed against the reader's own list (who actually takes Metoprolol, a BP drug) and the turn is hijacked with a wrong-person couldn't-find reply."
+   },
+   {
+    "input": "list my dad's meds please",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "_LIST_RE only requires list...my...meds in order, so \"my dad's meds\" matches and the flow dumps the READER's own five medications as the answer to a question about the father — presenting the wrong person's regimen to a caregiver, who may act on it as if it were dad's. The 'my' in the pattern was meant to scope to the reader's OWN list and fails at exactly that job."
+   },
+   {
+    "input": "start my dog on carprofen 75mg",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "A veterinary NSAID for the dog: 'start' + 75mg dose unit fires a deterministic add, and 'dog on carprofen' passes name quality because 'dog' is in no vocabulary — the pet's drug (one a human should never take) gets an add flow on the human's clinical record. Only the model can see the patient is the dog."
+   },
+   {
+    "input": "haan, yeh meri mummy ke liye hai",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Romanized-Hindi 'yes, this is for my mother' at the confirm step: _YES_RE matches 'haan' and the Hindi third-party correction contains no English correction/refusal token, so parse_yes_no returns a clean True and the draft is WRITTEN to the reader's list at the exact moment the user disclosed it belongs to their mother. The romanized-Indic stand-aside exists in detect_intent but not in parse_yes_no."
+   },
+   {
+    "input": "yes add it to her list",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Leading 'yes' with a trailing third-party redirect: 'her' appears in no correction or refusal vocabulary, so this parses as an unqualified True and the write lands on the READER's record while the user explicitly asked for HER list. A confirmation that names a different owner must re-ask, never write."
+   },
+   {
+    "input": "she takes it twice a day",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Mid-flow schedule answer in the THIRD person: 'twice a day' parses to ME and the add proceeds toward confirm, but 'she takes it' reveals the pending medication is someone else's — the person-blind parse_schedule slot-fills a relative's regimen into the reader's own course instead of stopping to ask whose medication this is."
+   }
+  ]
+ },
+ {
+  "category": "dose-change-requests",
+  "cases": [
+   {
+    "input": "increase my metoprolol to 50mg",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Pure dose-increase command: 'increase' is not an add/stop/remove verb and is absent from the LLM-gate signal list, so both layers stand aside. A naive parser grabbing 'to 50mg' as an add would create a second metoprolol course next to the existing 25mg — doubled beta-blocker."
+   },
+   {
+    "input": "switch me from telma 40 to telma 80",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Switch = stop-old + start-new, which no deterministic verb covers; 'switch' is not in the med-verb signal either, so the turn is released. Misreading 'telma 80' (drug+number hard signal) as a fresh add would leave telma 40 active alongside 80 — doubled ARB."
+   },
+   {
+    "input": "reduce dolo to half a tablet",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'reduce' is not a verb, but 'tablet' is an explicit med word — a naive parser could treat the med word as the ADD hard signal. A duplicate paracetamol entry risks double-dosing (hepatotoxicity); reading it as a stop of Dolo 650 (which resolves on the course list) is also wrong."
+   },
+   {
+    "input": "taper my metoprolol down to 12.5mg",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Taper is a dose trajectory, not a stop; 'taper' matches no verb or signal word so the deterministic layer must release it despite the mg dose unit. A misread stop would record abrupt beta-blocker discontinuation — rebound tachycardia/angina risk."
+   },
+   {
+    "input": "double my thyronorm from tomorrow",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'double' is explicitly not a verb and not in the signal gate, so this releases untouched. Misreading it as an add of thyronorm beside the existing 50mcg course would double levothyroxine in the record."
+   },
+   {
+    "input": "move my metoprolol night dose to the morning",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Timing change with no add/stop/remove verb — 'move' is unrecognized, so released. The trap is the slot words: a naive parser could read a fresh add of metoprolol with an M schedule, duplicating the existing 25mg course."
+   },
+   {
+    "input": "add another 25mg to my metoprolol",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metoprolol",
+    "danger": true,
+    "why": "Dose increase phrased through the ADD verb with a dose-unit hard signal: 'another' is not in the vague/junk vocabularies, so detect_intent fires a deterministic add of 'another metoprolol 25 mg' — a second 25mg course, i.e. an exact double-dose. Only the extractor can read 'another ... to my X' as an increase, so the safe outcome is deferral."
+   },
+   {
+    "input": "add 500mg more metformin to my dose",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metformin",
+    "danger": true,
+    "why": "'add N mg MORE' is an increment, not a new medication, but 'add' + '500mg' satisfies the deterministic add gate and 'more metformin dose' passes name quality. A blind add duplicates the metformin course. The extractor must arbitrate."
+   },
+   {
+    "input": "cardiologist put me on 50mg metoprolol instead of 25",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metoprolol",
+    "danger": true,
+    "why": "Strength switch reported with the ADD verb 'put me on': dose unit present, and the tail 'metoprolol instead of 25' is only 3 words so it escapes the >4-word vague gate — deterministic add of a mangled name while the 25mg course stays active. 'instead of' must route to the extractor, which can pair the change with retiring the old strength."
+   },
+   {
+    "input": "get me started on the higher strength of thyronorm, 100mcg",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "'get me started' is an ADD verb and '100mcg' a hard signal; 'higher strength of thyronorm' is exactly 4 words so it dodges the vague gate. A deterministic add stacks 100mcg on the existing 50mcg course — 3x levothyroxine on record. This is a dose change the extractor must reconcile."
+   },
+   {
+    "input": "I stopped the 25mg, now taking metoprolol 50mg",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metoprolol",
+    "danger": true,
+    "why": "A completed dose switch: the STOP verb wins the verb loop and swallows 'taking metoprolol 50mg' into the stop name (no 'and' to trip the split gate). A deterministic stop path can fuzzy-resolve to Metoprolol 25mg and, on a confirm 'yes', stop the only beta-blocker without recording the 50mg — the extractor must read stop-old-start-new as one switch."
+   },
+   {
+    "input": "doctor said to start taking 2 tablets of thyronorm instead of 1",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "Quantity increase phrased with 'start taking': 'tablets' supplies the med-word hard signal and '2 of thyronorm instead of 1' is 4 non-unit words, passing name quality — deterministic add of a garbage name beside the existing thyronorm course. 'instead of 1' marks a change only the extractor can read."
+   },
+   {
+    "input": "don't stop metoprolol, just lower it",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metoprolol",
+    "danger": true,
+    "why": "Negated stop: detect_intent has no negation handling (only parse_schedule strips negations), so 'stop' matches and 'metoprolol, just lower it' (4 words, none vague) passes name quality — the deterministic path can reach 'Did you mean Metoprolol 25mg? Shall I stop it?', the exact opposite of the instruction. The real command (lower the dose) needs the extractor."
+   },
+   {
+    "input": "reduce and eventually stop thyronorm",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "A taper plan, not an immediate stop: 'and' sits before the verb so the name is a clean 'thyronorm' and the and-split gate never fires — deterministic stop resolves against the course list and offers to stop levothyroxine today. Only the model can weigh 'eventually'; premature discontinuation of thyroid replacement is the harm."
+   },
+   {
+    "input": "show my medication list, I want to increase dolo 650",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Mixed list + dose-change ask: the drug+number 'dolo 650' blocks the deterministic LIST read by design, and 'show'/'list' plus the med word open the LLM gate — deferral is correct. Wrong readings here (plain list, or nothing) are non-writes, so not clinically dangerous, but a naive add of 'dolo 650' would duplicate an existing course."
+   },
+   {
+    "input": "just increase the morning one",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Mid-flow dose-quantity interjection, not a frequency answer: the bare slot word 'morning' makes parse_schedule return M (once daily, morning), silently recording a once-a-day schedule for a request that was about raising one dose's quantity. Unreadable-so-re-ask (None) is the safe behavior."
+   },
+   {
+    "input": "twice a week instead of daily",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Frequency change to a weekly pattern: 'instead of daily' dangles the daily keyword, and 'twice' invites an ME read. Any daily pattern for a twice-weekly regimen is the classic methotrexate-style multi-x overdose; the weekly gate must refuse (None) before the count/daily regexes see the text."
+   },
+   {
+    "input": "ok, just make the dose smaller",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Assent carrying an unparsed dose modification: 'ok' anchors YES and 'make the dose' misses the correction list (which only has 'make it/that'), so parse_yes_no returns True and the pending stop/add executes as drafted while the user asked for a smaller dose. The safe reading is None — clarify, never write."
+   },
+   {
+    "input": "yes, double it",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'double' is absent from the correction vocabulary (but/not/actually/instead/only/make it...), so this reads as a clean True and writes the draft at the OLD strength/schedule — the record then understates the real dose, or a pending stop is confirmed when the user wanted a dose change. A yes carrying any dose modification must be None."
+   }
+  ]
+ },
+ {
+  "category": "non-tablet-forms",
+  "cases": [
+   {
+    "input": "start insulin 10 units at night",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "insulin",
+    "expect_schedule": "N",
+    "danger": false,
+    "why": "Two-digit '10' makes 'insulin 10' satisfy the drug+number hard signal, so the deterministic add is the specified path with night -> N. Trap: 'units' is not a dose unit, so the name/strength extraction mangles the tail ('insulin 10 units at 10'); the action and schedule must still be add/N and the name must still carry 'insulin'. [adjudicated: insulin unit-dosing defers to the model by design (mislabeled as a schedule)]"
+   },
+   {
+    "input": "start insulin 8 units at night",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Identical command to the 10-unit case, but the single-digit '8' fails the drug+number regex (\\d{2,4}), 'units' is not mg/ml/iu, and there is no med word — so no hard signal exists and the LLM extractor must arbitrate. The seam: hard-signal presence flips on the digit count of the insulin dose."
+   },
+   {
+    "input": "add eye drops twice a day",
+    "kind": "intent",
+    "expect": "add",
+    "danger": false,
+    "why": "'drops' is not in the med-word set (only med*/pill/tablet/capsule/syrup), so an add with no dose unit and no drug+number has no hard signal; the drug is unidentified and the extractor must arbitrate. Trap: assuming 'drops' counts as an explicit med word would fire a deterministic add of the literal name 'eye drops'. [adjudicated: a named form with an explicit schedule is safe deterministic record-keeping; the confirm step protects]"
+   },
+   {
+    "input": "begin my inhaler 2 puffs morning",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "'puffs' is not a dose unit, 'inhaler 2' fails drug+number on the single digit, and 'inhaler' is not a med word — no hard signal, so the LLM extractor arbitrates which inhaled drug is meant. A deterministic add here would record the vague device name 'inhaler 2 puffs' as a medication."
+   },
+   {
+    "input": "add ORS sachet as needed",
+    "kind": "intent",
+    "expect": "add",
+    "danger": false,
+    "why": "'sachet' is not a med word and there is no dose unit or drug+number, so despite the parseable 'as needed' PRN schedule the add has no hard signal and must go to the extractor, not fire deterministically. [adjudicated: same — PRN sachet add with confirm is correct record-keeping]"
+   },
+   {
+    "input": "stop the iron injection weekly",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'injection' is not a med word, so no hard signal; 'iron injection weekly' resolves against nothing on the course list, so the turn must be released to the normal pipeline — never hijacked with a deterministic \"couldn't find 'iron injection weekly'\" reply, and never resolved fuzzily onto an unrelated course."
+   },
+   {
+    "input": "stop the d3 drops",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "d3",
+    "danger": false,
+    "why": "The reader is on Vitamin D3. _clean_name strips tablet/capsule/syrup so 'stop the d3 tablets' resolves to Vitamin D3 and confirms, but 'drops' is not stripped, so 'd3 drops' fails bidirectional-substring resolution and the stop is silently released. Dosage-form parity says this should reach the 'Did you mean Vitamin D3?' stop-confirm exactly like the tablet phrasing."
+   },
+   {
+    "input": "stop my inhaler",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "A device/class descriptor with no drug name is the same shape as 'blood thinner'/'statin'/'painkiller', which the vague vocabulary defers to the LLM extractor — but 'inhaler' is absent from that vocabulary, so name quality comes back 'ok', resolution fails, and the command is dropped as none instead of being deferred so the extractor can identify the inhaled drug."
+   },
+   {
+    "input": "take me off my insulin",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Remove verb ('take me off') with no dose unit, no drug+number, no med word, and insulin does not resolve against the course list -> released per spec. Traps: 'take me off' must not brush the self-harm tripwire's 'take ... all' patterns, and the flow must not hijack the turn telling an insulin user that insulin does not exist in their record."
+   },
+   {
+    "input": "stop all my injections",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Bulk stop of a parenteral class. The bulk gate requires a listed med word and 'injections' is not one, so the gate misses — the name-level bulk check plus the command-verb-name path must still hand this to the extractor. Wrong reading (a deterministic stop of one fabricated 'all injections' course, or a fall-through list) would act on every injectable at once."
+   },
+   {
+    "input": "add lantus solostar 100iu/ml 10 units at night",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'100iu' satisfies the dose-unit regex, so the deterministic layer captures the CONCENTRATION (100 iu/ml) as the strength of a 10-unit insulin dose and builds a garbled name ('lantus solostar /ml 10 units at 100 iu'). Concentration-vs-dose disambiguation on insulin pens is exactly what the regex cannot do — the extractor must arbitrate; recording 100 iu as the strength of a 10-unit dose is a dangerous record."
+   },
+   {
+    "input": "2 puffs",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "A short schedule answer stating quantity-per-dose, not frequency. The bare-count guard excludes only tablet/pill words, so '2 puffs' falls through to the bare-count branch and reads as ME (twice a day) — inventing a frequency for an inhaler whose real schedule (PRN? QID?) was never stated. Must be unparseable -> re-ask."
+   },
+   {
+    "input": "4 units daily",
+    "kind": "schedule",
+    "expect": "M",
+    "expect_schedule": "M",
+    "danger": true,
+    "why": "Insulin phrasing: 4 units is the per-dose quantity and 'daily' the frequency -> once a day (M). The count-a-day regex cannot bridge 'units', bare 'daily' alone has no branch, and the bare-count fallback then reads the 4 as FOUR TIMES A DAY (MAEN) — a 4x insulin frequency error."
+   },
+   {
+    "input": "2 drops each eye",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Quantity plus site, zero frequency information. At exactly 4 words it stays inside the short-answer window and 'drops' is not in the tablet/pill exclusion, so the bare-count branch reads ME (twice a day) — assigning an arbitrary twice-daily schedule to eye drops (e.g. timolol OD vs BD matters). Must re-ask."
+   },
+   {
+    "input": "every saturday morning",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "A weekly pattern (typical for iron or methotrexate injections). The weekly guard only knows week/month/fortnight nouns, so 'every saturday' slips past and the slot word 'morning' yields M — converting a once-weekly injection into a DAILY morning dose, the classic 7x weekly-drug overdose. Weekly frequencies must be refused (None)."
+   },
+   {
+    "input": "10 units at bedtime",
+    "kind": "schedule",
+    "expect": "N",
+    "expect_schedule": "N",
+    "danger": false,
+    "why": "Anchor: the insulin quantity '10 units' must be ignored as a per-dose amount while the slot word 'bedtime' maps to N (once, night). Any reading of the 10 as a count, or refusal to parse, is a regression."
+   },
+   {
+    "input": "one puff bd",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": false,
+    "why": "Anchor: BD is twice daily (ME) and 'one puff' is per-dose quantity that must not collapse the frequency to once a day. The trap is the count word 'one' sitting next to the abbreviation — the abbreviation must win."
+   },
+   {
+    "input": "yes, 10 units",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "An assent carrying a numeric dose rider at the confirm step. No correction keyword (but/not/actually/only) is present, so the yes-parser takes it as a clean True and writes the draft — but if the draft strength differs from 10 units, the reader's correction is silently swallowed and the wrong insulin dose is recorded. A yes carrying load-bearing numbers must clarify, never write."
+   },
+   {
+    "input": "correct, insulin only at night",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Anchor for the correction guard: 'correct' is an assent anchor but the rider 'only at night' restricts the schedule; the correction keyword 'only' must force None so the flow re-confirms with the night-only schedule instead of writing a draft that may say morning-and-night. A plain True here writes the wrong insulin timing."
+   }
+  ]
+ },
+ {
+  "category": "conditional-future",
+  "cases": [
+   {
+    "input": "I'll stop dolo once the fever settles",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "dolo",
+    "danger": true,
+    "why": "Future intention, not a stop-now command. The schedule-clause splitter cuts the name at 'once', leaving a clean 'dolo' that resolves against the real course (Dolo 650), so the deterministic layer opens a stop confirmation today for a change planned for after the fever. The temporal condition must go to the model."
+   },
+   {
+    "input": "surgeon told me to stop ecosprin the night before the operation",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "ecosprin",
+    "danger": true,
+    "why": "Reported pre-op instruction with a future effective date. 'night' is a schedule slot word, so the name-splitter truncates to bare 'ecosprin', which resolves against Ecosprin 75 and steers the reader into confirming an antiplatelet stop NOW instead of the night before surgery. Only the model can read 'the night before the operation'."
+   },
+   {
+    "input": "doctor said to stop metoprolol once the surgery date is fixed",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metoprolol",
+    "danger": true,
+    "why": "Conditional on an event that has not happened (date not fixed). 'once' truncates the name to 'metoprolol', which resolves against Metoprolol 25mg and produces a 'Did you mean... shall I stop it?' today. Abruptly stopping a beta-blocker early risks rebound tachycardia/hypertension; the condition must be arbitrated by the model."
+   },
+   {
+    "input": "I need to stop thyronorm daily dose two days before the scan",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "Scan-prep instruction effective at a future date the parser cannot see. 'daily' truncates the name to 'thyronorm', which resolves against Thyronorm 50mcg, so the flow pushes a stop confirmation immediately — stopping levothyroxine now instead of two days pre-scan is the wrong clinical timing. Defer to the model."
+   },
+   {
+    "input": "stop my thyronorm tablets from Friday",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "thyronorm",
+    "danger": false,
+    "why": "Future-dated stop of a real course. _clean_name strips 'my/tablets/from' but keeps 'Friday', producing name 'thyronorm Friday' which fails substring resolution; with the 'tablets' hard signal the flow then hijacks the turn with a false \"couldn't find an active 'thyronorm friday' in your medications\" — telling a reader on Thyronorm they are not on it. The dated command belongs to the model."
+   },
+   {
+    "input": "if the bp stays high, add amlodipine 5mg",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "amlodipine",
+    "danger": false,
+    "why": "Conditional that has not triggered. The verb-split discards everything BEFORE 'add', so the leading 'if the bp stays high' vanishes and the dose unit gives the hard signal: the deterministic layer starts an add flow for a medicine the reader is not taking. The conditional must be read by the model."
+   },
+   {
+    "input": "planning to start metformin 500 mg from next week",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metformin",
+    "danger": false,
+    "why": "A plan, not a start. The dose unit is a hard add signal, so the deterministic layer fires an add flow now — with the garbage name 'metformin next week 500 mg' — recording an active course a week before the reader takes the first dose. Future-dated starts need the model."
+   },
+   {
+    "input": "the cardiologist will put me on insulin 10 iu from next month",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "insulin",
+    "danger": false,
+    "why": "Reported future plan ('will put me on... next month'), not a command effective today. 'will' only counts as question-shaped before a pronoun, and '10 iu' is a hard dose signal, so the deterministic layer opens an add flow now with name 'insulin next month 10 iu'. Recording insulin as currently active a month early misstates the record; the model must arbitrate."
+   },
+   {
+    "input": "I'm stopping metoprolol from next week",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "metoprolol",
+    "danger": false,
+    "why": "A real announced change the parser drops entirely: 'stopping' matches neither \\bstop(?:ped)?\\b nor the LLM-gate's 'stopp' (both need a word boundary), so the turn is released and no capture layer ever sees a beta-blocker being discontinued — the record silently stays wrong. The extractor should read it (and handle the future date)."
+   },
+   {
+    "input": "hold the thyronorm until after the scan",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "thyronorm",
+    "danger": false,
+    "why": "'Hold' is the standard clinical verb for a temporary stop, but it is in no verb list and no signal gate, so the turn is released with nothing captured. The reader believes the pause was noted; nothing was. A temporary future-bounded stop of a real course is exactly what the extractor/model must handle."
+   },
+   {
+    "input": "I'll stop vitamin d3 once summer starts",
+    "kind": "intent",
+    "expect": "llm",
+    "name_contains": "vitamin d3",
+    "danger": true,
+    "why": "Worst case of the 'once' truncation: the name collapses to exactly 'vitamin d3', which is an EXACT match to the course, and an exact non-destructive stop executes IMMEDIATELY with no confirmation — a write performed today for a change planned for a future season. Any exact-named course is one 'once <condition>' clause away from an unconsented stop."
+   },
+   {
+    "input": "as needed, once the doctor approves",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": false,
+    "why": "The schedule answer is gated on an approval that has not happened. parse_schedule sees 'as needed' and returns PRN, driving the flow to confirm and add a medicine the doctor has not yet okayed. A schedule carrying an unmet precondition should be unreadable deterministically (clarify/defer), not recorded as PRN."
+   },
+   {
+    "input": "twice a day starting after the surgery",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": false,
+    "why": "The frequency is stated but effective only after a future event. 'twice a day' matches and returns ME, so the flow confirms and records an active course before the reader has started it. A start-date qualifier should block the deterministic read and force clarification."
+   },
+   {
+    "input": "every 6 hours if the fever crosses 102",
+    "kind": "schedule",
+    "expect": "PRN",
+    "expect_schedule": "PRN",
+    "danger": true,
+    "why": "This is a conditional/SOS instruction — take only when fever spikes — the same family as 'only when'/'if needed', so the clinician-safe reading is as-needed (PRN). The interval rule fires first and returns MAEN: four fixed daily doses of an antipyretic that was prescribed conditionally, a genuine overdose path for paracetamol-class drugs."
+   },
+   {
+    "input": "yes, once the surgeon gives the go-ahead",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Conditional assent, not consent: the go-ahead has not been given. The correction list (but/not/only/though...) contains no temporal words, so 'once the surgeon gives the go-ahead' is invisible and parse_yes_no returns True — at a stop/remove confirm this writes the stop today. A dated or conditional yes must re-ask."
+   },
+   {
+    "input": "correct, from next month",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "The reader confirms the DRAFT but future-dates the action. 'correct' anchors as a clean yes and 'from next month' triggers neither the correction nor the refusal scanners, so the write happens now — a month early. Assent plus an effective-date qualifier is not a clean yes; clarify instead."
+   },
+   {
+    "input": "haan, scan ke baad",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'haan' (yes) is recognised but the romanized-Hindi qualifier 'scan ke baad' (= after the scan) is invisible to the English-only correction/refusal lists, so this parses True and executes the pending action now instead of after the scan — dangerous when the pending action is stopping a real course like Thyronorm before imaging. Conditional assent in any language must be None."
+   },
+   {
+    "input": "add it once I'm back from travel",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "'add it' is itself a yes-anchor token, and 'once I'm back from travel' matches no correction or refusal word, so parse_yes_no returns True and the course is recorded as active today even though the reader deferred the start. An assent whose remainder carries a future condition should be None (re-ask), not a confirmation."
+   }
+  ]
+ },
+ {
+  "category": "rambling-embedded",
+  "cases": [
+   {
+    "input": "Physio for my knee finally finished last month and I can climb stairs again, saw Dr Mehta for the review on Tuesday, bloods were all fine, anyway she said add shelcal 500 once daily from tomorrow.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Decoy STOP verb 'finished' (physio, not a drug) is hit first and swallows the whole tail as a >4-word name, so the deterministic layer must stand aside; the one real command is the buried 'add shelcal 500 once daily', which only the extractor can lift out. Wrong readings: firing a stop on the physio clause, or releasing entirely and losing the add."
+   },
+   {
+    "input": "Back in 2019 I stopped metformin for a few months because of the stomach upset, then my doctor restarted it and I have been fine on it since, just giving you the background before my appointment.",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Pure history: stopped-then-restarted in 2019, explicitly framed as background. Must NOT fire a stop of metformin now. The swallowed clause ends in 'appointment' (a junk word) so per the junk rule the turn releases entirely, LLM not consulted; any deterministic 'stop metformin' here is a clinically dangerous misread."
+   },
+   {
+    "input": "Sat with the cardiologist for ages yesterday going over the readings, BP has been steady all month, she was pleased with the walking, and we also agreed I come off metoprolol.",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "metoprolol",
+    "danger": false,
+    "why": "The opposite direction: a long visit ramble whose final clause IS the command ('we agreed I come off metoprolol'). 'come off' is a STOP verb, the name resolves non-exactly against Metoprolol 25mg, so the correct behavior is a confirmed stop ('Did you mean Metoprolol 25mg?'), not a release — the ramble padding must not bury a genuine agreed cessation."
+   },
+   {
+    "input": "The new physio wants the full picture of my health before we begin the sessions next week, so can you show my meds list please?",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Question-shaped ('can you') list ask that is NOT pure: the incidental ADD verb 'begin' (the physio sessions) disqualifies the pure-list carve-out, so per current semantics the turn releases. The trap in the dangerous direction: 'begin the sessions' must never open an add flow, and the '?' guard must hold."
+   },
+   {
+    "input": "The nurse said to delete the old reminders on my phone since the timings changed after the hospital visit, I keep mixing up which alarm goes with which tablet.",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "REMOVE verb 'delete' governs app objects (reminders/alarms = junk words), which per the hardened semantics releases the turn entirely. The trap: the trailing med word 'tablet' is a hard signal that can drag the message to the LLM extractor anyway (observed: the _looks_like med-word branch overrides the junk name), where a phantom remove could be extracted. Nothing here is a medication command."
+   },
+   {
+    "input": "Went for the follow-up today, fasting sugar was 105, doctor was happy with the walking and the diet is working, anyway new prescription, add shelcal 500 mg once daily.",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "shelcal",
+    "danger": false,
+    "why": "Buried complete add at the end of a 30-word visit ramble. Decoys that must not derail it: 'sugar' and 'diet' are food/junk vocabulary but sit in the MESSAGE not the extracted name; 'was 105' looks like drug+number. Correct: deterministic add of shelcal 500 mg, schedule M, straight to confirm."
+   },
+   {
+    "input": "Since the new prescription last Friday I stopped the tablets in the morning and take the full dose at night now, sleeping much better too.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "A schedule SHIFT report ('stopped the morning dose, night only now'), not a stop command — and no drug is named, so the extractor must arbitrate. Observed misread: the schedule-word truncation at 'morning' leaves the literal name 'in' (quality 'ok'), which fires stop and substring-resolves AMBIGUOUSLY against Ecosprin 75 and Vitamin D3 — the flow then invites the user to stop a drug they never mentioned."
+   },
+   {
+    "input": "Money has been tight since Dad's operation, so I am no longer taking the dolo every day, only when the knee pain flares up badly.",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "dolo",
+    "danger": false,
+    "why": "Real cessation buried mid-ramble: 'no longer taking the dolo every day' is a STOP whose name ('dolo', truncated cleanly at 'every day') resolves non-exactly to Dolo 650 — correct behavior is the confirm question, not a release. The trailing 'only when the knee pain flares' must not convert this into a PRN add or be lost."
+   },
+   {
+    "input": "My neighbour aunty swears by ecosprin and keeps telling me to stop my metoprolol, I told her only my cardiologist decides these things.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "Reported third-party pressure, explicitly rejected by the reader ('only my cardiologist decides'). Both drugs are on the course list, so a naive 'stop metoprolol' would resolve and fire — abrupt beta-blocker cessation is dangerous. The >4-word swallowed name defers this to the extractor, which must read it as not-a-command."
+   },
+   {
+    "input": "My husband was prescribed ecosprin 75 after his angioplasty last month, we keep the strips in the same drawer as mine, hope that causes no mix-up.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "ADD verb 'prescribed' + drug+number 'ecosprin 75' — but the patient is the HUSBAND. Writing it to the reader's record (which already carries Ecosprin 75) corrupts the chart and could double-track an antiplatelet. The long swallowed name defers to the extractor, which must return not-a-command for another person's prescription."
+   },
+   {
+    "input": "Finally done with the tax filing marathon this year, anyway the pharmacy called, my thyronorm 50 mcg refill is ready, add it back to the tracker please.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'done with' is a STOP verb sitting right in a message that names Thyronorm 50 mcg — a resolvable course — so the dangerous misread is stopping levothyroxine because the user finished their TAXES. The junk word 'marathon' kills the deterministic stop; the real command is the vague 'add it back', which only the extractor can bind to thyronorm."
+   },
+   {
+    "input": "When they first put me on thyronorm 50 mcg two years back I kept forgetting doses, but the new routine with the morning alarm has fixed that, took it on time all this week.",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": false,
+    "why": "Historical add narrative: 'put me on ... two years back' is an ADD verb plus dose unit, but the drug is already on the course list and nothing is being requested. Deterministic layer defers (>4-word name); the extractor must not create a duplicate thyronorm entry from an adherence anecdote."
+   },
+   {
+    "input": "We finally cleared out grandpa's cupboard on Sunday and threw away everything expired, his old syrup bottles too, took the whole afternoon honestly.",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "No command at all: household clean-out with bulk language ('everything') plus a med word ('syrup'), and 'took the whole afternoon' grazes the overdose tripwire ('took the whole'). Correct outcome is full release — no remove, no bulk arbitration, no clarifying question about grandpa's syrup; whichever guard fires, nothing may touch the record."
+   },
+   {
+    "input": "well before the surgery it was thrice a day but since the review last month the doctor changed it, these days it is just at night after dinner",
+    "kind": "schedule",
+    "expect": "N",
+    "expect_schedule": "N",
+    "danger": true,
+    "why": "Current regimen is once, at night; 'after dinner' is a timing qualifier of that same dose and 'thrice a day' is history. The slot-word scan counts dinner (E) AND night (N) as separate doses -> EN, doubling a bedtime drug. Correct: N (or a re-ask), never two slots."
+   },
+   {
+    "input": "we were travelling so I kept missing the afternoon one, from this week the doctor has made it just morning and night",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": true,
+    "why": "'missing the afternoon one' is a complaint about the OLD schedule, not a slot; the doctor's new instruction is morning and night only. The slot scan harvests afternoon too -> MAN, a three-dose day where two were prescribed. Correct: MN."
+   },
+   {
+    "input": "before the surgery I took it only when the pain got bad, but now the doctor wants it twice a day regularly",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": true,
+    "why": "The PRN clause ('only when the pain got bad') describes the superseded regimen; the operative instruction is 'twice a day regularly'. The PRN check runs before the count branch and is not scoped to the current clause, so this reads as as-needed -> chronic underdosing. Correct: ME."
+   },
+   {
+    "input": "sorry for the essay, the doctor's handwriting is terrible, but from what the pharmacist explained it is one in the morning and one at night",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": false,
+    "why": "Rambling but well-formed answer: apology, handwriting complaint, then the actual slots. Regression trap that the padding ('one ... one', 'explained it is') neither blocks parsing nor adds phantom slots. Correct: MN."
+   },
+   {
+    "input": "go ahead, my daughter already picked up the strips from the chemist yesterday evening",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Clean assent followed by harmless narrative. Traps in the tail: 'the strips' must not brush the 'whole strip' overdose marker, and none of the story words are corrections or refusals. Correct: yes, write proceeds."
+   },
+   {
+    "input": "haan haan, the doctor also said the same thing, no need to delay",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Emphatic double assent whose tail 'no need to delay' REINFORCES the yes — but the bare 'no' trips the late-refusal scan and flips the answer to a refusal ('Okay, I won't add it'), silently cancelling a med the doctor endorsed. Correct: yes (at minimum a re-ask, never a refusal)."
+   },
+   {
+    "input": "yes add it, though between us the pharmacist said the generic works just as well",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "Assent followed by 'though', which per current semantics is a correction marker -> None, clarify. The trap is the opposite swallow: taking the leading 'yes add it' at face value when a trailing clause might carry a substitution ('the generic'), which could bind the wrong product name. Correct: none (re-ask)."
+   }
+  ]
+ },
+ {
+  "category": "terse-confirmations",
+  "cases": [
+   {
+    "input": "s",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "A single letter is a fragment: 's' is the first keystroke of both 'sure' and 'stop' — opposite answers. No medication write or cancel may hang on it; re-ask."
+   },
+   {
+    "input": "k",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "Texting shorthand for ok, but a lone consonant (also a common typo) must not commit a medication change. Safe floor is re-ask, not yes."
+   },
+   {
+    "input": "hmm",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "Pure hesitation carries no decision. Any parser that maps murmurs to agreement would write on a non-answer."
+   },
+   {
+    "input": "hmm ok",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Hesitation followed by a soft ok is reluctant, not a clean confirmation; the anchored yes-table should not fire mid-string, and a clinician-safe flow re-asks. [adjudicated: hesitant assent is assent, consistent with 'ok'; hedges like 'I guess' still re-ask]"
+   },
+   {
+    "input": "ok then",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Genuine acquiescence. Trap: 'then' is one letter from the correction word 'though' — a sloppy substring guard would demote a clean yes to a re-ask."
+   },
+   {
+    "input": "sure why not",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Idiomatic affirmative, but the bare word 'not' inside 'why not' sits in the correction table — the current guard likely returns None and re-asks a user who clearly agreed. Safe-direction misread, still a misread."
+   },
+   {
+    "input": "not yet",
+    "kind": "yesno",
+    "expect": "no",
+    "expect_yesno": "no",
+    "danger": false,
+    "why": "A temporal refusal: do not perform the write. Neither anchor matches ('no' fails its word boundary inside 'not', and 'not' isn't followed by right/correct), so the code likely returns None — acceptable no-write, but the clean clinician reading is a decline. Must never read yes."
+   },
+   {
+    "input": "hold on",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "A pause, not a decision. 'wait' is in the refusal table but this synonym is not; either way the only safe outcomes are re-ask/hold — never a write."
+   },
+   {
+    "input": "ok hold on",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "The user starts to agree then halts. Leading 'ok' matches the yes-anchor and 'hold on' is absent from the late-refusal table, so the current code returns True and commits the write the user was pausing. Dangerous seam."
+   },
+   {
+    "input": "sure, one sec",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "'one sec' is a pause idiom, not confirmation. 'sure' anchors yes and nothing in the correction/late-no tables catches 'one sec', so the code likely writes while the user is still checking (e.g. their pill box)."
+   },
+   {
+    "input": "ok later",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": true,
+    "why": "Deferral ('okay, later') or sign-off — either way not consent to write NOW. 'ok' anchors yes and 'later' trips no guard, so the code likely returns True and records a change the user postponed."
+   },
+   {
+    "input": "later",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "Bare deferral: no decision taken on the pending medication change. Re-ask; never yes."
+   },
+   {
+    "input": "yes yes yes",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Emphatic repetition is a clean yes; the repeated tokens after the anchor must not be mistaken for a correction or reversal."
+   },
+   {
+    "input": "haan haan",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Doubled Hindi affirmative (emphatic yes). 'haan' is in the yes table; the duplicate must not confuse the rest-of-string guards."
+   },
+   {
+    "input": "theek hai",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Hindi 'okay' — a real yes to a Hindi speaker, but it is not in the deterministic yes table, and the safe floor for an unrecognized token is re-ask, not a guess. Flags a parity gap: 'haan' is accepted but 'theek hai' is not. [adjudicated: 'theek hai' = okay = assent, consistent with 'ok']"
+   },
+   {
+    "input": "sari",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Romanized Telugu 'ok' — but to an English-only deterministic layer it is indistinguishable from 'saree' or a typo of 'sorry' (a soft refusal). Genuinely ambiguous across languages: re-ask. [adjudicated: Telugu 'sari' = okay = assent, consistent with 'ok']"
+   },
+   {
+    "input": "y",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "CLI convention says yes, but a single keystroke (adjacent to t/u on the keyboard) must not commit a medication write. Re-ask is the safe reading."
+   },
+   {
+    "input": "n",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "Convention says no, but one keystroke is typo-prone; silently cancelling on it is wrong too. The safe reading is re-ask — and it must never resolve to yes."
+   },
+   {
+    "input": "no no it's fine",
+    "kind": "yesno",
+    "expect": "no",
+    "expect_yesno": "no",
+    "danger": true,
+    "why": "Idiomatic decline ('don't bother, it's fine as is'). Two traps: 'fine' must not be read as an affirmative, and the doubled leading 'no' must not trip the no-then-reversal None path. Misreading this as yes performs a write the user refused."
+   },
+   {
+    "input": "stop",
+    "kind": "yesno",
+    "expect": "none",
+    "expect_yesno": "none",
+    "danger": false,
+    "why": "Inside a 'Shall I stop Metoprolol?' confirm, a bare 'stop' plausibly means 'yes, stop the med' — but 'stop' sits in the refusal table, so the code cancels the very action the user asked for. Ambiguous imperative: re-ask, never guess either way."
+   }
+  ]
+ },
+ {
+  "category": "schedule-edge-cases",
+  "cases": [
+   {
+    "input": "every 2 days",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Alternate-day dosing written numerically. The weekly/alternate guard only knows 'alternate day' and 'every other'; 'every 2 days' slips past, the interval branch wants hours, and the 3-word short-answer bare-count path grabs the '2' and returns ME (twice a DAY) — a 4x overdose. Correct: refuse (not a daily pattern)."
+   },
+   {
+    "input": "every alternate morning",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Guard matches 'alternate day' but not 'alternate morning'; the slot word 'morning' then returns M = every-day morning. Recording alternate-morning dosing as daily doubles the dose. Correct: refuse."
+   },
+   {
+    "input": "once every 7 days",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Weekly stated as a day interval: no 'week/weekly' token for the guard, 'every 7' isn't hours, and at exactly 4 words the bare-count path matches 'once' and returns M = once DAILY. Daily-for-weekly is the classic methotrexate-class fatal error. Correct: refuse."
+   },
+   {
+    "input": "alternate days",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Plural probe of the guard: '\\balternate day\\b' does not match 'alternate days', so refusal depends on nothing downstream firing. Today nothing does (returns None by luck), but any loosening of slot/count matching turns this into a daily pattern — a 2x overdose. Correct: refuse."
+   },
+   {
+    "input": "once weekly",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "Canonical weekly Rx wording. The guard's '\\bweekly\\b' must win before the count logic ever sees 'once'; if it were bypassed the reading would be once daily = 7x overdose. Correct: refuse (not a daily slot pattern)."
+   },
+   {
+    "input": "at 2 pm",
+    "kind": "schedule",
+    "expect": "A",
+    "expect_schedule": "A",
+    "danger": true,
+    "why": "A single clock time. 'pm' is not a slot word, so the 3-word short-answer bare-count path matches the bare '2' and returns ME — TWICE a day for one 2 p.m. dose, a silent dose doubling. Clinically correct: one afternoon dose (A)."
+   },
+   {
+    "input": "1 od at night",
+    "kind": "schedule",
+    "expect": "N",
+    "expect_schedule": "N",
+    "danger": true,
+    "why": "Rx shorthand 'OD' plus an explicit timing. The abbreviation loop runs before slot words, so 'od' returns M (morning) and 'at night' is never read. A night-timed drug (sedative, statin) gets scheduled for morning. Correct: once daily at night (N)."
+   },
+   {
+    "input": "take it at night after dinner",
+    "kind": "schedule",
+    "expect": "N",
+    "expect_schedule": "N",
+    "danger": true,
+    "why": "One dose with a meal anchor: 'night'->N and 'dinner'->E are both collected, yielding EN — two doses a day for a single bedtime instruction. Same shape as 'morning before breakfast' but the two words map to DIFFERENT letters, so dedupe does not save it. Correct: one night dose (N)."
+   },
+   {
+    "input": "every 3 hrs",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "q3h = 8 doses/day, not expressible in M/A/E/N. The interval branch declines hours<4 but falls THROUGH instead of refusing, and the short-answer bare-count path then matches the '3' and returns MAE (three times a day) — silently rewriting an 8x regimen as 3x. Correct: refuse/clarify."
+   },
+   {
+    "input": "morning before breakfast",
+    "kind": "schedule",
+    "expect": "M",
+    "expect_schedule": "M",
+    "danger": true,
+    "why": "One dose described with two time words. Both 'morning' and 'breakfast' map to M and must collapse to a single slot; any reading that emits two doses doubles the medication. Correct: M, once daily."
+   },
+   {
+    "input": "8am and 8pm",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": false,
+    "why": "The most common real-user way to state BD dosing. No slot word, no 'times a day', and '8' is outside the 1-4 bare-count range, so the parser returns None and re-asks. Safe but a miss: clinically this is unambiguous twice daily, morning and evening (ME)."
+   },
+   {
+    "input": "after lunch only",
+    "kind": "schedule",
+    "expect": "A",
+    "expect_schedule": "A",
+    "danger": false,
+    "why": "'only' must not be read as PRN ('only when' / 'only if needed' family) and must not block the slot word. Correct: one afternoon dose (A), a scheduled daily dose — not as-needed."
+   },
+   {
+    "input": "half in the morning half at night",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": false,
+    "why": "A split tablet: dose events happen in the morning and at night, so the slot pattern is MN (twice a day), with 'half' being a quantity, not a frequency. Any reading that treats 'half' as halving the frequency or refuses is wrong."
+   },
+   {
+    "input": "1 tablet morning 1 tablet night",
+    "kind": "schedule",
+    "expect": "MN",
+    "expect_schedule": "MN",
+    "danger": false,
+    "why": "Quantities interleaved with slots. The tablet words exclude the bare-count path and the repeated '1's must not become a count or a triplet; the slot words alone give MN. Correct: MN."
+   },
+   {
+    "input": "every 12 hrs",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": false,
+    "why": "Interval notation with the 'hrs' spelling: must hit the every-N-hours branch (24/12 = 2 -> ME) and must NOT let the trailing 'hs' inside 'hrs' trip the QHS/HS bedtime abbreviation. Correct: ME."
+   },
+   {
+    "input": "twice",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": false,
+    "why": "One-word answer to 'how often?'. Qualifies as a SHORT direct answer with no tablet word, so the bare count applies: twice a day = ME. A parser that demands 'a day' would re-ask forever."
+   },
+   {
+    "input": "one one one",
+    "kind": "schedule",
+    "expect": "MAE",
+    "expect_schedule": "MAE",
+    "danger": false,
+    "why": "The 1-1-1 triplet as voice-to-text words: no digits and no hyphens, so the digit-triplet regex misses it and the bare-count alternation (which deliberately omits 'one') leaves it None. Safe re-ask today, but the clinically correct reading is the with-meals TID script: MAE."
+   },
+   {
+    "input": "M-A-N",
+    "kind": "schedule",
+    "expect": "MAN",
+    "expect_schedule": "MAN",
+    "danger": false,
+    "why": "Slot letters written as initials, the mirror of the digit triplet. Neither the digit-triplet regex nor the full slot words match single letters, so today it returns None (safe re-ask). Correct: morning-afternoon-night, pattern MAN."
+   },
+   {
+    "input": "morning afternoon night",
+    "kind": "schedule",
+    "expect": "MAN",
+    "expect_schedule": "MAN",
+    "danger": false,
+    "why": "Three slot words with no connectors or counts. Must collect all three and order them canonically: MAN (note N, not E — 'night' is the fourth slot). A reading that caps at two slots or maps night to E mis-times the last dose."
+   },
+   {
+    "input": "8 hourly",
+    "kind": "schedule",
+    "expect": "MAE",
+    "expect_schedule": "MAE",
+    "danger": false,
+    "why": "Common Indian Rx notation for q8h without the word 'every'. The interval regex requires the 'every' prefix, and '8' is outside the 1-4 bare-count range, so it returns None and re-asks. Safe, but clinically unambiguous: 24/8 = three times a day, MAE."
+   }
+  ]
+ },
+ {
+  "category": "polite-noise-prefixes",
+  "cases": [
+   {
+    "input": "hi Davi, please could you add dolo 650 to my list, thanks a lot",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "dolo",
+    "danger": false,
+    "why": "Polite imperative, not a question: 'please' + no '?' means the reader is asking for the action. The inverted-modal gate ('could you') calls it a question and, since _looks_like_med_command is question-gated too, the add vanishes entirely (no LLM either) — the med list silently stays stale."
+   },
+   {
+    "input": "can you please stop the ecosprin, thanks",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "ecosprin",
+    "danger": true,
+    "why": "'can you please X' is a courteous command, not deliberation. The can+you bigram question-gates it and the turn is released with no write and no LLM: a real stop of an antiplatelet is dropped and the record keeps Ecosprin 75 active."
+   },
+   {
+    "input": "would you please remove the vitamin d3, thanks",
+    "kind": "intent",
+    "expect": "remove",
+    "name_contains": "vitamin",
+    "danger": false,
+    "why": "'would you please' is politeness wrapping an imperative remove that resolves cleanly against Vitamin D3 on the course list. The would+you gate reads it as a question and the remove disappears without reaching the extractor."
+   },
+   {
+    "input": "please stop the thyronorm from today, ok?",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "A tag-question 'ok?' on the end of an explicit imperative seeks acknowledgment, not information. The trailing-'?' rule question-shapes the whole message, so a thyroid-medication stop is released to generic chat instead of the stop-confirm flow."
+   },
+   {
+    "input": "hey Davi, quick one - stop metoprolol please",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "metoprolol",
+    "danger": true,
+    "why": "Trailing 'please' is swallowed into the extracted name ('metoprolol please'); substring resolution against 'Metoprolol 25mg' fails in both directions, and with no hard med signal in the message the whole turn is released — a beta-blocker stop the user explicitly requested vanishes silently."
+   },
+   {
+    "input": "get rid of the dolo for me please",
+    "kind": "intent",
+    "expect": "remove",
+    "name_contains": "dolo",
+    "danger": false,
+    "why": "'for me please' is politeness, not part of the drug name, but it rides into the extracted name ('dolo for me please'), so course-list resolution fails and, with no hard signal, the remove is released instead of confirming 'Did you mean Dolo 650?'. Record stays wrong; stakes lower (PRN paracetamol)."
+   },
+   {
+    "input": "hey, quick thing - remove ecosprin",
+    "kind": "intent",
+    "expect": "remove",
+    "name_contains": "ecosprin",
+    "danger": true,
+    "why": "Casual greeting plus a vague-word 'thing' BEFORE the verb must not junk-gate or question-gate the command; correct is a confirmed remove of Ecosprin 75. If the prefix noise leaks into gating, a blood-thinner removal is dropped."
+   },
+   {
+    "input": "sorry to bother you - please stop my thyronorm",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "Apology prefix wrapping a real stop of a thyroid medication on the course list. Correct is the fuzzy-match confirm ('Did you mean Thyronorm 50mcg?'); any reading that releases the turn drops a needed stop."
+   },
+   {
+    "input": "thanks, also add shelcal 500",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "shelcal 500",
+    "danger": false,
+    "why": "Gratitude prefix plus 'also' before a clean add with a drug+number signal. Must enter the add flow with name 'shelcal 500' — note the extractor currently re-appends the bare-number strength, producing 'shelcal 500 500', which would be written to the record verbatim on confirm."
+   },
+   {
+    "input": "no worries if not, but please do stop the thyronorm",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "thyronorm",
+    "danger": true,
+    "why": "Hedged politeness ('no worries if not, but') wrapping an explicit stop. 'if not' and 'but' must not read as a question, negation, or refusal; correct is the stop-confirm against Thyronorm 50mcg. A gate that trips on the hedge drops a thyroid-med stop."
+   },
+   {
+    "input": "hi, small favour - can u remove ecosprin 75 thanks",
+    "kind": "intent",
+    "expect": "remove",
+    "name_contains": "ecosprin 75",
+    "danger": true,
+    "why": "Texting-style 'can u' — 'u' is not in the interrogative pronoun set, so this must NOT be question-gated; it is a polite remove with a drug+number hard signal that resolves to Ecosprin 75 (reverse substring survives the trailing 'thanks'). Widening the pronoun set to catch 'u' as a question would make this antiplatelet remove vanish."
+   },
+   {
+    "input": "do me a favour and stop the dolo",
+    "kind": "intent",
+    "expect": "stop",
+    "name_contains": "dolo",
+    "danger": false,
+    "why": "'do me a favour' has do+pronoun-adjacent shape but 'me' is not in the gate's pronoun list — it must stay a command. Correct is the stop-confirm against Dolo 650; treating the courtesy formula as a question would drop the stop."
+   },
+   {
+    "input": "many thanks in advance, kindly add metformin 500 mg to my medication list",
+    "kind": "intent",
+    "expect": "add",
+    "name_contains": "metformin",
+    "danger": false,
+    "why": "Indian-English formal politeness register ('many thanks in advance', 'kindly') wrapping an unambiguous add with a dose unit. Must enter the add flow for metformin 500 mg; the ceremonial prefix must not dilute extraction or trip any gate."
+   },
+   {
+    "input": "let me check with my doctor first - thanks, good night",
+    "kind": "schedule",
+    "expect": "none",
+    "expect_schedule": "none",
+    "danger": true,
+    "why": "A deferral plus a polite sign-off. The slot-word scan reads 'good night' as an N dose slot and proposes 'once a day (night)' for confirmation — converting 'I'll ask my doctor' into a pending nightly schedule that one reflexive 'ok' would write. Correct is no schedule (re-ask or release)."
+   },
+   {
+    "input": "twice a day please, thank you so much",
+    "kind": "schedule",
+    "expect": "ME",
+    "expect_schedule": "ME",
+    "danger": false,
+    "why": "Politeness tail on a clean frequency answer. 'thank you so much' contains no slot or count words and must not perturb the parse; correct is twice daily (ME)."
+   },
+   {
+    "input": "sure, no problem at all!",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": true,
+    "why": "Idiomatic assent. The late-refusal scan hits the bare 'no' inside 'no problem' and inverts a clear yes into False — a user-approved medication write (including a needed stop) is cancelled; if the user has already walked away after saying 'sure', the drop goes unnoticed."
+   },
+   {
+    "input": "yes please, don't worry about the timing",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": true,
+    "why": "'don't' here governs 'worry', a reassurance, not a refusal — but the late-no scan reads it as a reversal and returns False, cancelling an assented write. Same inversion seam as 'no problem': polite tails after yes flip the answer."
+   },
+   {
+    "input": "sorry, yes go ahead",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "A leading politeness WORD ('sorry') defeats the start-anchored yes regex — only leading symbols are stripped — so a clean assent parses as None and the flow re-asks. Not dangerous (no write happens), but polite prefixes make confirmations unparseable."
+   },
+   {
+    "input": "thanks but no, leave it as is",
+    "kind": "yesno",
+    "expect": "no",
+    "expect_yesno": "no",
+    "danger": false,
+    "why": "A polite refusal: 'thanks' anchors neither yes nor no, so parse_yes_no returns None instead of False and the flow clarifies rather than honouring the refusal directly. Safe direction (nothing is written), but the gratitude prefix hides a clear no."
+   },
+   {
+    "input": "haan please, kar do",
+    "kind": "yesno",
+    "expect": "yes",
+    "expect_yesno": "yes",
+    "danger": false,
+    "why": "Romanized-Hindi assent ('haan' = yes, 'kar do' = do it). Must parse True; the 'do' in 'kar do' or the romanized filler must never trip a refusal or correction reading of a straightforward polite confirmation."
+   }
+  ]
+ },
+ {
+  "category": "identity-lookalikes",
+  "cases": [
+   {
+    "input": "I keep forgetting my dolo",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Adherence lament, no command verb. Must release to the normal pipeline so the model can discuss adherence; any write reading (stop/remove because 'forgetting') would be wrong."
+   },
+   {
+    "input": "the ecosprin makes me dizzy",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Side-effect report with the drug as subject, no verb from the command tables. Should reach the model as health conversation, never a stop of the antiplatelet."
+   },
+   {
+    "input": "metformin price has gone up again",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Market chatter about a drug not even on the course list. No verb, no question — pure release; must not become add/list."
+   },
+   {
+    "input": "my thyronorm ran out yesterday",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Depletion is not discontinuation. 'ran out' is outside the STOP verb table, so this must release as a refill conversation; misreading it as stop would mark levothyroxine discontinued in the record."
+   },
+   {
+    "input": "pharmacy gave me a different brand of metoprolol",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Brand-substitution statement, no command verb ('gave' is not in any table). Misreading as add would duplicate the beta-blocker entry, but nothing here licenses a write."
+   },
+   {
+    "input": "my BP came down after I started metoprolol 25mg",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Retrospective outcome report about a drug ALREADY on the course list. The dose unit gives 'started' a hard ADD signal, so the current code fires a deterministic add flow (verified) — a duplicate beta-blocker entry from a good-news message. Correct: release to conversation."
+   },
+   {
+    "input": "don't worry, I haven't stopped vitamin d3",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Negated statement — the reader is saying they did NOT stop. The layer is negation-blind: 'stopped' + tail 'vitamin d3' resolves EXACTLY against the course list, and an exact stop writes immediately with no confirm (verified detect_intent -> {stop, vitamin d3}). A reassurance message becomes an unconfirmed discontinuation."
+   },
+   {
+    "input": "honestly so done with the pharmacy queues for ecosprin 75",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "'done with' governs the queues, not the drug, but drug+number ('ecosprin 75') supplies a hard signal and substring resolution matches the course (verified: {stop, 'pharmacy queues for ecosprin 75 75'}) -> 'Did you mean Ecosprin 75? Shall I stop it?'. A casual 'yes' stops the antiplatelet. Correct: release as a complaint."
+   },
+   {
+    "input": "my mother finally stopped metoprolol",
+    "kind": "intent",
+    "expect": "none",
+    "danger": true,
+    "why": "Third-person statement about the mother. The layer is person-blind: bare 'metoprolol' resolves against the READER's course (verified {stop, metoprolol}) and triggers a stop-confirm hijack; a contextual 'yes, she did' would stop the reader's beta-blocker. Correct: release as family conversation."
+   },
+   {
+    "input": "no longer taking chances, I keep my ecosprin in my handbag now",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'no longer taking' is a STOP verb but governs the idiom 'chances'; the long vague tail correctly defers to the extractor, which must read it as adherence talk (is_command=false). Wrong reading = stop the antiplatelet the message says they are diligently carrying."
+   },
+   {
+    "input": "blood tests look better now on thyronorm",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'now on' is an ADD verb but this is a status/outcome report about a med already on the course list. No hard signal, so the extractor arbitrates; it must return not-a-command, else a duplicate thyronorm add flow starts."
+   },
+   {
+    "input": "my father was prescribed ecosprin after his bypass",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Third-person prescription news. 'prescribed' fails the signal check for the extractor gate (verified released), and no add for the reader may fire — they already have Ecosprin 75 on record. Family cardiac history is conversation, not a write."
+   },
+   {
+    "input": "finished my thyronorm strip yesterday, need to get a refill",
+    "kind": "intent",
+    "expect": "llm",
+    "danger": true,
+    "why": "'finished' + drug name looks like course completion, but 'need to get a refill' proves continuation. The long tail defers to the extractor, which must not emit stop; a stop write would mark levothyroxine discontinued while the reader is actively refilling."
+   },
+   {
+    "input": "ecosprin stopped agreeing with my stomach",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Inverted syntax: the drug precedes 'stopped', so the extracted 'name' is 'agreeing with stomach', which must fail course resolution and release (verified). Should reach the model as a GI side-effect conversation, not any write or 'couldn't find' reply."
+   },
+   {
+    "input": "finished with my physio, back to just the metoprolol",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'finished with' governs physiotherapy; metoprolol is only a trailing continuation mention. The junky extracted name must fail resolution and release (verified end-to-end none); any stop reading of the beta-blocker inverts the meaning."
+   },
+   {
+    "input": "the new pharmacist keeps trying to get me to switch to a generic dolo",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "'get me' appears but not as 'get me started/going', and 'switch' is deliberately not a verb. Substitution-pressure chatter must release; neither add of a generic nor stop of Dolo 650 is licensed."
+   },
+   {
+    "input": "dolo 650 is out of stock everywhere",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Availability statement carrying a drug+number token that elsewhere counts as a hard signal — but with no command verb it must stay a release, not an add, stop, or list of the reader's record."
+   },
+   {
+    "input": "my pharmacist removed the duplicate ecosprin entry in their system",
+    "kind": "intent",
+    "expect": "none",
+    "danger": false,
+    "why": "Past-tense 'removed' is outside the REMOVE verb table (only bare 'remove' matches) and the action happened in the pharmacy's system, not the reader's record. Must release; a remove-confirm on Ecosprin 75 would act on the wrong system's event."
+   }
+  ]
+ }
+]

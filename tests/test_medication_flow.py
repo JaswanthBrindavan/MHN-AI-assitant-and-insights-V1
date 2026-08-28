@@ -89,6 +89,7 @@ def test_parse_yes_no(msg, expected):
 async def test_add_asks_for_schedule_when_missing(db_session):
     r = await mf.handle_medication_turn(db_session, USER, "add dolo 650", None)
     assert r is not None
+    assert r is not None
     assert "how often" in r["reply"].lower()
     pm = r["pending_med"]
     assert pm["stage"] == "await_schedule" and pm["action"] == "add"
@@ -98,6 +99,7 @@ async def test_add_asks_for_schedule_when_missing(db_session):
 async def test_add_with_inline_schedule_goes_straight_to_confirm(db_session):
     r = await mf.handle_medication_turn(
         db_session, USER, "add dolo 650 three times a day", None)
+    assert r is not None
     pm = r["pending_med"]
     assert pm["stage"] == "confirm" and pm["schedule_pattern"] == "MAE"
     assert "confirm" in r["reply"].lower()
@@ -108,6 +110,7 @@ async def test_schedule_answer_advances_to_confirm(db_session):
                "strength": "650"}
     r = await mf.handle_medication_turn(
         db_session, USER, "morning, afternoon and evening", pending)
+    assert r is not None
     pm = r["pending_med"]
     assert pm["stage"] == "confirm" and pm["schedule_pattern"] == "MAE"
 
@@ -129,6 +132,7 @@ async def test_confirm_yes_performs_the_write(db_session, monkeypatch):
     pending = {"stage": "confirm", "action": "add", "name": "dolo 650",
                "strength": "650", "schedule_pattern": "MAE", "is_prn": False}
     r = await mf.handle_medication_turn(db_session, USER, "yes", pending)
+    assert r is not None
     assert r["pending_med"] is None
     assert seen["action"] == "add" and seen["schedule_pattern"] == "MAE"
 
@@ -145,6 +149,7 @@ async def test_confirm_no_cancels_without_writing(db_session, monkeypatch):
     monkeypatch.setattr(dh, "perform_medication_write", _write)
     pending = {"stage": "confirm", "action": "add", "name": "dolo 650"}
     r = await mf.handle_medication_turn(db_session, USER, "no thanks", pending)
+    assert r is not None
     assert called is False and r["pending_med"] is None
     assert "won't" in r["reply"].lower()
 
@@ -175,6 +180,7 @@ async def test_llm_capture_catches_phrasing_the_parser_misses(db_session):
     msg = "put dolo 650 tablet onto my medication list please"
     r = await mf.handle_medication_turn(db_session, USER, msg, None, _Extractor())
     assert r is not None
+    assert r is not None
     pm = r["pending_med"]
     assert pm["stage"] == "confirm" and pm["schedule_pattern"] == "MAE"
 
@@ -194,6 +200,7 @@ async def test_bare_add_of_a_drug_with_no_dose_uses_the_llm(db_session):
 
     r = await mf.handle_medication_turn(
         db_session, USER, "start me on amlodipine", None, _Extractor())
+    assert r is not None
     assert r is not None
     pm = r["pending_med"]
     assert pm["stage"] == "await_schedule" and "amlodipine" in pm["name"].lower()
@@ -270,6 +277,7 @@ async def test_confirm_yes_with_schedule_correction_reconfirms(db_session, monke
                "schedule_pattern": "MAE", "is_prn": False}
     r = await mf.handle_medication_turn(
         db_session, USER, "yes but twice a day not three times", pending)
+    assert r is not None
     assert called is False, "wrote the OLD schedule despite a correction"
     pm = r["pending_med"]
     assert pm["schedule_pattern"] == "ME" and pm["stage"] == "confirm"
@@ -303,6 +311,7 @@ async def test_confirm_yes_with_unparseable_correction_never_writes(
     r = await mf.handle_medication_turn(
         db_session, USER, "correct, but it's Pan 40 not Pan 20", pending,
         _Extractor())
+    assert r is not None
     assert called is False
     assert "pan 40" in r["pending_med"]["name"].lower()
 

@@ -493,9 +493,9 @@
    {
     "input": "can you add Dolo 650 to my meds",
     "kind": "intent",
-    "expect": "llm",
+    "expect": "add",
     "danger": false,
-    "why": "'can' trips the interrogative guard, so this plainly-worded add is dropped by BOTH detect_intent and _looks_like_med_command and never reaches the LLM."
+    "why": "'can' trips the interrogative guard, so this plainly-worded add is dropped by BOTH detect_intent and _looks_like_med_command and never reaches the LLM. [adjudicated: 'can you <verb>' is a polite REQUEST, not a question — it acts]"
    },
    {
     "input": "doctor said I should start Ecosprin 75",

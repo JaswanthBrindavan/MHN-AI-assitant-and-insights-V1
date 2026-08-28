@@ -101,7 +101,8 @@ _FOOD_WORDS = frozenset(
 _JUNK_WORDS = frozenset(
     "reminder reminders appointment appointments alarm alarms calendar note "
     "notes entry name account profile photo photos conversation chat waitlist "
-    "study world homework workout marathon diet app".split())
+    "study world homework workout marathon diet app queue queues pharmacy "
+    "chemist price prices cost".split())
 _VAGUE_WORDS = frozenset(
     "one ones it that this those them thing stuff little white red blue "
     "yellow pink small big round oval half thyroid bp pressure cholesterol "
@@ -115,12 +116,59 @@ _ROMANIZED_RE = re.compile(
     r"cheyy?andi|naa|naaku|nuvvu|daal|jodo|shuru|se hatao|list chey|"
     r"hata do|hata\b|theesey|teesey|theeyi|aapu|nilipiv\w*)\b", re.I)
 
+# THIRD PARTY: a relative's/pet's medication must NEVER be written to the
+# reader's own record — only the model can see whose drug it is.
+_PERSON = (r"(?:mother|mom|mum|mummy|amma|father|dad|papa|wife|husband|son|"
+           r"daughter|brother|sister|grand\w+|aunty?|uncle|friend|"
+           r"neighbou?r|baby|kid|child|children|parents?|dog|cat|pet)")
+_THIRD_PARTY_RE = re.compile(
+    rf"\b(?:for|to)\s+(?:my|our|the)\s+{_PERSON}\b"
+    rf"|\bmy\s+{_PERSON}\b|\b(?:his|her|their)\b"
+    rf"|\b(?:she|he)\s+(?:takes?|took|stopp?ed|start(?:ed)?|needs?)\b",
+    re.I)
+
+# DOSE CHANGES are neither add nor stop — a naive read can double-dose.
+_DOSE_CHANGE_RE = re.compile(
+    r"\b(?:increase|decreas\w*|reduc\w*|lower|double|halve|half\s+(?:a\s+)?"
+    r"tab|higher|stronger|smaller|bigger|instead of|another|adjust\w*|"
+    r"switch\w*|taper\w*)\b|\bmore\b.{0,20}\b(?:dose|dosage)\b|"
+    r"\bmake\b.{0,20}\bdose\b|\bdose\b.{0,15}\b(?:smaller|bigger|up|down)\b",
+    re.I)
+
+# CONDITIONAL / FUTURE commands are not effective NOW.
+_FUTURE_RE = re.compile(
+    r"\b(?:i'?ll|will|gonna|going to|plan(?:ning)? to)\b.{0,60}"
+    r"\b(?:stop|start|add|remove|begin)\b"
+    r"|\bonce\s+(?:the|my|it|he|she|i\b|summer|winter|fever|surgeon|doctor)"
+    r"|\b(?:days?|night|week)\s+before\s+(?:the|my)\b"
+    r"|\b(?:before|after)\s+(?:the\s+|my\s+)?"
+    r"(?:surgery|operation|scan|procedure|op\b)"
+    r"|\bfrom\s+(?:next|tomorrow|mon|tues|wednes|thurs|fri|satur|sun)"
+    r"|\bstarting\s+(?:after|from|next)\b"
+    r"|\bnext\s+(?:week|month)\b|\buntil\b"
+    r"|\bif\s+(?:the|my|it|bp|sugar|fever)\b"
+    r"|\b(?:after|since|when|because)\s+i\s+(?:started|stopped|began)\b",
+    re.I)
+
 # Cyrillic homoglyphs that sneak into drug names via copy-paste ("metfоrmin").
 _HOMOGLYPHS = str.maketrans("аеорсхуАЕОРСХУ", "aeopcxyAEOPCXY")
 
 
+_REQUEST_RE = re.compile(
+    r"\b(?:can|could|would|will)\s+you\b\s*(?:please\s+)?"
+    r"(?:add|stop|remove|delete|start|put|list|show|clear)\b", re.I)
+
+
 def _is_question(message: str) -> bool:
-    return message.rstrip().endswith("?") or bool(
+    # "can you please stop the ecosprin" is a polite REQUEST, not a question
+    # about advisability — modal+you directly governing a command verb acts.
+    if _REQUEST_RE.search(message):
+        return False
+    # A tag-question after an imperative ("stop the thyronorm from today,
+    # ok?") is still a command; strip the tag before the trailing-? check.
+    trimmed = re.sub(r"[,;\s]*(?:ok(?:ay)?|na|right|please|haan|hai na|no)"
+                     r"\s*\?\s*$", "", message)
+    return trimmed.rstrip().endswith("?") or bool(
         _INTERROGATIVE_RE.search(message))
 
 
@@ -134,6 +182,9 @@ def _name_quality(name: str) -> str:
     words = [t for t in tokens if not t.isdigit() and t not in _units]
     if any(t in _JUNK_WORDS for t in words):
         return "junk"
+    if (len(words) == 1 and len(words[0]) <= 2
+            and words[0] not in _VAGUE_WORDS):
+        return "junk"  # "in", "at" — extraction residue, never a drug
     if words and all(t in _VAGUE_WORDS or t in _FOOD_WORDS for t in words):
         # "sugar tablet" / "the little white one" — a real command whose drug
         # only the course list or the model can identify.
@@ -148,8 +199,10 @@ def _name_quality(name: str) -> str:
 def _clean_name(raw: str) -> str:
     raw = re.sub(r"\b(?:tablet|tablets|tab|tabs|pill|pills|capsule|capsules|"
                  r"syrup|from|to|my|the|medication|medicine|meds|list|now|anymore|"
-                 r"already|today|yesterday|new)\b", " ",
+                 r"already|today|yesterday|new|thanks?|thank you|please|pls|kindly|"
+                 r"ok|okay|na)\b", " ",
                  raw, flags=re.I)
+    raw = re.sub(r"[?!]+", " ", raw)
     raw = re.sub(r"\s+", " ", raw).strip(" .,-")
     return raw
 
@@ -195,11 +248,33 @@ def parse_schedule(text: str) -> tuple[str | None, bool] | None:
     low = re.sub(r"\bto{1,2}\s+times\b", "2 times", low)
     if _SELF_HARM_RE.search(low):
         return None  # "4 times the dose to end it" is not a schedule
+    # When the message narrates a CHANGE ("only when the pain got bad, but
+    # now twice a day"), only the text after the last change marker is the
+    # CURRENT schedule — split before any other reading.
+    parts = re.split(r"\b(?:but now|these days|currently|from this week|"
+                     r"from now on|now the|now it)\b", low)
+    if len(parts) > 1:
+        low = parts[-1]
+    # A dose-CHANGE instruction is not a schedule answer.
+    if _DOSE_CHANGE_RE.search(low):
+        return None
+    # A schedule conditional on a future EVENT is not in force yet ("as
+    # needed, once the doctor approves") — but an if-CONDITION ("every 6
+    # hours if the fever crosses 102") is as-needed dosing, handled below.
+    if _FUTURE_RE.search(low) and not re.search(r"\bif\b", low):
+        return None
+    if re.search(r"\bif\s+(?:the|it|my|fever|pain|needed|required)", low):
+        return (None, True)
     # A weekly/monthly frequency is NOT expressible as a daily slot pattern —
     # returning a daily pattern for "3 times a week" would be a 7x overdose.
     if re.search(r"\b(?:a|per|every|each)\s+(?:week|month|fortnight)\b|"
-                 r"\bweekly\b|\bmonthly\b|\balternate day\b|\bevery other\b",
+                 r"\bweekly\b|\bmonthly\b|\balternate\b|\bevery other\b|"
+                 r"\bevery\s+\d+\s+days?\b|\bonce every\b|"
+                 r"\b(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b",
                  low):
+        return None
+    # A third-person schedule ("she takes it twice a day") is someone else's.
+    if re.search(r"\b(?:she|he|they)\s+takes?\b", low):
         return None
     # Negated phrases must not match: "not three times, twice a day" -> ME,
     # "not as needed, every morning" -> M. Strip the negated clause first.
@@ -210,9 +285,43 @@ def parse_schedule(text: str) -> tuple[str | None, bool] | None:
         r"|(?:in the |at |every )?(?:morning|afternoon|noon|evening|night|"
         r"bedtime)s?)\b", " ", low)
     if re.search(r"\bas[- ]?needed\b|\bwhen (?:needed|required)\b|\bprn\b|"
-                 r"\bsos\b|\bonly when\b|\bif (?:i have|needed)\b|"
+                 r"\bsos\b|\bonly when\b|"
+                 r"\bif (?:i have|it|the|needed|fever|pain|required)\b|"
                  r"\bas and when\b", low):
         return (None, True)
+    # A missed dose is not a scheduled dose ("kept missing the afternoon one").
+    low = re.sub(r"\bmiss\w*\s+(?:the\s+)?"
+                 r"(?:morning|afternoon|evening|night)\b(?:\s+(?:one|dose))?",
+                 " ", low)
+    # After/before-meal qualifiers describe WHEN, not an extra dose — but
+    # only when a real slot word also exists ("at night after dinner" is one
+    # night dose; "after lunch only" IS the lunch slot).
+    if re.search(r"\b(?:morning|mrng|afternoon|noon|evening|eve|night|nite|"
+                 r"bedtime)s?\b", low):
+        low = re.sub(r"\b(?:after|before)\s+(?:breakfast|lunch|dinner|food|"
+                     r"meals?)\b", " ", low)
+    low = re.sub(r"\bgood night\b|\btonight\b", " ", low)  # farewells
+    # Quantity phrases are not frequencies ("4 units daily" is once daily;
+    # "2 puffs" is a per-dose amount, not twice a day).
+    low = re.sub(r"\b\d+(?:\.\d+)?\s*(?:units?|puffs?|drops?|sachets?|"
+                 r"tabs?|tablets?|pills?|caps?(?:ules)?|mg|mcg|ml|iu|g)\b",
+                 " ", low)
+    # Spoken triplet "one one one" and letter patterns "M-A-N".
+    m = re.fullmatch(r"\s*(one|zero|1|0)[\s-]+(one|zero|1|0)"
+                     r"[\s-]+(one|zero|1|0)\s*", low)
+    if m:
+        d = [0 if g in ("zero", "0") else 1 for g in m.groups()]
+        if any(d):
+            third = "E" if all(d) else "N"
+            return ("".join(
+                letter for x, letter in zip(d, "MA" + third, strict=False)
+                if x), False)
+    m = re.fullmatch(r"\s*([maen])(?:\s*-\s*([maen]))?(?:\s*-\s*([maen]))?"
+                     r"\s*", low)
+    if m and m.group(2):
+        letters = "".join(g for g in m.groups() if g).upper()
+        order = "MAEN"
+        return ("".join(sorted(set(letters), key=order.index)), False)
     # Indian prescription triplet "1-0-1" (morning-noon-night): a nonzero digit
     # in a position means a dose in that slot.
     m = re.search(r"\b([0-9])\s*-\s*([0-9])\s*-\s*([0-9])\b", low)
@@ -227,29 +336,47 @@ def parse_schedule(text: str) -> tuple[str | None, bool] | None:
                 letter for x, letter in zip(d, "MA" + third, strict=False)
                 if x)
             return (pat, False)
-    # Latin dosing abbreviations (common on Indian prescriptions).
-    for abbrev, pat in (("od", "M"), ("bd", "ME"), ("bid", "ME"),
-                        ("tid", "MAE"), ("tds", "MAE"), ("qid", "MAEN"),
-                        ("qds", "MAEN"), ("qhs", "N"), ("hs", "N")):
-        if re.search(rf"\b{abbrev}\b", low):
-            return (pat, False)
     # Interval dosing: every N hours -> 24/N doses a day (capped at 4).
-    m = re.search(r"\bevery\s+(\d{1,2})\s*(?:hours|hrs|hourly|h)\b", low)
+    m = re.search(r"\b(?:every\s+)?(\d{1,2})\s*(?:hours|hrs|hourly)\b|"
+                  r"\bevery\s+(\d{1,2})\s*h\b", low)
     if m:
-        hours = int(m.group(1))
-        if 4 <= hours <= 24:
+        hours = int(m.group(1) or m.group(2))
+        # Under 6h means more than 4 doses a day — not expressible as MAEN,
+        # and usually a short-term acute script. Refuse rather than under-dose.
+        if 6 <= hours <= 24:
             return (_SLOTS_BY_COUNT[min(4, max(1, round(24 / hours)))], False)
+        return None
+    # Clock times: "at 2 pm" -> A, "8am and 8pm" -> ME.
+    clock = []
+    for hm in re.finditer(r"\b(\d{1,2})(?::\d{2})?\s*(am|pm)\b", low):
+        hour, half = int(hm.group(1)), hm.group(2)
+        if half == "am":
+            clock.append("M" if 4 <= hour <= 11 else "N")
+        else:
+            hour = hour % 12
+            clock.append("A" if hour <= 4 else ("E" if hour <= 8 else "N"))
+    if clock:
+        order = "MAEN"
+        return ("".join(sorted(set(clock), key=order.index))[:4], False)
     # Slot words, incl. plurals ("in the mornings") and meal names.
     slotmap = dict(_SLOT_WORD_TO_LETTER)
     slotmap.update({"breakfast": "M", "lunch": "A", "dinner": "E",
                     "supper": "E", "nite": "N", "mrng": "M", "eve": "E"})
     slots = [letter for w, letter in slotmap.items()
              if re.search(rf"\b{w}s?\b", low)]
+    # (slot words outrank the Latin abbreviations: "1 od at night" is a
+    # night dose, not OD-morning)
     if slots:
         # de-dup, keep canonical M A E N order
         order = "MAEN"
         pat = "".join(sorted(set(slots), key=order.index))[:4]
         return (pat, False)
+    # Latin dosing abbreviations (common on Indian prescriptions).
+    for abbrev, pat in (("od", "M"), ("bd", "ME"), ("bid", "ME"),
+                        ("tid", "MAE"), ("tds", "MAE"), ("qid", "MAEN"),
+                        ("qds", "MAEN"), ("qhs", "N"), ("hs", "N")):
+        if re.search(rf"\b{abbrev}\b", low):
+            return (pat, False)
     m = re.search(r"\b(once|twice|thrice|one|two|three|four|[1-4])\b"
                   r"(?:\s*(?:times?|x))?\s*(?:a|per|/)?\s*(?:day|daily)\b", low)
     if m:
@@ -259,6 +386,8 @@ def parse_schedule(text: str) -> tuple[str | None, bool] | None:
     # A bare count ("2 times", "before food twice") only as a SHORT, direct
     # answer — in a long sentence "3 times" is usually not a daily frequency
     # ("3 times I forgot to take it last week").
+    if re.search(r"\bdaily\b|\bevery\s?day\b|\beach day\b", low):
+        return ("M", False)  # bare "daily" with no count = once a day
     if len(low.split()) <= 4 and not re.search(r"\btab(?:let)?s?\b|\bpills?\b",
                                                low):
         # "...tablets" excluded: "4 tablets" is a quantity per dose, not
@@ -272,19 +401,22 @@ def parse_schedule(text: str) -> tuple[str | None, bool] | None:
     return None
 
 
-_YES_RE = re.compile(r"^\s*(?:y+e+s+|yes|ya|haan|yeah|yep|yup|ok(?:ay)?|sure|"
+_YES_RE = re.compile(r"^\s*(?:y+e+s+|yes|ya|haan|theek hai|sari|yeah|yep|yup|ok(?:ay)?|sure|"
                      r"correct(?!\s+me)|confirm|go ahead|do it|that'?s right|"
                      r"right|please do|add it)\b", re.I)
 # A yes that carries a correction must not be taken at face value.
 _CORRECTION_RE = re.compile(r"\bbut\b|\bnot\b|\bactually\b|\binstead\b|"
                             r"\bexcept\b|\bmake (?:it|that)\b|\bchange\b|"
-                            r"\bthough\b|\bonly\b", re.I)
-_NO_RE = re.compile(r"^\s*(?:no|nope|nah|don'?t|cancel|stop|wait|not? (?:right|"
-                    r"correct)|never ?mind)\b", re.I)
+                            r"\bthough\b|\bonly\b|\bmake (?:it|that|the)\b|\bdouble\b|"
+                            r"\bhalf\b|\bhalve\b|\bincrease\b|\breduce\b|"
+                            r"\blower\b|\bdose\b", re.I)
+_NO_RE = re.compile(r"^\s*(?:no|nope|nah|not yet|don'?t|cancel|wait|"
+                    r"not? (?:right|correct)|never ?mind)\b", re.I)
 # A reversal or refusal AFTER a leading yes: "yes, actually no",
 # "yeah no, don't remove it" — never a confirmation.
-_LATE_NO_RE = re.compile(r"\bno\b|\bdon'?t\b|\bcancel\b|\bnever ?mind\b|"
-                         r"\bwait\b", re.I)
+_LATE_NO_RE = re.compile(
+    r"\bno\b(?!\s+(?:problem|worries|issues?|need to (?:delay|wait)))|"
+    r"\bdon'?t\b(?!\s+worry)|\bcancel\b|\bnever ?mind\b|\bwait\b", re.I)
 
 
 def parse_yes_no(text: str) -> bool | None:
@@ -293,9 +425,12 @@ def parse_yes_no(text: str) -> bool | None:
     or crisis language is None — the flow must clarify, never write."""
     if text.rstrip().endswith("?") or _SELF_HARM_RE.search(text):
         return None
-    # A leading quote/emoji must not defeat the anchors ('yes' in curly
-    # quotes, "thumbs-up yes").
+    # A leading quote/emoji/pleasantry must not defeat the anchors ('yes' in
+    # curly quotes, "sorry, yes go ahead", "thanks but no").
     text = re.sub(r"^[^\w]+", "", text)
+    text = re.sub(r"^(?:(?:sorry|oh|umm+|hmm+|well|hey|hi|thanks?|thank you|"
+                  r"but|so)[,!\s]+)+", "", text, flags=re.I)
+    text = re.sub(r"\bwhy not\b", "", text, flags=re.I)  # "sure why not"
     m = _YES_RE.search(text)
     if m:
         rest = text[m.end():]
@@ -303,6 +438,22 @@ def parse_yes_no(text: str) -> bool | None:
             return None  # "yes but ..." — a correction, clarify first
         if _LATE_NO_RE.search(rest):
             return False  # "yeah no, don't" — a reversal into refusal
+        # A yes that CARRIES INFORMATION is not a clean yes: digits ("yes,
+        # 10 units"), a deferral ("ok hold on", "sure, one sec"), a condition
+        # ("yes, once the surgeon gives the go-ahead", "haan, scan ke baad"),
+        # or a third-party redirect ("yes add it to her list").
+        if (re.search(r"\d", rest)
+                or re.search(r"\bi guess\b|\bi think\b|\bmaybe\b|"
+                             r"\bprobably\b", rest, re.I)
+                or re.search(r"\bhold on\b|\bone sec\b|\ba sec\b|"
+                             r"\ba minute\b|\blater\b|\bnot yet\b|"
+                             r"\bin a bit\b", rest, re.I)
+                or _FUTURE_RE.search(rest)
+                or re.search(r"\bscan\b|\bsurgery\b|\bke baad\b|"
+                             r"\bke liye\b", rest, re.I)
+                or re.search(r"\b(?:for|to)\s+(?:my|her|his)\b|"
+                             r"\b(?:her|his)\s+list\b", rest, re.I)):
+            return None
         return True
     m = _NO_RE.search(text)
     if m:
@@ -328,7 +479,9 @@ def _schedule_words(is_prn: bool, pat: str | None) -> str:
 
 
 _MED_WORD_RE = re.compile(r"\bmed(?:ication|icine|s)?\b|\bpill|\btablet|"
-                          r"\bcapsule|\bsyrup\b", re.I)
+                          r"\bcapsule|\bsyrup\b|\bdrops?\b|\binjection\b|"
+                          r"\binhaler\b|\bsachets?\b|\bcream\b|\bointment\b",
+                          re.I)
 _DRUG_NUM_RE = re.compile(r"\b[a-z][a-z-]{2,}\s+\d{2,4}\b", re.I)
 
 
@@ -354,12 +507,27 @@ def detect_intent(message: str) -> dict | None:
         return None
     if _ROMANIZED_RE.search(message):
         return None  # the LLM reads romanized-Indic phrasing; regex must not
+    # A relative's/pet's drug, a dose CHANGE, or a not-yet-effective command:
+    # only the model can read these safely — never a deterministic write.
+    if (_THIRD_PARTY_RE.search(message) or _DOSE_CHANGE_RE.search(message)
+            or _FUTURE_RE.search(message)):
+        return None
+    # A message matching BOTH a stop and an add verb is a SWITCH
+    # ("stopped the 25mg, now taking 50mg") — the model must read it.
+    if (re.search(_STOP_VERB, message, re.I)
+            and re.search(_ADD_VERB, message, re.I)):
+        return None
     # A bulk request ("stop ALL my meds", "clear everything") must be
     # arbitrated by the model, never resolved as one fake drug — and must not
     # fall through to LIST.
     if (_BULK_RE.search(message) and _MED_WORD_RE.search(message)
             and re.search(_STOP_VERB + "|" + _REMOVE_VERB, message, re.I)):
         return None
+    # A negated verb is not a command ("I haven't stopped vitamin d3",
+    # "don't remove it").
+    message = re.sub(r"\b(?:haven'?t|hasn'?t|didn'?t|don'?t|won'?t|never|not)\s+"
+                     r"(?:stop|start|add|remove|delete|finish|begin)\w*", " ",
+                     message, flags=re.I)
     # Command verbs are checked BEFORE list: "remove atorvastatin from my meds"
     # ends in "my meds" but is a remove, not a list request.
     for action, verb in (("remove", _REMOVE_VERB), ("stop", _STOP_VERB),
@@ -385,6 +553,12 @@ def detect_intent(message: str) -> dict | None:
             # ("add salt to my food" is not a medication) — it is left to the
             # LLM capture layer, which knows a drug name from a foodstuff.
             if action == "add":
+                # Insulin/inhaler/drops dosing ("10 units at night",
+                # "2 puffs") carries structure the slot model cannot hold —
+                # the model reads those.
+                if re.search(r"\bunits?\b|\binsulin\b|\bpuffs?\b|"
+                             r"iu/ml", message, re.I):
+                    return None
                 has_dose = bool(_DOSE_UNIT_RE.search(message))
                 has_signal = (has_dose or _DRUG_NUM_RE.search(message)
                               or _MED_WORD_RE.search(message))
@@ -437,6 +611,13 @@ def _looks_like_med_command(message: str) -> bool:
     message = unicodedata.normalize("NFKC", message).translate(_HOMOGLYPHS)
     if _SELF_HARM_RE.search(message) or _is_question(message):
         return False
+    # Third-party / dose-change / conditional commands go to the model
+    # whenever anything medication-shaped is present.
+    if (_THIRD_PARTY_RE.search(message) or _DOSE_CHANGE_RE.search(message)
+            or _FUTURE_RE.search(message)):
+        return bool(_MED_VERB_SIGNAL.search(message) and (
+            _MED_WORD_RE.search(message) or _DOSE_UNIT_RE.search(message)
+            or _DRUG_NUM_RE.search(message)))
     # Romanized-Indic phrasing around a drug or med word is a real command the
     # regex layer cannot read — that is exactly what the LLM layer is for.
     if _ROMANIZED_RE.search(message) and (
