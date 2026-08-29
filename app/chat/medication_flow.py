@@ -769,6 +769,74 @@ async def _capture_schedule(message: str, provider) -> tuple[str | None, bool] |
 
 
 # --------------------------------------------------------------------------- #
+# Catalogue name check — an add with a misspelled name ("add dool 650") was
+# stored verbatim; the flow must instead look the name up in medicine_master
+# and offer the real product ("did you mean Dolo 650 Tablet?"). Both helpers
+# fail OPEN: any lookup error (or an empty catalogue, as in unit tests) means
+# no suggestion and the flow behaves exactly as before.
+# --------------------------------------------------------------------------- #
+async def _catalogue_suggestion(db: AsyncSession, name: str) -> str | None:
+    """The catalogue's spelling for a name it can't resolve as typed, or None
+    (None also when the typed name IS a real product — nothing to correct)."""
+    from app.drugs.service import find_drug, suggest_drug
+    try:
+        if await find_drug(db, name) is not None:
+            return None
+        hit = await suggest_drug(db, name)
+    except Exception:  # noqa: BLE001 — the catalogue is optional, never a wall
+        logger.info("catalogue suggestion failed; keeping the typed name",
+                    exc_info=True)
+        return None
+    return hit.name if hit is not None else None
+
+
+async def _resolves_in_catalogue(db: AsyncSession, name: str) -> bool:
+    from app.drugs.service import find_drug
+    try:
+        return await find_drug(db, name) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _belongs_elsewhere(message: str) -> bool:
+    """The mid-flow message positively matches ANOTHER deterministic handler —
+    release the turn instead of re-asking. Live case: "how is my water intake"
+    typed during await_schedule got "Sorry — how often do you take dool 650?"
+    instead of the tracker reading.
+
+    Only well-guarded parsers count: a maybe is a re-ask, not a release. The
+    medications tracker term is excluded — "with my other tablets" is a
+    (failed) schedule answer, not a request to list medications."""
+    from app.chat import abilities as ab
+    from app.drugs.service import (
+        extract_dose_query,
+        extract_drug_query_term,
+        extract_interaction_query,
+    )
+    try:
+        tq = ab.parse_tracker_query(message)
+        if tq is not None and tq.source != "medications":
+            return True
+        if (ab.parse_tracker_add(message) is not None
+                or ab.parse_metric_query(message) is not None
+                or ab.parse_summary_query(message) is not None
+                or ab.parse_document_query(message) is not None
+                or ab.parse_stated_value(message) is not None):
+            return True
+        # Drug questions mid-flow ("side effects of dolo?", "how much can I
+        # take?") — the drug-info / dose-refusal handlers own these.
+        if (extract_drug_query_term(message) is not None
+                or extract_interaction_query(message) is not None
+                or extract_dose_query(message) is not None):
+            return True
+    except Exception:  # noqa: BLE001 — release logic must never crash a turn
+        logger.info("belongs-elsewhere check failed; re-asking instead",
+                    exc_info=True)
+        return False
+    return False
+
+
+# --------------------------------------------------------------------------- #
 # The turn handler
 # --------------------------------------------------------------------------- #
 def _reply(text: str, *, action: str = "medication_flow",
@@ -800,9 +868,60 @@ async def handle_medication_turn(
         return None
 
     # --- resume an in-flight flow ------------------------------------------
+    if pending and pending.get("stage") == "confirm_name":
+        yn = parse_yes_no(message)
+        name: str | None = None
+        if yn is True:
+            name = pending["suggestion"]
+        else:
+            # They may have typed the name themselves ("dolo 650" / "no, it's
+            # dolo 650") — adopt THEIR text when the catalogue knows it. This
+            # runs before the bare-no branch so a no that carries a correction
+            # is never read as "keep the typo".
+            rest = re.sub(
+                r"^\s*(?:no+|nope|nah|yes+|yeah|yep|not?)\b[\s,.:-]*"
+                r"(?:it'?s|it is|its|i meant|meant|actually|"
+                r"the name is|name is)?\s*",
+                "", message, flags=re.I)
+            cand = _clean_name(rest)
+            if cand and _name_quality(cand) == "ok" and (
+                await _resolves_in_catalogue(db, cand)
+            ):
+                name = cand
+        if name is None:
+            if yn is False:
+                # They declined the suggestion with nothing better — their
+                # own spelling stands (the catalogue is not complete).
+                name = pending["name"]
+            elif (pending.get("reasked") or detect_intent(message) is not None
+                  or _belongs_elsewhere(message)):
+                return None  # release rather than trap
+            else:
+                return _reply(
+                    f"Sorry — did you mean {pending['suggestion']}? (yes / no)",
+                    pending={**pending, "reasked": True})
+        if "is_prn" in pending:  # the schedule arrived with the command
+            nxt = {"stage": "confirm", "action": "add", "name": name,
+                   "strength": pending.get("strength"),
+                   "schedule_pattern": pending.get("schedule_pattern"),
+                   "is_prn": pending.get("is_prn", False)}
+            return _reply(
+                f"Just to confirm: add {name}, "
+                f"{_schedule_words(nxt['is_prn'], nxt['schedule_pattern'])} — "
+                "shall I add it?",
+                pending=nxt)
+        nxt = {"stage": "await_schedule", "action": "add", "name": name,
+               "strength": pending.get("strength")}
+        return _reply(
+            f"I can add {name} — how often do you take it? For example 'once a "
+            "day', 'twice a day' (morning and evening), or 'as needed'.",
+            pending=nxt)
+
     if pending and pending.get("stage") == "await_schedule":
         if parse_yes_no(message) is False:
             return _reply("Okay, I won't add it. Tell me if you change your mind.")
+        if parse_schedule(message) is None and _belongs_elsewhere(message):
+            return None  # an unrelated data question mid-flow — release it
         sched = await _capture_schedule(message, provider)
         if sched is None:
             # Re-ask once; if they still don't answer with a schedule, RELEASE
@@ -867,7 +986,8 @@ async def handle_medication_turn(
                 pending=None)
 
         if yn is None:
-            if pending.get("reasked") or detect_intent(message) is not None:
+            if (pending.get("reasked") or detect_intent(message) is not None
+                    or _belongs_elsewhere(message)):
                 return None  # release rather than trap
             return _reply(
                 f"Sorry, I didn't catch that — should I "
@@ -907,8 +1027,23 @@ async def handle_medication_turn(
         return await _handle_adherence(db, user_id, intent["name"])
 
     if action == "add":
-        name = intent["name"]
-        if "schedule_pattern" in intent or intent.get("is_prn"):
+        name = str(intent["name"])
+        has_sched = "schedule_pattern" in intent or bool(intent.get("is_prn"))
+        suggestion = await _catalogue_suggestion(db, name)
+        if suggestion and suggestion.strip().lower() != name.strip().lower():
+            # Misspelled / unknown name with a close catalogue match: settle
+            # the name BEFORE the schedule, or a typo gets written verbatim
+            # (live case: "add dool 650" stored a course named "dool 650").
+            nxt = {"stage": "confirm_name", "action": "add", "name": name,
+                   "suggestion": suggestion, "strength": intent.get("strength")}
+            if has_sched:
+                nxt["schedule_pattern"] = intent.get("schedule_pattern")
+                nxt["is_prn"] = intent.get("is_prn", False)
+            return _reply(
+                f"I couldn't find '{name}' in the medicine list — did you "
+                f"mean {suggestion}? (yes / no)",
+                pending=nxt)
+        if has_sched:
             nxt = {"stage": "confirm", "action": "add", "name": name,
                    "strength": intent.get("strength"),
                    "schedule_pattern": intent.get("schedule_pattern"),
