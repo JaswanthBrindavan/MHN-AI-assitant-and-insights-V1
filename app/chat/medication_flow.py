@@ -798,6 +798,44 @@ async def _resolves_in_catalogue(db: AsyncSession, name: str) -> bool:
         return False
 
 
+def _belongs_elsewhere(message: str) -> bool:
+    """The mid-flow message positively matches ANOTHER deterministic handler —
+    release the turn instead of re-asking. Live case: "how is my water intake"
+    typed during await_schedule got "Sorry — how often do you take dool 650?"
+    instead of the tracker reading.
+
+    Only well-guarded parsers count: a maybe is a re-ask, not a release. The
+    medications tracker term is excluded — "with my other tablets" is a
+    (failed) schedule answer, not a request to list medications."""
+    from app.chat import abilities as ab
+    from app.drugs.service import (
+        extract_dose_query,
+        extract_drug_query_term,
+        extract_interaction_query,
+    )
+    try:
+        tq = ab.parse_tracker_query(message)
+        if tq is not None and tq.source != "medications":
+            return True
+        if (ab.parse_tracker_add(message) is not None
+                or ab.parse_metric_query(message) is not None
+                or ab.parse_summary_query(message) is not None
+                or ab.parse_document_query(message) is not None
+                or ab.parse_stated_value(message) is not None):
+            return True
+        # Drug questions mid-flow ("side effects of dolo?", "how much can I
+        # take?") — the drug-info / dose-refusal handlers own these.
+        if (extract_drug_query_term(message) is not None
+                or extract_interaction_query(message) is not None
+                or extract_dose_query(message) is not None):
+            return True
+    except Exception:  # noqa: BLE001 — release logic must never crash a turn
+        logger.info("belongs-elsewhere check failed; re-asking instead",
+                    exc_info=True)
+        return False
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # The turn handler
 # --------------------------------------------------------------------------- #
@@ -855,7 +893,8 @@ async def handle_medication_turn(
                 # They declined the suggestion with nothing better — their
                 # own spelling stands (the catalogue is not complete).
                 name = pending["name"]
-            elif pending.get("reasked") or detect_intent(message) is not None:
+            elif (pending.get("reasked") or detect_intent(message) is not None
+                  or _belongs_elsewhere(message)):
                 return None  # release rather than trap
             else:
                 return _reply(
@@ -881,6 +920,8 @@ async def handle_medication_turn(
     if pending and pending.get("stage") == "await_schedule":
         if parse_yes_no(message) is False:
             return _reply("Okay, I won't add it. Tell me if you change your mind.")
+        if parse_schedule(message) is None and _belongs_elsewhere(message):
+            return None  # an unrelated data question mid-flow — release it
         sched = await _capture_schedule(message, provider)
         if sched is None:
             # Re-ask once; if they still don't answer with a schedule, RELEASE
@@ -945,7 +986,8 @@ async def handle_medication_turn(
                 pending=None)
 
         if yn is None:
-            if pending.get("reasked") or detect_intent(message) is not None:
+            if (pending.get("reasked") or detect_intent(message) is not None
+                    or _belongs_elsewhere(message)):
                 return None  # release rather than trap
             return _reply(
                 f"Sorry, I didn't catch that — should I "

@@ -569,3 +569,60 @@ async def test_confirm_name_reasks_once_then_releases(db_session):
     r3 = await mf.handle_medication_turn(
         db_session, USER, "whatever", r2["pending_med"])
     assert r3 is None  # released to the normal pipeline, never trapped
+
+
+# --------------------------------------------------------------------------- #
+# Mid-flow topic changes — an unrelated data question must be RELEASED to its
+# own handler, never answered with a schedule re-ask (live case: "how is my
+# water intake" during await_schedule got "Sorry — how often do you take
+# dool 650?").
+# --------------------------------------------------------------------------- #
+async def test_unrelated_data_question_releases_await_schedule(db_session):
+    pending = {"stage": "await_schedule", "action": "add",
+               "name": "dool 650", "strength": "650"}
+    assert await mf.handle_medication_turn(
+        db_session, USER, "how is my water intake", pending) is None
+
+
+async def test_unrelated_data_question_releases_confirm(db_session):
+    pending = {"stage": "confirm", "action": "add", "name": "dool 650",
+               "schedule_pattern": "ME", "is_prn": False}
+    assert await mf.handle_medication_turn(
+        db_session, USER, "how much water did i drink this week",
+        pending) is None
+
+
+async def test_unrelated_data_question_releases_confirm_name(db_session):
+    pending = {"stage": "confirm_name", "action": "add", "name": "dool 650",
+               "suggestion": "Dolo 650 Tablet", "strength": "650"}
+    assert await mf.handle_medication_turn(
+        db_session, USER, "show my blood reports", pending) is None
+
+
+async def test_drug_question_mid_flow_releases(db_session):
+    # "side effects of X" belongs to the drug-info handler, even mid-add.
+    pending = {"stage": "await_schedule", "action": "add", "name": "dolo 650"}
+    assert await mf.handle_medication_turn(
+        db_session, USER, "what are the side effects of dolo 650?",
+        pending) is None
+
+
+async def test_failed_schedule_answer_still_reasks(db_session):
+    # "with my other tablets" names the meds tracker term but is a (failed)
+    # schedule answer — it must re-ask, never dump the medication list.
+    pending = {"stage": "await_schedule", "action": "add", "name": "dolo 650"}
+    r = await mf.handle_medication_turn(
+        db_session, USER, "with my other tablets", pending)
+    assert r is not None and r["pending_med"]["reasked"] is True
+    assert "how often" in r["reply"]
+
+
+async def test_on_topic_schedule_answer_beats_the_release_check(db_session):
+    # "with my morning tea" names a tracked habit (tea) AND parses as a
+    # schedule — mid-flow, the schedule reading wins.
+    pending = {"stage": "await_schedule", "action": "add", "name": "dolo 650"}
+    r = await mf.handle_medication_turn(
+        db_session, USER, "with my morning tea", pending)
+    assert r is not None
+    assert r["pending_med"]["stage"] == "confirm"
+    assert r["pending_med"]["schedule_pattern"] == "M"
