@@ -28,12 +28,14 @@ from app.chat.orchestrator import handle_chat
 from app.chat.replies import HIGH_ESCALATION, MEDICATION_NOTE
 from app.chat.validation import validate_reply
 from app.drugs.service import (
+    _edit_distance,
     build_drug_reply,
     build_interaction_reply,
     extract_drug_query_term,
     extract_interaction_query,
     find_drug,
     find_substitutes,
+    suggest_drug,
 )
 from app.llm.fake import FakeProvider
 from app.models.chat import RagTurnReceipt
@@ -884,3 +886,60 @@ async def test_orchestrator_interaction_respects_risk_floor(db_session):
     assert result.risk_level == "emergency"
     assert result.provenance["path"] == "triage_emergency"
     assert provider.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# suggest_drug — fuzzy catalogue suggestion for misspelled add commands
+# --------------------------------------------------------------------------- #
+def test_edit_distance_counts_a_transposition_as_one():
+    # "dool" -> "dolo" is one slip of the thumb, not two edits.
+    assert _edit_distance("dool", "dolo") == 1
+    assert _edit_distance("metfromin", "metformin") == 1
+    assert _edit_distance("dolo", "dolo") == 0
+    assert _edit_distance("dolo", "metformin") > 2
+
+
+async def test_suggest_fixes_a_transposed_name(db_session):
+    # The live case: "add dool 650" must pull up Dolo 650, never store "dool".
+    await _seed(db_session, _drug("Dolo 650 Tablet"), _drug("Crocin Advance"))
+    hit = await suggest_drug(db_session, "dool 650")
+    assert hit is not None and hit.name == "Dolo 650 Tablet"
+
+
+async def test_suggest_prefers_the_typed_number(db_session):
+    await _seed(db_session, _drug("Dolo 500 Tablet"), _drug("Dolo 650 Tablet"))
+    hit = await suggest_drug(db_session, "dool 650")
+    assert hit is not None and hit.name == "Dolo 650 Tablet"
+
+
+async def test_suggest_fixes_a_late_typo_via_prefix_shrink(db_session):
+    # The first divergence is deep in the word — deletion variants can't reach
+    # it, the shrinking-prefix windows can.
+    await _seed(db_session, _drug("Metformin 500mg Tablet"))
+    hit = await suggest_drug(db_session, "metfromin 500")
+    assert hit is not None and hit.name == "Metformin 500mg Tablet"
+
+
+async def test_suggest_rejects_a_distant_name(db_session):
+    await _seed(db_session, _drug("Atorvastatin 10 Tablet"))
+    assert await suggest_drug(db_session, "dool 650") is None
+
+
+async def test_suggest_needs_a_stem_of_four_chars(db_session):
+    await _seed(db_session, _drug("Dolo 650 Tablet"))
+    assert await suggest_drug(db_session, "dol") is None
+
+
+async def test_suggest_ignores_unapproved_rows(db_session):
+    await _seed(db_session, _drug("Dolo 650 Tablet", status="draft"))
+    assert await suggest_drug(db_session, "dool 650") is None
+
+
+async def test_suggest_is_deterministic_on_ties(db_session):
+    # Same distance, same digits: the shorter, alphabetically-first name wins,
+    # every time.
+    await _seed(db_session, _drug("Doola 650"), _drug("Doolb 650"))
+    first = await suggest_drug(db_session, "dool 650")
+    second = await suggest_drug(db_session, "dool 650")
+    assert first is not None and second is not None
+    assert first.name == second.name == "Doola 650"

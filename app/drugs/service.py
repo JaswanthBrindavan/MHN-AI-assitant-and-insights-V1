@@ -236,6 +236,103 @@ async def find_drug(db: AsyncSession, term: str) -> MedicineMaster | None:
     return None
 
 
+def _edit_distance(a: str, b: str, cap: int = 3) -> int:
+    """Damerau-Levenshtein (optimal string alignment), capped at ``cap``.
+
+    Adjacent transposition counts 1 — "dool"→"dolo" must score as one slip of
+    the thumb, not two independent edits, or every swapped-letter typo lands
+    outside the acceptance band.
+    """
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2: list[int] = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > cap:
+            return cap + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+async def suggest_drug(db: AsyncSession, term: str) -> MedicineMaster | None:
+    """A close catalogue match for a name :func:`find_drug` could NOT resolve.
+
+    For misspelled adds ("dool 650" → Dolo 650 Tablet): candidate rows come
+    from bounded, ordered prefix windows — the whole stem, its single-deletion
+    variants (covering swapped/extra letters early in the word), and shrinking
+    prefixes (covering slips later in the word) — then the stem is scored
+    against each candidate's first word with a capped Damerau-Levenshtein
+    distance. Deterministic: same term + same catalogue → same suggestion.
+    """
+    norm = _normalize(term)
+    tokens = norm.split()
+    stem = next((t for t in tokens if not t.isdigit()), "")
+    if len(stem) < 4:
+        return None  # too short to fuzzy-match safely ("b12", "od")
+    digits = {t for t in tokens if t.isdigit()}
+
+    prefixes: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        if len(p) >= 3 and p not in seen:
+            seen.add(p)
+            prefixes.append(p)
+
+    _add(stem)
+    for i in range(len(stem)):
+        _add((stem[:i] + stem[i + 1:])[:4])
+    for k in range(len(stem) - 1, 3, -1):
+        _add(stem[:k])
+    del prefixes[8:]  # bounded work no matter how long the stem is
+
+    rows: dict[int, MedicineMaster] = {}
+    for p in prefixes:
+        got = (
+            await db.execute(
+                select(MedicineMaster)
+                .where(
+                    *_BASE_FILTERS,
+                    MedicineMaster.name_normalized.like(f"{p}%"),
+                )
+                .order_by(MedicineMaster.name_normalized, MedicineMaster.id)
+                .limit(80)
+            )
+        ).scalars().all()
+        for r in got:
+            rows.setdefault(r.id, r)
+        if len(rows) >= 400:
+            break
+
+    max_d = 1 if len(stem) <= 5 else 2
+    scored: list[tuple[tuple[int, int, bool, int, str], MedicineMaster]] = []
+    for r in rows.values():
+        words = (r.name_normalized or "").split()
+        if not words:
+            continue
+        d = _edit_distance(stem, words[0], cap=max_d)
+        if d > max_d:
+            continue
+        # A candidate carrying the typed number ("650") outranks one that
+        # doesn't — "dool 650" must suggest Dolo 650, never Dolo 500.
+        digit_miss = 0 if digits <= set(words) else 1
+        scored.append(
+            ((d, digit_miss, r.is_discontinued, len(r.name), r.name.lower()), r)
+        )
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0])
+    return scored[0][1]
+
+
 async def find_substitutes(db: AsyncSession, drug: MedicineMaster) -> list[str]:
     """Up to 5 same-composition alternatives (deterministic order)."""
     if not drug.composition_normalized:

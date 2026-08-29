@@ -452,3 +452,120 @@ async def test_remove_both_confirms_then_sweeps_all_matches(
     finally:
         set_current_user_jwt(None)
         get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# Catalogue name check — a misspelled add must pull up the real product and
+# ask, never store the typo verbatim (live case: "add dool 650").
+# --------------------------------------------------------------------------- #
+import re as _re  # noqa: E402
+
+from app.models.coredata import MedicineMaster  # noqa: E402
+
+
+async def _seed_catalogue(db, *names: str) -> None:
+    db.add_all([
+        MedicineMaster(
+            name=n,
+            name_normalized=_re.sub(r"[^a-zA-Z0-9]+", " ", n).lower(),
+            is_discontinued=False,
+            status="approved",
+        )
+        for n in names
+    ])
+    await db.flush()
+
+
+async def test_misspelled_add_suggests_the_catalogue_name(db_session):
+    await _seed_catalogue(db_session, "Dolo 650 Tablet")
+    r = await mf.handle_medication_turn(db_session, USER, "add dool 650", None)
+    assert r is not None
+    assert "did you mean Dolo 650 Tablet" in r["reply"]
+    pm = r["pending_med"]
+    assert pm["stage"] == "confirm_name" and pm["name"] == "dool 650"
+
+    # "yes" adopts the catalogue spelling, then the normal schedule question.
+    r2 = await mf.handle_medication_turn(db_session, USER, "yes", pm)
+    assert r2 is not None
+    assert "I can add Dolo 650 Tablet" in r2["reply"]
+    pm2 = r2["pending_med"]
+    assert pm2["stage"] == "await_schedule" and pm2["name"] == "Dolo 650 Tablet"
+
+    # ...and the schedule answer confirms with the corrected name.
+    r3 = await mf.handle_medication_turn(
+        db_session, USER, "twice a day", pm2)
+    assert r3 is not None
+    assert r3["pending_med"]["stage"] == "confirm"
+    assert "add Dolo 650 Tablet, twice a day" in r3["reply"]
+
+
+async def test_misspelled_add_with_schedule_confirms_after_yes(db_session):
+    await _seed_catalogue(db_session, "Dolo 650 Tablet")
+    r = await mf.handle_medication_turn(
+        db_session, USER, "add dool 650 twice a day", None)
+    assert r is not None and r["pending_med"]["stage"] == "confirm_name"
+
+    r2 = await mf.handle_medication_turn(
+        db_session, USER, "yes", r["pending_med"])
+    assert r2 is not None
+    assert r2["pending_med"]["stage"] == "confirm"
+    assert "add Dolo 650 Tablet, twice a day" in r2["reply"]
+
+
+async def test_declining_the_suggestion_keeps_the_typed_name(db_session):
+    # The catalogue is not complete — a hard "no" means their spelling stands.
+    await _seed_catalogue(db_session, "Dolo 650 Tablet")
+    r = await mf.handle_medication_turn(db_session, USER, "add dool 650", None)
+    assert r is not None and r["pending_med"]["stage"] == "confirm_name"
+
+    r2 = await mf.handle_medication_turn(db_session, USER, "no", r["pending_med"])
+    assert r2 is not None
+    assert "I can add dool 650" in r2["reply"]
+    assert r2["pending_med"]["name"] == "dool 650"
+
+
+async def test_a_no_carrying_a_correction_adopts_the_corrected_name(db_session):
+    await _seed_catalogue(db_session, "Dolo 650 Tablet", "Crocin Advance")
+    r = await mf.handle_medication_turn(db_session, USER, "add dool 650", None)
+    assert r is not None and r["pending_med"]["stage"] == "confirm_name"
+
+    # They typed the real name themselves — adopt THEIR text, not the typo.
+    r2 = await mf.handle_medication_turn(
+        db_session, USER, "no, it's crocin advance", r["pending_med"])
+    assert r2 is not None
+    assert r2["pending_med"]["name"] == "crocin advance"
+    assert "I can add crocin advance" in r2["reply"]
+
+
+async def test_a_known_name_is_never_questioned(db_session):
+    # The typed spelling resolves in the catalogue — no "did you mean".
+    await _seed_catalogue(db_session, "Dolo 650 Tablet")
+    r = await mf.handle_medication_turn(
+        db_session, USER, "add dolo 650 tablet", None)
+    assert r is not None
+    assert r["pending_med"]["stage"] == "await_schedule"
+    assert "did you mean" not in r["reply"].lower()
+
+
+async def test_empty_catalogue_changes_nothing(db_session):
+    # No medicine rows (every other test in this file runs like this): the
+    # flow behaves exactly as before the catalogue check existed.
+    r = await mf.handle_medication_turn(db_session, USER, "add dool 650", None)
+    assert r is not None
+    assert r["pending_med"]["stage"] == "await_schedule"
+    assert "I can add dool 650" in r["reply"]
+
+
+async def test_confirm_name_reasks_once_then_releases(db_session):
+    await _seed_catalogue(db_session, "Dolo 650 Tablet")
+    r = await mf.handle_medication_turn(db_session, USER, "add dool 650", None)
+    assert r is not None and r["pending_med"]["stage"] == "confirm_name"
+
+    r2 = await mf.handle_medication_turn(
+        db_session, USER, "hmm not sure what you mean", r["pending_med"])
+    assert r2 is not None and r2["pending_med"]["reasked"] is True
+    assert "did you mean Dolo 650 Tablet" in r2["reply"]
+
+    r3 = await mf.handle_medication_turn(
+        db_session, USER, "whatever", r2["pending_med"])
+    assert r3 is None  # released to the normal pipeline, never trapped
