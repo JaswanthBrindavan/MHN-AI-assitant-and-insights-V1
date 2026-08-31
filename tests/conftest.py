@@ -166,3 +166,16 @@ async def pg_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
     maker = async_sessionmaker(pg_engine, expire_on_commit=False, class_=AsyncSession)
     async with maker() as session:
         yield session
+
+
+@pytest.fixture(autouse=True)
+def _clear_retrieval_cache():
+    """Retrieval is cached per process; tests build a fresh corpus each time.
+
+    Without this a chunk seeded by one test answers a query in the next.
+    """
+    from app.rag.retrieval import reset_retrieval_cache
+
+    reset_retrieval_cache()
+    yield
+    reset_retrieval_cache()

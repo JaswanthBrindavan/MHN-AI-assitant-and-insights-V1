@@ -50,6 +50,8 @@ from app.chat.data_handlers import (
     handle_value_check,
 )
 from app.chat.db_release import ReleasingProvider
+from app.chat.episodes import open_episodes
+from app.chat.episodes import worst_level as episodes_worst_level
 from app.chat.medication_flow import handle_medication_turn
 from app.chat.replies import (
     GREETING_REPLIES,
@@ -585,6 +587,33 @@ async def _dispatch(
                 self_harm=tr.self_harm or tr_orig.self_harm,
             )
     risk = tr.level
+    # An UNRESOLVED red-flag episode raises this turn's floor.
+    #
+    # Live case: a reader had described chest pain with left-arm discomfort —
+    # which `red_flags.py:178`'s ACS co-occurrence rule classes EMERGENCY — and
+    # never said it settled. Days later they asked an educational question about
+    # diabetes. Triage sees only the current message, so the turn was NONE, the
+    # reply volunteered "how's the chest pain and left arm discomfort doing now
+    # — fully settled, or still lingering?", and the recommended action was
+    # `discuss_with_clinician`. `episodes.worst_level` existed to prevent exactly
+    # this and was never called from anywhere.
+    #
+    # Capped at HIGH deliberately. Restoring the episode's own EMERGENCY would
+    # fire the deterministic emergency directive on every later turn until the
+    # reader said they were better — including "what is diabetes" — which trains
+    # people to ignore it. HIGH gives the escalation banner and
+    # `seek_care_promptly` without hijacking the turn. Raising only: an episode
+    # can never LOWER a floor the current message set.
+    episode_floor = NONE
+    _open: list | None = None
+    try:
+        _open = await open_episodes(db, user_id)
+        if LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]:
+            episode_floor = HIGH
+    except Exception:  # noqa: BLE001 — memory must never break a reply
+        logger.warning("open-episode floor failed; using triage only", exc_info=True)
+        record_fail_open("episode_floor")
+    risk = max_level(risk, episode_floor)
     # Every reply composes in English; when the pivot is active the sidecar
     # translates the final text into the user's language and script. lang is
     # only reported to the client and drives the no-sidecar LLM directive.
@@ -754,7 +783,7 @@ async def _dispatch(
         t("Engine", "agentic — the assistant can look things up for itself")
         return await _dispatch_agentic(
             db, user_id, message, provider, session_id, tr, risk, lang,
-            trace, t, pivot=pivot,
+            trace, t, pivot=pivot, episodes=_open,
         )
 
     # 4) Deterministic data abilities — documents, tracker adds, metric
@@ -906,7 +935,10 @@ async def _dispatch(
 
     # Per-user memory (profile, open episodes, past topics), read once through
     # the SHARED assembly so both engines see all of it.
-    _memory = await _stage("memory_assembly", memory_assembly.assemble(db, user_id))
+    _memory = await _stage(
+        "memory_assembly",
+        memory_assembly.assemble(db, user_id, episodes_hint=_open),
+    )
 
     # Short-term memory: recent verbatim turns drive follow-up resolution. The
     # last entry is the current message (already persisted) — the PRIOR turns
@@ -1268,6 +1300,55 @@ async def _build_citations(
     return citations or None
 
 
+async def _agentic_citations(
+    db: AsyncSession, chunks: list[RetrievedChunk]
+) -> list[dict] | None:
+    """Sources CONSULTED on the agentic path.
+
+    The agentic engine runs no `analyze_grounding`, so there are no `[n]`
+    markers to derive per-sentence citations from — `_build_citations` cannot
+    be reused. These are the profile sections that were placed in the prompt.
+
+    That distinction is deliberate and is carried in the payload as
+    `attribution: "consulted"`: this says "the answer was composed with these in
+    front of the model", NOT "this sentence came from that block". Claiming the
+    stronger thing without markers to back it would be a citation that cannot
+    be checked.
+
+    Without this the agentic engine returned NO citations at all — orchestrator
+    sets them at :851, :1053 and :1219 and nowhere in `_dispatch_agentic` — so a
+    reply composed entirely from the validated corpus was indistinguishable from
+    one invented by the model. A reader reported exactly that: a correct,
+    corpus-derived answer that looked like the lookup had never happened.
+    """
+    if not chunks:
+        return None
+    try:
+        index = await load_condition_index(db)
+    except Exception:  # noqa: BLE001 — citations must never break a reply
+        index = None
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for chunk in chunks:
+        key = (chunk.condition_code, chunk.chunk_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        display = chunk.condition_code
+        if index is not None and chunk.condition_code in index.by_code:
+            display = index.by_code[chunk.condition_code].display_name
+        out.append(
+            {
+                "source": "mcp_master_profile",
+                "attribution": "consulted",
+                "condition_code": chunk.condition_code,
+                "section": chunk.chunk_type,
+                "display_name": display,
+            }
+        )
+    return out or None
+
+
 # C0/C1 control characters carry no linguistic meaning and NUL (0x00) is
 # illegal in PostgreSQL text — an unsanitized NUL in a message raises
 # asyncpg CharacterNotInRepertoireError when the turn is persisted, 500-ing
@@ -1401,6 +1482,7 @@ async def _dispatch_agentic(
     trace: list[dict],
     t,
     pivot: InboundPivot | None = None,
+    episodes: list | None = None,
 ) -> ChatResult:
     """The tool-driven path.
 
@@ -1425,7 +1507,7 @@ async def _dispatch_agentic(
     # Per-user memory, through the SHARED assembly. Agentic used to read the
     # profile and episodes but never the long-term topic recall, and never
     # recorded topics at all. See app/chat/memory_assembly.py.
-    _memory = await memory_assembly.assemble(db, user_id)
+    _memory = await memory_assembly.assemble(db, user_id, episodes_hint=episodes)
     patient_text = _memory.append_to(patient_text)
 
     compacted, recent = await assemble_context(db, session_id)
@@ -1661,6 +1743,8 @@ async def _dispatch_agentic(
             "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
         ),
         provenance=provenance,
+        # Not when the reply was replaced: safe_reply shows none of this.
+        citations=None if degraded else await _agentic_citations(db, chunks),
         language=lang,
         trace=trace,
     )

@@ -10,8 +10,11 @@ keyword (token-overlap) search. Chunks are returned ranked and capped at k.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from sqlalchemy import or_, select
@@ -488,6 +491,73 @@ async def _hybrid_rank(
         return spread_across_conditions(scored, k)
 
 
+
+# --------------------------------------------------------------------------- #
+# Retrieval cache
+#
+# "What is diabetes" is asked over and over, by different readers, and the
+# answer is the same corpus content every time. Each miss costs DB round trips
+# plus — when embeddings are configured — a network call to the embedding
+# service, and in production every one of those is a network hop.
+#
+# ONLY corpus content is cached. The key is (scope, message digest, k) and the
+# value is McpChunk-derived text that is identical for every reader, so nothing
+# personal is stored and nothing crosses between users: two readers asking the
+# same question about the same conditions are entitled to the same profile
+# sections. The reader's own data is never part of this — it enters the reply
+# later, through the [P] block, which is assembled per turn and never cached.
+#
+# The message is keyed by DIGEST, not text: a health question is the reader's
+# own words, and a process-level dict holding them for five minutes is a
+# needless place for them to sit.
+#
+# Follows the process-level TTL shape already used for the condition index
+# (registry.py:238) — and, like it, is reset when the corpus changes.
+# ponytail: per-process, so N replicas keep N copies; move to a shared cache
+# only if the hit rate ever justifies the operational cost.
+# --------------------------------------------------------------------------- #
+RETRIEVAL_CACHE_TTL_SECONDS = 300.0
+RETRIEVAL_CACHE_MAX_ENTRIES = 512
+
+_retrieval_cache: OrderedDict[tuple, tuple[float, list[RetrievedChunk]]] = (
+    OrderedDict()
+)
+
+
+def reset_retrieval_cache() -> None:
+    """Drop every cached retrieval. Call whenever mcp_chunks changes."""
+    _retrieval_cache.clear()
+
+
+def _retrieval_key(
+    condition_codes: set[str], message: str, k: int
+) -> tuple[tuple[str, ...], str, int]:
+    digest = hashlib.sha256(
+        " ".join(message.lower().split()).encode("utf-8")
+    ).hexdigest()[:16]
+    return (tuple(sorted(condition_codes)), digest, k)
+
+
+def _cache_get(key: tuple) -> list[RetrievedChunk] | None:
+    hit = _retrieval_cache.get(key)
+    if hit is None:
+        return None
+    stored_at, chunks = hit
+    if (time.monotonic() - stored_at) > RETRIEVAL_CACHE_TTL_SECONDS:
+        _retrieval_cache.pop(key, None)
+        return None
+    _retrieval_cache.move_to_end(key)
+    # A copy: callers slice and reorder what they are given.
+    return list(chunks)
+
+
+def _cache_put(key: tuple, chunks: list[RetrievedChunk]) -> None:
+    _retrieval_cache[key] = (time.monotonic(), list(chunks))
+    _retrieval_cache.move_to_end(key)
+    while len(_retrieval_cache) > RETRIEVAL_CACHE_MAX_ENTRIES:
+        _retrieval_cache.popitem(last=False)
+
+
 async def retrieve_chunks(
     db: AsyncSession,
     condition_codes: set[str],
@@ -501,9 +571,15 @@ async def retrieve_chunks(
     otherwise. Empty scope falls back to a token-prefiltered global search so
     symptom descriptions still retrieve educational content.
     """
+    cache_key = _retrieval_key(condition_codes, message, k)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         hybrid = await _hybrid_rank(db, condition_codes, message, k)
         if hybrid:
+            _cache_put(cache_key, hybrid)
             return hybrid
     except Exception:  # noqa: BLE001 — hybrid path fails open to keyword
         logger.warning("hybrid retrieval failed; keyword fallback", exc_info=True)
@@ -549,15 +625,25 @@ async def retrieve_chunks(
                 "condition scope matched no chunks; serving no corpus content",
                 extra={"condition_codes": sorted(condition_codes)},
             )
+            # Cached like any other result: a corpus gap is asked about
+            # repeatedly (every hypertension question hits this today), and one
+            # fruitless round trip per turn is still a round trip. The TTL
+            # bounds how long a newly ingested profile stays invisible, and
+            # `reset_retrieval_cache()` clears it immediately after an ingest.
+            _cache_put(cache_key, [])
             return []
         # Condition scope already establishes relevance; keep zero-score chunks.
-        return spread_across_conditions(
+        result = spread_across_conditions(
             _prefer_section(_keyword_rank(rows, message), sections), k
         )
+        _cache_put(cache_key, result)
+        return result
 
     rows = await _global_fallback_rows(db, message)
     if not rows:
         return []
     # Unscoped relevance is purely lexical — drop zero-overlap chunks.
     ranked = _prefer_section(_keyword_rank(rows, message), sections)
-    return [c for c in ranked[:k] if c.score > 0]
+    result = [c for c in ranked[:k] if c.score > 0]
+    _cache_put(cache_key, result)
+    return result

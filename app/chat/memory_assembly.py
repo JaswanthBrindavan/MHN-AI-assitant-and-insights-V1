@@ -79,11 +79,22 @@ class UserMemory:
         return "\n\n".join(parts)
 
 
-async def assemble(db: AsyncSession, user_id: uuid.UUID) -> UserMemory:
+async def assemble(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    episodes_hint: list | None = None,
+) -> UserMemory:
     """Read every per-user memory store. Each part fails open independently.
 
     Independently matters: a failure reading episodes must not also cost the
     reader their profile.
+
+    ``episodes_hint`` — open episodes the caller has ALREADY read this turn.
+    The orchestrator reads them in the prologue to compute the red-flag floor
+    (an unresolved emergency episode must raise this turn's risk), and every
+    round trip here is a network hop in production, so it hands them down
+    rather than paying for them twice.
     """
     # A pending erasure stops the data being USED immediately, even though the
     # rows are destroyed later. Without this, "we have deleted your data" is
@@ -116,7 +127,10 @@ async def assemble(db: AsyncSession, user_id: uuid.UUID) -> UserMemory:
     episodes: list = []
     episode_text = ""
     try:
-        episodes = await open_episodes(db, user_id)
+        episodes = (
+            episodes_hint if episodes_hint is not None
+            else await open_episodes(db, user_id)
+        )
         episode_text = render_episodes(episodes)
     except Exception:  # noqa: BLE001
         logger.warning("episode context failed; continuing", exc_info=True)
