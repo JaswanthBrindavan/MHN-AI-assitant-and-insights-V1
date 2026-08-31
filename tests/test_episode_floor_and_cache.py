@@ -234,3 +234,115 @@ async def test_repeated_retrieval_does_not_touch_the_database_again(
     assert counter["n"] == 0, (
         f"cached retrieval still issued {counter['n']} queries"
     )
+
+
+# --------------------------------------------------------------------------
+# The reader must be able to CLEAR an escalation they raised
+#
+# Reproduces a staging session verbatim. "chest pain and left arm discomfort"
+# opened THREE episodes (chest pain / chest pain (pattern) / left arm), the
+# close-out only fired when exactly one was open, so "its gone.. i am feeling
+# better" resolved nothing and every later turn — including "what is diabetes?"
+# — kept the seek-care banner for fourteen days.
+# --------------------------------------------------------------------------
+
+async def test_a_rule_label_never_becomes_an_episode(db_session):
+    """"chest pain (pattern)" names the ACS rule, not something the reader said."""
+    from app.chat import memory_assembly
+    from app.chat.episodes import open_episodes
+
+    user_id = uuid.uuid4()
+    await memory_assembly.record(
+        db_session, user_id,
+        message="chest pain and left arm discomfort",
+        risk=EMERGENCY,
+        flags=["chest pain", "chest pain (pattern)", "left arm"],
+    )
+    await db_session.flush()
+
+    symptoms = {e.symptom for e in await open_episodes(db_session, user_id)}
+    assert "chest pain (pattern)" not in symptoms
+    assert "chest pain" in symptoms
+
+
+async def test_saying_you_are_better_clears_a_multi_row_incident(db_session):
+    from app.chat import memory_assembly
+    from app.chat.episodes import open_episodes
+
+    user_id = uuid.uuid4()
+    await memory_assembly.record(
+        db_session, user_id,
+        message="chest pain and left arm discomfort",
+        risk=EMERGENCY,
+        flags=["chest pain", "left arm"],
+    )
+    await db_session.flush()
+    assert len(await open_episodes(db_session, user_id)) == 2, "premise"
+
+    await memory_assembly.record(
+        db_session, user_id,
+        message="its gone.. i am feeling better",
+        risk=NONE,
+        flags=[],
+    )
+    await db_session.flush()
+
+    assert await open_episodes(db_session, user_id) == [], (
+        "a recovery report must clear the whole incident, not require the "
+        "reader to name each row"
+    )
+
+
+async def test_the_full_staging_sequence_ends_calm(db_session):
+    """The three turns as they were actually typed."""
+    user_id = uuid.uuid4()
+
+    first = await handle_chat(
+        db_session, user_id, "chest pain and left arm discomfort", FakeProvider()
+    )
+    assert first.risk_level == EMERGENCY
+
+    await handle_chat(
+        db_session, user_id, "its gone.. i am feeling better", FakeProvider()
+    )
+
+    third = await handle_chat(
+        db_session, user_id, "what is diabetes?", FakeProvider()
+    )
+    assert third.risk_level == NONE, (
+        "after the reader says they are better, an unrelated question must "
+        f"not still carry the escalation; got {third.risk_level}"
+    )
+    assert third.recommended_action == "discuss_with_clinician"
+
+
+async def test_a_carried_escalation_does_not_claim_the_reader_described_it(
+    db_session,
+):
+    """"Some of what you describe can be serious" is false when they described
+    nothing this turn — they asked what diabetes is."""
+    from app.chat.replies import CARRIED_ESCALATION, HIGH_ESCALATION
+
+    user_id = uuid.uuid4()
+    await record_episode(
+        db_session, user_id, "chest pain and left arm discomfort", EMERGENCY
+    )
+    await db_session.flush()
+
+    result = await handle_chat(
+        db_session, user_id, "what is diabetes", FakeProvider()
+    )
+    assert result.risk_level == HIGH
+    assert not result.response_message.startswith(HIGH_ESCALATION)
+    assert result.response_message.startswith(CARRIED_ESCALATION)
+
+
+async def test_a_symptom_described_now_still_gets_the_direct_wording(db_session):
+    from app.chat.replies import HIGH_ESCALATION
+
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "i have had a bad headache for three days",
+        FakeProvider(),
+    )
+    if result.risk_level == HIGH:
+        assert result.response_message.startswith(HIGH_ESCALATION)

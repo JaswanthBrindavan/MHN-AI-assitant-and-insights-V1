@@ -57,6 +57,18 @@ logger = logging.getLogger("davi.chat")
 MAX_EPISODES_PER_TURN = 3
 
 
+def _episode_terms(flags: list[str] | None) -> list[str]:
+    """Real symptom phrases from triage's matched terms.
+
+    Triage reports rule LABELS next to the phrases the reader actually used —
+    "chest pain (pattern)" names the ACS co-occurrence rule. A label is not a
+    symptom and must not become an episode: it inflates one incident into
+    several rows, and the reader can never name it to close it.
+    """
+    return [t for t in (flags or []) if "(" not in t]
+
+
+
 @dataclass(frozen=True)
 class UserMemory:
     """What is known about this reader, rendered for the [P] block."""
@@ -221,19 +233,42 @@ async def record(
                 logger.warning("episode resolve failed; continuing",
                                exc_info=True)
         if not resolved_any and not flags:
-            # "I'm feeling better" with no symptom named: close the lone open
-            # episode if there is exactly one — with several, guessing which
-            # one recovered would be wrong more often than right.
+            # "I'm feeling better" with no symptom named closes EVERY open
+            # episode.
+            #
+            # This used to close one only when exactly one was open, on the
+            # reasoning that guessing among several would be wrong more often
+            # than right. That reasoning changed when open episodes started
+            # raising the risk floor: one message routinely opens several rows
+            # for a SINGLE incident ("chest pain and left arm discomfort" ->
+            # chest pain + left arm), so the guard meant the reader could never
+            # close it. Measured in staging: "its gone.. i am feeling better"
+            # resolved nothing and every later turn — including "what is
+            # diabetes?" — kept the seek-care banner for fourteen days.
+            #
+            # Closing too eagerly costs a floor the reader explicitly asked to
+            # drop, and they can re-report in one sentence. Not closing at all
+            # costs an escalation they cannot escape, which is how a real
+            # warning gets trained into wallpaper.
             try:
                 episodes = await open_episodes(db, user_id)
-                if len(episodes) == 1:
-                    await resolve(db, user_id, episodes[0].symptom)
+                for episode in episodes:
+                    await resolve(db, user_id, episode.symptom)
+                if episodes:
+                    logger.info(
+                        "recovery message closed %d open episode(s)",
+                        len(episodes),
+                    )
             except Exception:  # noqa: BLE001
                 logger.warning("episode resolve failed; continuing",
                                exc_info=True)
         return  # a recovery report never opens or extends an episode
 
-    for term in (flags or [])[:MAX_EPISODES_PER_TURN]:
+    # Triage returns rule LABELS alongside real phrases — "chest pain
+    # (pattern)" is the name of the ACS co-occurrence rule, not something the
+    # reader said. Opening an episode for it created a third row for one
+    # incident, which is what pushed the count past the close-out guard below.
+    for term in _episode_terms(flags)[:MAX_EPISODES_PER_TURN]:
         try:
             await open_or_touch(db, user_id, term, risk)
         except Exception:  # noqa: BLE001
