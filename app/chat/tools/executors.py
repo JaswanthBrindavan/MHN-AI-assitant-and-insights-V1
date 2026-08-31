@@ -39,6 +39,12 @@ from app.chat.data_handlers import (
 )
 from app.coredata.service import document_owner
 from app.drugs.service import build_drug_reply, find_drug, find_substitutes
+from app.rag.extractive import build_extractive_answer, is_focused
+from app.rag.retrieval import (
+    resolve_scope,
+    retrieve_chunks,
+    target_sections,
+)
 
 # Keys a handler may return that the model can use directly.
 _PASSTHROUGH = ("documents", "visual", "citations")
@@ -148,17 +154,78 @@ async def get_family_members(
     return _unwrap(ability)
 
 
+# A natural phrasing per section, so the ONE section-intent table in
+# `app/rag/retrieval.py` stays the single source of truth for what a section
+# means. Anything not listed falls back to suggestions, which is what this tool
+# used to return unconditionally.
+_SECTION_QUERY: dict[str, str] = {
+    "definition": "what is {c}",
+    "symptoms": "what are the symptoms of {c}",
+    "signs": "what are the signs of {c}",
+    "diagnosis": "how is {c} diagnosed",
+    "tests": "what tests are used for {c}",
+    "etiology": "what causes {c}",
+    "risk_factors": "what are the risk factors for {c}",
+    "complications": "what are the complications of {c}",
+    "prevalence": "how common is {c}",
+    "classification": "what types of {c} are there",
+    "suggestions": "tips for {c}",
+}
+
+
 async def get_condition_guidance(
     db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
 ) -> dict | None:
     condition = str(args.get("condition", "")).strip()
     if not condition:
         return None
+    section = str(args.get("section", "") or "").strip().lower()
     _text, codes = await build_patient_context(db, user_id)
-    ability = await handle_suggestion_query(
-        db, user_id, f"tips for {condition}", codes
+
+    # Without a section argument this executor hardcoded "tips for {condition}",
+    # and `handle_suggestion_query` filters `chunk_type LIKE 'suggestions%'` —
+    # so EVERY condition question the model routed here came back as the
+    # suggestions section, whatever was actually asked.
+    if section in ("", "suggestions"):
+        ability = await handle_suggestion_query(
+            db, user_id, f"tips for {condition}", codes
+        )
+        if ability is not None:
+            return _unwrap(ability, condition=condition, section="suggestions")
+        # An OMITTED section means "general advice on managing this". Falling
+        # through to a definition would answer a management question with a
+        # definition the model did not ask for and cannot tell apart from one
+        # it did. Nothing found means nothing found.
+        return None
+
+    query = _SECTION_QUERY.get(section, _SECTION_QUERY["definition"]).format(
+        c=condition
     )
-    return _unwrap(ability, condition=condition)
+    # Scope on the CONDITION NAME alone, not on the reader's background codes.
+    # Passing `codes` in meant an unresolvable condition still produced a scope
+    # — the reader's own pedigree conditions — and the profile for one of those
+    # came back labelled as the answer about the condition they actually asked
+    # about. Better to return nothing and let the model say it has no
+    # validated content for that condition.
+    scope = await resolve_scope(db, condition, set())
+    if not scope:
+        return None
+    chunks = await retrieve_chunks(db, scope, query, k=4)
+    reply = build_extractive_answer(
+        chunks, focused=is_focused(chunks, target_sections(query))
+    )
+    if reply is None:
+        return None
+    return {
+        "deterministic_reply": reply,
+        "provenance": {
+            "source": "mcp_master_profile",
+            "conditions": sorted(scope),
+            "chunks": [c.id for c in chunks],
+        },
+        "condition": condition,
+        "section": section or "definition",
+    }
 
 
 async def lookup_medicine(
