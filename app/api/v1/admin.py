@@ -30,6 +30,7 @@ from app.knowledge.registry import reset_index_cache
 from app.models.chat import McpChunk
 from app.models.knowledge import ConditionRegistry
 from app.rag.embeddings import embed_texts, embeddings_configured
+from app.rag.retrieval import reset_retrieval_cache
 
 logger = logging.getLogger("davi.admin")
 
@@ -124,6 +125,9 @@ async def refresh_registry_entry(
     await db.commit()
     # After commit so a rebuild can only ever see the new state.
     reset_index_cache()
+    # This route writes an alias card into mcp_chunks, so cached retrievals
+    # for the affected condition are now stale.
+    reset_retrieval_cache()
     logger.info(
         "registry refresh: code=%s card=%s embedded=%s aliases=%d",
         code, card_written, embedded, len(aliases),
