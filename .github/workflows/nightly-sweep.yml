@@ -1,0 +1,76 @@
+name: nightly sweep
+
+# Drives POST /api/v1/admin/sweep on a schedule.
+#
+# Railway's cron is a per-service setting: a service with a cron runs its
+# container on that schedule, so the API service — which must stay up serving
+# HTTP — cannot also be the schedule. Rather than standing up a second Railway
+# service, this repo's own scheduler calls the endpoint over the same
+# SERVICE_TOKEN the other admin routes use.
+#
+# The endpoint returns 202 immediately and runs the sweep in the background,
+# because the FIRST run on an environment that has never swept processes the
+# entire backlog — every due erasure and every message/receipt past retention.
+# That is deliberately not held open on an HTTP socket. `job_runs` is the
+# status record: this job starts the sweep and reports that it started, it does
+# not wait for it to finish.
+#
+# REQUIRED REPO SECRETS
+#   DAVI_BASE_URL   e.g. https://davi-staging.up.railway.app  (no trailing /)
+#   DAVI_SERVICE_TOKEN  the same value as the service's SERVICE_TOKEN env var
+#
+# Until both are set the job skips rather than failing, so a fork or a fresh
+# clone does not show a permanently red workflow.
+
+on:
+  schedule:
+    # 03:15 UTC. The Railway comment suggested 15 3 * * *; kept identical so
+    # switching to a Railway cron service later needs no schedule change.
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+    # Manual trigger. Use this for the first run on any environment: watch it,
+    # confirm job_runs, then let the schedule take over.
+
+concurrency:
+  # Two sweeps at once would race on the same batched deletes.
+  group: nightly-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: trigger sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check configuration
+        id: cfg
+        env:
+          BASE_URL: ${{ secrets.DAVI_BASE_URL }}
+          TOKEN: ${{ secrets.DAVI_SERVICE_TOKEN }}
+        run: |
+          if [ -z "$BASE_URL" ] || [ -z "$TOKEN" ]; then
+            echo "DAVI_BASE_URL / DAVI_SERVICE_TOKEN not set — skipping."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: POST /api/v1/admin/sweep
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          BASE_URL: ${{ secrets.DAVI_BASE_URL }}
+          TOKEN: ${{ secrets.DAVI_SERVICE_TOKEN }}
+        run: |
+          # -sS: quiet but still show errors. The token goes in a header, never
+          # in the URL, so it cannot land in an access log.
+          code=$(curl -sS -o /tmp/body.json -w '%{http_code}' \
+            -X POST "$BASE_URL/api/v1/admin/sweep" \
+            -H "Authorization: Bearer $TOKEN" \
+            --max-time 60)
+          echo "HTTP $code"
+          cat /tmp/body.json || true
+          echo
+          if [ "$code" != "202" ]; then
+            echo "::error::sweep trigger failed with HTTP $code"
+            exit 1
+          fi
+          echo "::notice::Sweep started. Check job_runs (name='nightly_sweep')."
