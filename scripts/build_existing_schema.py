@@ -4,9 +4,12 @@ No psql here, so this composes the file from the migrations themselves — which
 IS what Flyway applies, in the order it applies them. Reproducible, and it can
 be regenerated the moment the other team adds a migration.
 
-V6 is EXCLUDED: it is Davi's own adopted file, and the coexistence check exists
-to prove Davi's Alembic-built tables do not collide with the tables Davi does
-NOT own. Including it would collide by construction.
+Davi's OWN adopted migrations are EXCLUDED — the coexistence check exists to
+prove Davi's Alembic-built tables do not collide with the tables Davi does NOT
+own, so including them would collide by construction. They are identified by
+name (V*__davi_*.sql), not by number: there were three by V34 (V6, V21, V23)
+and hardcoding numbers silently stopped being correct the moment the second
+one was adopted.
 """
 import os
 import pathlib
@@ -20,7 +23,6 @@ SPRING = pathlib.Path(
 )
 OUT = pathlib.Path(__file__).resolve().parent.parent / "db" / "existing_schema.sql"
 
-EXCLUDE = {6}  # Davi's own adopted migration
 
 files = []
 for path in SPRING.glob("V*__*.sql"):
@@ -28,6 +30,9 @@ for path in SPRING.glob("V*__*.sql"):
     if match:
         files.append((int(match.group(1)), match.group(2), path))
 files.sort()
+
+# Davi's own adopted migrations, by name rather than by number.
+EXCLUDE = {n for n, name, _ in files if name.startswith("davi_")}
 
 header = f"""-- db/existing_schema.sql
 --
@@ -39,10 +44,10 @@ header = f"""-- db/existing_schema.sql
 -- REGENERATE:  python -m scripts.build_existing_schema
 --
 -- SOURCE: {SPRING}
--- CHAIN:  V{files[0][0]}..V{files[-1][0]}, excluding V6 (Davi's own adopted
---         migration — the coexistence check exists to prove Davi's tables do
---         not collide with the ones Davi does not own, so including it would
---         collide by construction).
+-- CHAIN:  V{files[0][0]}..V{files[-1][0]}, excluding {", ".join(f"V{n}" for n in sorted(EXCLUDE))}
+--         (Davi's own adopted migrations — the coexistence check exists to
+--         prove Davi's tables do not collide with the ones Davi does not own,
+--         so including them would collide by construction).
 --
 -- WHY THIS MATTERS. Until now this file was the V1 baseline alone. Everything
 -- V7-V19 changed was invisible to every check in this repository — including

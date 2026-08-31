@@ -92,15 +92,28 @@ def _tokens(text: str) -> list[str]:
     return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if t not in _STOPWORDS and len(t) > 2]
 
 
-# Query-intent → chunk-section boost: "how is X diagnosed" should favour the
-# diagnosis/tests chunks even when token overlap is thin ("diagnosed" and
-# "diagnosis" don't token-match).
+# Query-intent -> chunk sections. This table drives BOTH a small ranking
+# boost and, via `target_sections`, an actual FILTER.
+#
+# Entries are REGEX FRAGMENTS, compiled below with a leading word anchor.
+# A bare stem is a prefix match ("diagnos" covers diagnosed/diagnosis);
+# ending a fragment with a word anchor requires a whole word. That
+# distinction became load-bearing the moment this table stopped being a
+# +0.05 nudge and became a hard filter: as a nudge, `sign` matching
+# "significant" or `test` matching "testosterone" cost nothing, but as a
+# filter it DISCARDS every chunk that actually answered the question.
+#
+# Deliberately ABSENT: "normal", "range" and "stage". They were tried here
+# and removed — as a filter they hijack ordinary questions ("is this
+# normal?" is a symptom question, not a lab-reference one) and drop the
+# symptom chunks entirely.
 _SECTION_INTENT: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("diagnos", ("diagnosis", "tests_quantitative", "tests_qualitative")),
-    ("test", ("tests_quantitative", "tests_qualitative", "diagnosis")),
+    (r"tests?\b", ("tests_quantitative", "tests_qualitative", "diagnosis")),
     ("symptom", ("symptoms", "signs")),
-    ("sign", ("signs", "symptoms")),
+    (r"signs?\b", ("signs", "symptoms")),
     ("cause", ("etiology", "risk_profiles")),
+    (r"risk factors?\b", ("risk_profiles", "etiology")),
     ("why", ("etiology",)),
     ("complicat", ("complications",)),
     ("treat", ("suggestions",)),
@@ -110,17 +123,131 @@ _SECTION_INTENT: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("food", ("suggestions", "lifestyle_influence")),
     ("exercis", ("suggestions", "lifestyle_influence")),
     ("lifestyle", ("lifestyle_influence", "suggestions")),
+    # Sections that previously had NO stem at all, so every question about
+    # them scored 0.0 on every chunk and the reader got whatever the ranker
+    # happened to like.
+    ("prevalen", ("prevalence",)),
+    ("how common", ("prevalence",)),
+    ("how many people", ("prevalence",)),
+    (r"red flags?\b", ("signs", "symptoms", "complications")),
+    (r"types? of\b", ("classification",)),
+    (r"kinds? of\b", ("classification",)),
+    ("associated", ("associated_conditions",)),
+    ("along with", ("associated_conditions",)),
+    ("alongside", ("associated_conditions",)),
+    ("trigger", ("lifestyle_triggers", "lifestyle_influence")),
+    ("threshold", ("lifestyle_triggers", "tests_quantitative")),
+    # STRONG definitional openers. These belong in the unioning table, not the
+    # fallback one, because a reader who literally types "what is" is asking
+    # for the definition even alongside another stem: "what is diabetes and
+    # what are its symptoms" must keep BOTH. The ambiguous opener "what are" is
+    # deliberately NOT here -- it is how most questions begin, so unioning it
+    # dragged `definition` into every section query and made the symptoms
+    # answer byte-identical to the definition answer.
+    ("what is", ("definition",)),
+    ("what it is", ("definition",)),
+    ("what's", ("definition",)),
+    ("defin", ("definition",)),
+    ("meaning of", ("definition",)),
 )
+
+# Generic question OPENERS. Kept apart from the table above and consulted only
+# when no specific stem matched, because they are phrasing, not intent: "what
+# are the symptoms of X" opens with "what are" but is not asking for the
+# definition. Unioning these with the specific stems put `definition` back into
+# every section query and made the symptoms answer byte-identical to the
+# definition answer again — the exact defect being fixed. Measured, not assumed.
+_GENERIC_SECTION_INTENT: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("what are", ("definition",)),
+    ("tell me about", ("definition",)),
+)
+
 _SECTION_BOOST = 0.05
 
+# Compiled once. Fragments are authored in THIS file and never taken from
+# user input, so they are treated as regex (not re.escape'd) — escaping
+# would turn the `?` quantifiers into literal question marks.
+_SECTION_INTENT_RES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = tuple(
+    (re.compile(r"\b" + frag), sections) for frag, sections in _SECTION_INTENT
+)
+_GENERIC_SECTION_RES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = tuple(
+    (re.compile(r"\b" + frag), sections)
+    for frag, sections in _GENERIC_SECTION_INTENT
+)
 
-def _section_boost(message_lower: str, chunk_type: str) -> float:
-    base_section = chunk_type.rsplit("_", 1)[0] if chunk_type[-1:].isdigit() else chunk_type
-    for stem, sections in _SECTION_INTENT:
-        if stem in message_lower and (
-            base_section in sections or chunk_type in sections
-        ):
-            return _SECTION_BOOST
+
+def _base_section(chunk_type: str) -> str:
+    """Strip a continuation suffix: ``symptoms_2`` → ``symptoms``.
+
+    Lives here rather than in ``extractive`` because retrieval needs it too, and
+    the two copies had already drifted.
+    """
+    return chunk_type.rsplit("_", 1)[0] if chunk_type[-1:].isdigit() else chunk_type
+
+
+def target_sections(message: str) -> tuple[str, ...]:
+    """Sections this question asks for, or () when it names none.
+
+    Unions EVERY matching SPECIFIC stem rather than taking the first, so a
+    compound question ("symptoms and complications of X") keeps both halves.
+    The generic openers are a FALLBACK, not part of that union — see
+    ``_GENERIC_SECTION_INTENT``.
+
+    Pure and total: no I/O, and it cannot raise on any input string.
+    """
+    message_lower = message.lower()
+    out: list[str] = []
+    for pattern, sections in _SECTION_INTENT_RES:
+        if pattern.search(message_lower):
+            for section in sections:
+                if section not in out:
+                    out.append(section)
+    if out:
+        return tuple(out)
+    for pattern, sections in _GENERIC_SECTION_RES:
+        if pattern.search(message_lower):
+            return sections
+    return ()
+
+
+def _prefer_section(
+    ranked: list[RetrievedChunk], sections: tuple[str, ...]
+) -> list[RetrievedChunk]:
+    """Keep only chunks in ``sections``, or everything when that would empty it.
+
+    Filtering rather than boosting is the fix for section-targeted questions: a
+    flat +0.05 nudge could not lift MC001's 839-char ``symptoms`` chunk (0.0096)
+    past its 111-char ``prevalence`` chunk (0.1429, scored on header hits
+    alone), so "what are the symptoms of X" returned a reply byte-identical to
+    "what is X".
+
+    Fail-open by construction: a profile lacking the asked-for section degrades
+    to today's unfiltered ranking rather than to an empty reply.
+    """
+    if not sections:
+        return ranked
+    kept = [
+        c for c in ranked
+        if _base_section(c.chunk_type) in sections or c.chunk_type in sections
+    ]
+    return kept or ranked
+
+
+def _section_boost(sections: tuple[str, ...], chunk_type: str) -> float:
+    """Ordering nudge WITHIN the section-filtered set.
+
+    Takes the already-resolved sections rather than the raw message: it is
+    called once per candidate chunk (up to 200 on the global fallback), and
+    memoising on the message text instead would keep reader wording alive in
+    process memory across turns and users for no real gain.
+
+    Sharing `target_sections` with the filter means the boost and the filter
+    can never disagree about what a question is asking for.
+    """
+    if not sections:
+        return 0.0
+    if _base_section(chunk_type) in sections or chunk_type in sections:
+        return _SECTION_BOOST
     return 0.0
 
 
@@ -166,13 +293,13 @@ def spread_across_conditions(
 
 def _keyword_rank(rows: list[McpChunk], message: str) -> list[RetrievedChunk]:
     query_tokens = set(_tokens(message))
-    message_lower = message.lower()
+    sections = target_sections(message)
     scored: list[RetrievedChunk] = []
     for r in rows:
         content_tokens = _tokens(r.content)
         overlap = sum(1 for t in content_tokens if t in query_tokens)
         score = overlap / (1 + len(content_tokens)) if content_tokens else 0.0
-        score += _section_boost(message_lower, r.chunk_type)
+        score += _section_boost(sections, r.chunk_type)
         scored.append(
             RetrievedChunk(
                 id=str(r.id),
@@ -301,7 +428,7 @@ async def _hybrid_rank(
     fused = rrf_fuse(
         [vec_ranking, bm25_ranking], ks=[_RRF_K_SEMANTIC, _RRF_K_LEXICAL]
     )
-    message_lower = message.lower()
+    sections = target_sections(message)
     scored = [
         RetrievedChunk(
             id=chunk_id,
@@ -311,7 +438,7 @@ async def _hybrid_rank(
             score=round(
                 score
                 + (_RRF_SECTION_BOOST
-                   if _section_boost(message_lower, by_id[chunk_id].chunk_type)
+                   if _section_boost(sections, by_id[chunk_id].chunk_type)
                    else 0.0),
                 8,
             ),
@@ -319,6 +446,12 @@ async def _hybrid_rank(
         for chunk_id, score in fused.items()
     ]
     scored.sort(key=lambda c: (-c.score, c.condition_code, c.chunk_type, c.id))
+
+    # Section filter goes HERE — before the try — so the MMR path and its
+    # fail-open `except` branch see the same list. MMR's similarity penalty is
+    # section diversity by design, so without this it actively works against a
+    # reader who asked for one specific section.
+    scored = _prefer_section(scored, sections)
 
     # --- MMR diversity rerank over the fused shortlist ---
     # The fused top-k often carries near-duplicate chunks (the same section
@@ -375,6 +508,15 @@ async def retrieve_chunks(
     except Exception:  # noqa: BLE001 — hybrid path fails open to keyword
         logger.warning("hybrid retrieval failed; keyword fallback", exc_info=True)
 
+    # `target_sections` is pure and cannot raise, but retrieve_chunks has no
+    # outer catch — a throw here is a 500, not a safe reply — so the whole
+    # section step stays inside its own guard.
+    try:
+        sections = target_sections(message)
+    except Exception:  # noqa: BLE001 — section intent must never break retrieval
+        logger.warning("section-intent parse failed; unfiltered", exc_info=True)
+        sections = ()
+
     if condition_codes:
         rows = list(
             (
@@ -386,13 +528,36 @@ async def retrieve_chunks(
             ).scalars().all()
         )
         if not rows:
+            # The message named a condition the corpus has no profile for.
+            # MC051 (Primary Hypertension) is the live example: it is mapped
+            # from the HTN engine code by scripts/ingest_mcp_corpus.py:36 but
+            # absent from knowledge/mcp/, which jumps MC050 → MC052.
+            #
+            # Falling through to the global lexical fallback here was tried and
+            # REVERTED: it answers the question from a DIFFERENT condition.
+            # Every chunk header is literally "<Name> — symptoms:", so the
+            # question's own section noun gives overlap > 0 and the score floor
+            # below lets any profile through; `_prefer_section` then drops the
+            # chunks that do mention the topic for being the wrong section. The
+            # measured result was "what is hypertension" answering "What it is
+            # — Hyperuricemia (asymptomatic)", rendered verbatim by the
+            # extractive path with no model in the loop.
+            #
+            # No answer is safer than another condition's answer. The real fix
+            # is to ingest MC051, not to degrade here.
+            logger.info(
+                "condition scope matched no chunks; serving no corpus content",
+                extra={"condition_codes": sorted(condition_codes)},
+            )
             return []
         # Condition scope already establishes relevance; keep zero-score chunks.
-        return spread_across_conditions(_keyword_rank(rows, message), k)
+        return spread_across_conditions(
+            _prefer_section(_keyword_rank(rows, message), sections), k
+        )
 
     rows = await _global_fallback_rows(db, message)
     if not rows:
         return []
     # Unscoped relevance is purely lexical — drop zero-overlap chunks.
-    ranked = _keyword_rank(rows, message)
+    ranked = _prefer_section(_keyword_rank(rows, message), sections)
     return [c for c in ranked[:k] if c.score > 0]

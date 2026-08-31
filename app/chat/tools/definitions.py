@@ -172,10 +172,34 @@ GET_CONDITION_GUIDANCE = ToolSpec(
         "Fetch clinically reviewed guidance for a named condition from the "
         "validated Master Condition Profiles, with citations. Strongly prefer "
         "this over answering a condition question from general knowledge — "
-        "this content has been reviewed and general knowledge has not."
+        "this content has been reviewed and general knowledge has not. Pass "
+        "the `section` that matches what was asked; omit it only when the "
+        "reader wants general advice on managing the condition."
     ),
     input_schema=_obj(
-        {"condition": {"type": "string", "description": "e.g. 'type 2 diabetes'."}},
+        {
+            "condition": {"type": "string", "description": "e.g. 'type 2 diabetes'."},
+            "section": {
+                "type": "string",
+                "enum": [
+                    "definition",
+                    "symptoms",
+                    "signs",
+                    "diagnosis",
+                    "tests",
+                    "etiology",
+                    "risk_factors",
+                    "complications",
+                    "prevalence",
+                    "classification",
+                    "suggestions",
+                ],
+                "description": (
+                    "Which part of the profile answers the question. "
+                    "'definition' for what it is, 'suggestions' for what helps."
+                ),
+            },
+        },
         ["condition"],
     ),
 )

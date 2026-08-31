@@ -52,6 +52,12 @@ _GROUNDING_RULES = (
     "[P] to cite the patient-context block, and [GK] ONLY when nothing was "
     "retrieved and the question is general information. Do not invent block "
     "numbers. Keep the answer brief and plain-English."
+    " Each retrieved block is labelled with its section, as [n] (section). "
+    "Answer from the block whose section matches the question and ignore the "
+    "others. Two or three sentences is usually enough — expand only when the "
+    "reader asks for more detail, or when a required safety reminder or a "
+    "clarifying confirmation applies, both of which always take precedence "
+    "over brevity."
 )
 
 # When the [P] block carries the reader's OWN recorded data (lifestyle, vitals,
@@ -77,7 +83,13 @@ _PERSONALIZATION_RULES = (
 def format_chunks(chunks: list[RetrievedChunk]) -> str:
     if not chunks:
         return ""
-    return "\n".join(f"[{i}] {c.content}" for i, c in enumerate(chunks, start=1))
+    # The section label goes AFTER the [n] marker so grounding's parse of
+    # generated sentences is untouched — it matches on the marker, and the
+    # marker still leads the line.
+    return "\n".join(
+        f"[{i}] ({c.chunk_type}) {c.content}"
+        for i, c in enumerate(chunks, start=1)
+    )
 
 
 def format_recent_turns(turns: list[dict]) -> str:

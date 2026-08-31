@@ -27,6 +27,7 @@ from app.chat.profile import (
 )
 from app.config import get_settings
 from app.db import get_db
+from app.memory import document as memory_document
 from app.models.profile import AGE_BANDS, COMMUNICATION_STYLES
 
 router = APIRouter(prefix="/profile", tags=["profile"])
@@ -251,3 +252,65 @@ async def erasure_status(
     )
 
 
+
+
+class MemoryDocumentOut(BaseModel):
+    """The assembled memory the assistant carries about you."""
+
+    built: bool = Field(
+        description="False when no document has been assembled yet."
+    )
+    fresh: bool = Field(
+        default=False,
+        description="Within the freshness window and at the current schema.",
+    )
+    prompt_block: str | None = Field(
+        default=None,
+        description="The exact text that reaches the model. Verbatim.",
+    )
+    document: dict | None = Field(
+        default=None, description="The structured snapshot, with provenance."
+    )
+    built_at: str | None = None
+    token_estimate: int | None = None
+    detail: str | None = Field(
+        default=None, description="Why there is nothing to show, when there is not."
+    )
+
+
+@router.get("/memory", response_model=MemoryDocumentOut)
+async def read_memory_document(
+    current_user: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> MemoryDocumentOut:
+    """The assembled memory document — the text the model actually receives.
+
+    This module exists because a store of health details the reader cannot
+    inspect is not something this product should have. The memory document was
+    the one such store with no way to read it: `prompt_block` goes into every
+    prompt, and until now nothing exposed it.
+
+    Returns `built: false` rather than a 404 when no row exists. That is a real
+    and informative state, not an error — the document is written ONLY by
+    `scripts/nightly_sweep.py`, so an environment where that job has never run
+    has no documents at all and every turn silently falls back to assembling
+    memory from six queries instead of two.
+    """
+    row = await memory_document.get(db, current_user)
+    if row is None:
+        return MemoryDocumentOut(
+            built=False,
+            detail=(
+                "No memory document has been assembled yet. It is built by the "
+                "nightly sweep; replies are unaffected — memory is assembled "
+                "per turn instead."
+            ),
+        )
+    return MemoryDocumentOut(
+        built=True,
+        fresh=memory_document.is_fresh(row),
+        prompt_block=row.prompt_block,
+        document=row.document,
+        built_at=row.built_at.isoformat(),
+        token_estimate=row.token_estimate,
+    )

@@ -137,3 +137,55 @@ async def refresh_registry_entry(
         "alias_card": card_written,
         "embedded": embedded,
     }
+
+
+@router.post(
+    "/sweep",
+    dependencies=[Depends(require_service_token)],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def trigger_nightly_sweep() -> dict:
+    """Run the nightly sweep now. Returns immediately; poll ``job_runs``.
+
+    Railway's cron is a per-service setting, so the API service — which must
+    stay up serving HTTP — cannot also be the schedule. Rather than a second
+    service, this lets any external scheduler (the repo's own GitHub Actions
+    cron) drive it over the same SERVICE_TOKEN the other admin routes use.
+
+    Why 202 and a background task rather than awaiting the result: the FIRST
+    run on an environment that has never swept processes the entire backlog —
+    every due erasure and every message/receipt past retention since the
+    environment began — which will far exceed any proxy's request timeout.
+    ``job_runs`` is the status record; the sweep writes a row on entry and
+    updates it on exit, so a caller polls that rather than holding a socket.
+
+    Its own session, NOT the request's: the request session closes when this
+    returns, long before the sweep finishes.
+    """
+    import asyncio
+
+    from app.db import get_sessionmaker
+    from scripts.nightly_sweep import run_sweep
+
+    async def _run() -> None:
+        try:
+            sm = get_sessionmaker()
+            async with sm() as db:
+                result = await run_sweep(db)
+                await db.commit()
+            logger.info("nightly sweep complete: %s", result)
+        except Exception:  # noqa: BLE001 — a failed sweep must not kill the app
+            # run_sweep already marks the job_runs row failed with the error;
+            # this only stops the exception escaping into the event loop.
+            logger.exception("nightly sweep failed")
+
+    asyncio.create_task(_run())
+    return {
+        "ok": True,
+        "started": True,
+        "detail": (
+            "Sweep started. Poll job_runs (name='nightly_sweep') for status; "
+            "the first run on an environment that has never swept processes "
+            "the whole backlog and can take a while."
+        ),
+    }

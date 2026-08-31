@@ -95,13 +95,25 @@ from app.knowledge.registry import load_condition_index
 from app.llm.base import LLMProvider
 from app.llm.tools import UserMessage
 from app.models.chat import RagTurnReceipt
-from app.rag.extractive import build_extractive_answer, is_definitional_ask
+from app.rag.extractive import (
+    build_extractive_answer,
+    disclosure_menu,
+    is_definitional_ask,
+    is_focused,
+    rendered_chunks,
+)
 from app.rag.prompt import (
     build_agentic_system_prompt,
     build_correction_directive,
     build_system_prompt,
 )
-from app.rag.retrieval import RetrievedChunk, resolve_scope, retrieve_chunks
+from app.rag.retrieval import (
+    RetrievedChunk,
+    _base_section,
+    resolve_scope,
+    retrieve_chunks,
+    target_sections,
+)
 from app.telemetry import (
     chat_latency,
     chat_turns,
@@ -507,6 +519,44 @@ async def _drug_info_reply(
     return None
 
 
+async def _scope_with_carry_forward(
+    db: AsyncSession,
+    message: str,
+    user_codes: set[str],
+    prior_turns: list[dict],
+) -> tuple[set[str], bool, set[str]]:
+    """Condition scope for this turn, inheriting the topic on a follow-up.
+
+    Returns ``(codes, message_named_condition, carried)``.
+
+    Shared by BOTH dispatchers. It used to live inline in the legacy branch
+    only, so on the agentic engine a bare follow-up resolved against the
+    message alone — and `resolve_scope(db, "tell me more", set())` is empty,
+    because the global fallback needs tokens of 5+ characters and "tell"/"more"
+    are 4. The agentic engine therefore retrieved NOTHING for exactly the
+    follow-ups this carry-forward exists to serve.
+
+    Message-only scope first, then union the pedigree codes: the old shape
+    called resolve_scope twice with the same message because it needed both
+    answers, and deriving one from the other gives both for one call.
+    """
+    message_codes = await resolve_scope(db, message, set())
+    codes = message_codes | await resolve_scope(db, "", user_codes)
+    # Key on "did THIS message name a condition" rather than on `codes`, which
+    # is never empty for a user with a pedigree, so the topic carries for
+    # everyone. Union with `codes` keeps pedigree context.
+    message_named_condition = bool(message_codes)
+    carried: set[str] = set()
+    if not message_named_condition and prior_turns:
+        recent_user_text = " ".join(
+            m["message"] for m in prior_turns[-6:] if m.get("role") == "user"
+        )
+        carried = await resolve_scope(db, recent_user_text, set())
+        if carried:
+            codes = codes | carried
+    return codes, message_named_condition, carried
+
+
 async def _dispatch(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -870,23 +920,13 @@ async def _dispatch(
     # shape called resolve_scope twice with the same message — a duplicate
     # registry match and an extra round trip — because it needed both answers.
     # Deriving one from the other gives both for one call.
-    message_codes = await _stage("resolve_scope", resolve_scope(db, message, set()))
-    codes = message_codes | await resolve_scope(db, "", user_codes)
-    # Scope carry-forward: a follow-up like "is it serious?" names no condition
-    # of its own, so inherit the topic from the reader's OWN recent questions.
-    # Keying on "did THIS message name a condition" rather than on `codes` —
-    # which is never empty for users with a pedigree — so the topic carries
-    # for everyone. Union with `codes` keeps pedigree context.
-    message_named_condition = bool(message_codes)
-    if not message_named_condition and prior_turns:
-        recent_user_text = " ".join(
-            m["message"] for m in prior_turns[-6:] if m.get("role") == "user"
-        )
-        carried = await resolve_scope(db, recent_user_text, set())
-        if carried:
-            codes = codes | carried
-            t("Follow-up", f"carried topic scope from recent turns: "
-              f"{sorted(carried)[:4]}")
+    codes, message_named_condition, carried = await _stage(
+        "resolve_scope",
+        _scope_with_carry_forward(db, message, user_codes, prior_turns),
+    )
+    if carried:
+        t("Follow-up", f"carried topic scope from recent turns: "
+          f"{sorted(carried)[:4]}")
     chunks = await _stage("retrieval", retrieve_chunks(db, codes, message))
     used_rag = bool(chunks)
     # Why this turn fell back, if it did. The agentic path has always recorded
@@ -945,7 +985,14 @@ async def _dispatch(
         )
     )
     if serve_extractive:
-        extractive = build_extractive_answer(chunks)
+        # A question that names a section gets that section only. The menu is
+        # gated on NONE: HIGH_ESCALATION is prepended to whatever comes back,
+        # and inviting the reader to browse the corpus underneath an
+        # urgent-care instruction would undercut it.
+        _focused = is_focused(chunks, target_sections(message))
+        extractive = build_extractive_answer(
+            chunks, focused=_focused, with_menu=(risk == NONE)
+        )
         if extractive is not None:
             t("Generate",
               "answered directly from the clinically validated profile "
@@ -977,7 +1024,7 @@ async def _dispatch(
                         else c.condition_code
                     ),
                 }
-                for i, c in enumerate(chunks[:3])
+                for i, c in enumerate(rendered_chunks(chunks, focused=_focused))
             ]
             await _write_receipt(
                 db, user_id=user_id, session_id=session_id, message=message,
@@ -1000,7 +1047,12 @@ async def _dispatch(
                     "chunks": [c.id for c in chunks],
                     **({"degraded": legacy_degraded} if legacy_degraded else {}),
                 },
-                citations=extractive_citations or None,
+                # A reply replaced by safe_reply shows none of these
+                # sections, so citing them would point the reader at
+                # content that is not in front of them.
+                citations=(
+                    None if legacy_degraded else (extractive_citations or None)
+                ),
                 language=lang,
                 trace=trace,
             )
@@ -1379,7 +1431,9 @@ async def _dispatch_agentic(
     compacted, recent = await assemble_context(db, session_id)
     prior_turns = recent[:-1] if recent else []
 
-    codes = await resolve_scope(db, message, user_codes)
+    codes, _named, _carried = await _scope_with_carry_forward(
+        db, message, user_codes, prior_turns
+    )
     chunks = await retrieve_chunks(db, codes, message)
 
     # Remember what was raised, at the severity the FLOOR decided — never a
@@ -1453,6 +1507,48 @@ async def _dispatch_agentic(
             sorted({n.replace("_", " ") for n in outcome.tool_names})))
 
     display = strip_markers(outcome.text)
+    # Progressive disclosure, on BOTH engines. The legacy renderer appends this
+    # inside build_extractive_answer; the agentic engine has no renderer of its
+    # own, so it is appended here — before the fidelity, validation and HIGH
+    # branches, so the menu is subject to exactly the same guards as the rest
+    # of the reply rather than being bolted on after them.
+    #
+    # Four gates, each earning its place:
+    #   `display`  — an empty model turn (a refusal, or text that was only
+    #                citation markers) must stay empty so validate_reply's
+    #                `empty` rule fires and safe_reply takes over. Appending
+    #                first turned "" into a menu-only reply that PASSED
+    #                validation, so the reader got a browse list and no answer
+    #                while `degradations` never incremented.
+    #   corpus-ask — mirrors the legacy `serve_extractive` gate, so the menu
+    #                does not land on a tracker write or a personal-records
+    #                answer that merely happened to retrieve chunks.
+    #   is_focused — the section filter actually matched something.
+    #   risk NONE  — never under the HIGH banner.
+    _sections = target_sections(message)
+    if (
+        display
+        and risk == NONE
+        and chunks
+        and is_definitional_ask(message)
+        and not is_personal_health_query(message)
+        and is_focused(chunks, _sections)
+    ):
+        # Exclude the sections that were actually RETRIEVED, not the ones the
+        # question asked for. Legacy excludes what it rendered; the agentic
+        # engine cannot know what the model wrote, but the retrieved set is a
+        # far better proxy than the target set — a compound ask whose second
+        # half never reached the prompt would otherwise be hidden from the menu
+        # despite never being shown.
+        _shown = {
+            _base_section(c.chunk_type)
+            for c in chunks
+            if _base_section(c.chunk_type) in _sections
+            or c.chunk_type in _sections
+        }
+        _menu = disclosure_menu(_shown)
+        if _menu:
+            display = display + "\n\n" + _menu
     if risk == HIGH:
         display = f"{HIGH_ESCALATION} {display}"
 
