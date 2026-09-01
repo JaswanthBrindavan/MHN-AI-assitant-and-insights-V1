@@ -621,11 +621,34 @@ async def _dispatch(
     # people to ignore it. HIGH gives the escalation banner and
     # `seek_care_promptly` without hijacking the turn. Raising only: an episode
     # can never LOWER a floor the current message set.
+    #
+    # And it does NOT fire on every turn. Reported by a reader: the escalation
+    # sentence led every single reply, including answers to "what is
+    # prediabetes", long after they had first been told. Repeating an urgent
+    # instruction on an encyclopedia question is how it stops being read — the
+    # same argument that capped this at HIGH in the first place.
+    #
+    # So the floor is skipped when THIS message is a pure corpus lookup: a
+    # reader asking what a word means is not in a moment where re-escalating
+    # helps. It still fires on anything personal, any symptom report, any
+    # follow-up — the turns where it can actually change what they do. The
+    # episode stays open either way and stays in the [P] block, so the model
+    # can still raise it in its own words when it is relevant.
+    #
+    # Note the ordering: `validate_reply` REQUIRES an escalation directive at
+    # HIGH risk, so "keep the risk but drop the banner" is not available. The
+    # only way not to repeat the sentence is not to raise the floor.
     episode_floor = NONE
     _open: list | None = None
+    _corpus_lookup = (
+        is_definitional_ask(message) and not is_personal_health_query(message)
+    )
     try:
         _open = await open_episodes(db, user_id)
-        if LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]:
+        if (
+            not _corpus_lookup
+            and LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]
+        ):
             episode_floor = HIGH
     except Exception:  # noqa: BLE001 — memory must never break a reply
         logger.warning("open-episode floor failed; using triage only", exc_info=True)

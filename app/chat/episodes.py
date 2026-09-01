@@ -125,10 +125,36 @@ _RECOVERY_RE = _re.compile(
 )
 
 
-def is_recovery_message(message: str) -> bool:
-    """The reader is saying a symptom improved — a close-out signal, not a
-    fresh complaint."""
-    return bool(_RECOVERY_RE.search(message or ""))
+# Looser close-outs. Reported by a reader who had said they were fine
+# repeatedly and kept getting the escalation banner: none of "im doing
+# fine", "i am fine now", "im fine", "im okay now", "nothing hurts now"
+# or "all settled" was recognised, so nothing was ever marked inactive.
+#
+# Matched ONLY when the message carries no triage flag of its own -- see
+# `is_recovery_message(..., has_red_flag=)`. Unguarded they are
+# negation-blind: "I am NOT fine" and "fine, but the chest pain is worse"
+# would both read as recovery, and silencing a real report is the one
+# failure this table must never produce.
+_SOFT_RECOVERY_RE = _re.compile(
+    r"\b(?:i'?m|i am|feeling|feel)\s+(?:doing\s+)?(?:fine|ok|okay|good)(?:\s+now)?\b"
+    r"|\ball (?:good|settled|fine|better)\b"
+    r"|\bnothing hurts\b|\bno (?:pain|issues?)\b"
+    r"|\bback to normal\b",
+    _re.IGNORECASE,
+)
+
+
+def is_recovery_message(message: str, *, has_red_flag: bool = False) -> bool:
+    """The reader is saying a symptom improved — a close-out, not a complaint.
+
+    ``has_red_flag`` — whether triage matched anything in THIS message. When
+    it did, only the strict phrasings count: a message that reports a red
+    flag is not a recovery report, whatever else it says.
+    """
+    text = message or ""
+    if _RECOVERY_RE.search(text):
+        return True
+    return not has_red_flag and bool(_SOFT_RECOVERY_RE.search(text))
 
 
 async def resolve(db: AsyncSession, user_id: uuid.UUID, symptom: str) -> bool:
