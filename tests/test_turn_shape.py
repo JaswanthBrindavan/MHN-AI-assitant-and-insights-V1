@@ -26,7 +26,8 @@ from app.models.core import PedigreeCondition
 from app.models.knowledge import ConditionRegistry
 from app.triage.red_flags import NONE
 
-pytestmark = pytest.mark.asyncio
+# Applied per-test: the pure-function tests lower down are sync.
+_aio = pytest.mark.asyncio
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +96,7 @@ async def _seed(db, *, with_pedigree: bool = True) -> uuid.UUID:
 # Retrieval scope
 # --------------------------------------------------------------------------
 
+@_aio
 async def test_a_named_condition_does_not_drag_the_pedigree_into_scope(
     db_session,
 ):
@@ -116,6 +118,7 @@ async def test_a_named_condition_does_not_drag_the_pedigree_into_scope(
     assert "HTN" not in scope, f"hypertension still in scope: {scope}"
 
 
+@_aio
 async def test_a_question_naming_nothing_still_uses_the_pedigree(db_session):
     """The union is right when the reader named no condition — don't lose it."""
     user = await _seed(db_session)
@@ -134,6 +137,7 @@ async def test_a_question_naming_nothing_still_uses_the_pedigree(db_session):
     "what is diabetes",
     "what are the symptoms of diabetes",
 ])
+@_aio
 async def test_a_corpus_question_reaches_no_model_at_all(db_session, question):
     """The validated profile answers this verbatim. A model adds latency only."""
     user = await _seed(db_session)
@@ -148,6 +152,7 @@ async def test_a_corpus_question_reaches_no_model_at_all(db_session, question):
     assert result.risk_level == NONE
 
 
+@_aio
 async def test_a_personal_question_still_reaches_the_model(db_session):
     """The cut must not swallow questions the corpus cannot answer."""
     user = await _seed(db_session)
@@ -158,6 +163,7 @@ async def test_a_personal_question_still_reaches_the_model(db_session):
     assert provider.calls, "a records question must still reach the model"
 
 
+@_aio
 async def test_a_bare_follow_up_still_reaches_the_model(db_session):
     user = await _seed(db_session)
     provider = CountingProvider()
@@ -165,6 +171,7 @@ async def test_a_bare_follow_up_still_reaches_the_model(db_session):
     assert provider.calls, "a follow-up must still reach the model"
 
 
+@_aio
 async def test_the_extractive_answer_carries_its_citations(db_session):
     """Zero model calls must not mean zero provenance."""
     user = await _seed(db_session)
@@ -175,6 +182,7 @@ async def test_the_extractive_answer_carries_its_citations(db_session):
     assert all(c["condition_code"] == "MC001" for c in result.citations)
 
 
+@_aio
 async def test_the_corpus_shortcut_is_gated_on_the_section_being_present(
     db_session,
 ):
@@ -199,3 +207,83 @@ async def test_the_corpus_shortcut_is_gated_on_the_section_being_present(
     assert provider.calls, (
         "the corpus lacks the definition section, so the model must still run"
     )
+
+
+# --------------------------------------------------------------------------
+# Output budget and timeout — measured in staging
+#
+# Per reply: no model call 4.6 s · one call ~25 s · two calls ~57 s, and the
+# two-call figures cluster within +/-2 s across questions of very different
+# lengths (55.8 / 56.8 / 57.8 / 58.8 / 59.8). Generation time tracks output
+# length; that flatness does not. It was an unbounded output budget.
+# --------------------------------------------------------------------------
+
+def test_the_output_budget_is_bounded_and_modest():
+    from app.config import get_settings
+
+    s = get_settings()
+    assert s.llm_max_tokens <= 1200, (
+        "an unbounded output budget is what made a reply cost ~25 s of "
+        "generation; the grounding rules ask for three sentences"
+    )
+    assert s.llm_max_tokens >= 400, (
+        "too tight truncates a required safety reminder mid-sentence"
+    )
+
+
+def test_there_is_a_real_timeout_and_a_bounded_retry_budget():
+    """There was none. SDK defaults were read=600 s x max_retries=2."""
+    from app.config import get_settings
+
+    s = get_settings()
+    assert 0 < s.llm_timeout_seconds <= 120
+    assert s.llm_max_retries <= 1
+
+
+def test_the_anthropic_client_is_built_with_both():
+    from app.llm.anthropic import AnthropicProvider
+
+    p = AnthropicProvider(
+        model="claude-sonnet-5", api_key="k", timeout=42.0, max_retries=1,
+        max_tokens=800,
+    )
+    assert p._client.timeout == 42.0
+    assert p._client.max_retries == 1
+
+
+def test_the_openai_compatible_adapter_sends_an_output_cap():
+    """It sent none at all, so the ceiling was whatever the server chose."""
+    import inspect
+
+    from app.llm import openai_compat
+
+    src = inspect.getsource(openai_compat.OpenAICompatibleProvider)
+    assert '"max_tokens": self._max_tokens' in src
+
+
+@pytest.mark.parametrize("message", [
+    "whats the diff between type 1 and type 2",
+    "what is the difference between type 1 and type 2 diabetes",
+    "type 1 vs type 2 diabetes",
+])
+def test_a_type_comparison_targets_the_classification_section(message):
+    """Measured at 59.8 s: "diff" was not a word the table knew, so a question
+    the classification section answers outright reached the full agentic loop.
+    """
+    from app.rag.extractive import is_definitional_ask
+    from app.rag.retrieval import target_sections
+
+    assert is_definitional_ask(message), message
+    assert "classification" in target_sections(message), message
+
+
+@pytest.mark.parametrize("message", [
+    "is thyroid curable",
+    "can diabetes be reversed",
+    "how does diabetes affect daily life",
+])
+def test_a_compositional_question_still_reaches_the_model(message):
+    """The corpus has no section for these. They must not be short-circuited."""
+    from app.rag.extractive import is_definitional_ask
+
+    assert not is_definitional_ask(message), message

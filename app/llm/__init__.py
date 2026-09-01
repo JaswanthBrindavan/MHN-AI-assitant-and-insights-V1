@@ -32,6 +32,9 @@ def get_provider() -> ToolCallingProvider:
             api_key=settings.llm_api_key,
             base_url=settings.llm_base_url or None,
             thinking=settings.llm_thinking,
+            max_tokens=settings.llm_max_tokens,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=settings.llm_max_retries,
         )
     if kind in ("openai_compatible", "openai"):
         from app.llm.openai_compat import OpenAICompatibleProvider
@@ -40,12 +43,16 @@ def get_provider() -> ToolCallingProvider:
             base_url=settings.llm_base_url,
             model=settings.llm_model,
             api_key=settings.llm_api_key,
+            max_tokens=settings.llm_max_tokens,
+            timeout=settings.llm_timeout_seconds,
         )
     if kind == "ollama":
         from app.llm.openai_compat import OpenAICompatibleProvider
 
         return OpenAICompatibleProvider(
-            base_url=settings.ollama_base_url, model=settings.ollama_model
+            base_url=settings.ollama_base_url, model=settings.ollama_model,
+            max_tokens=settings.llm_max_tokens,
+            timeout=settings.llm_timeout_seconds,
         )
     return FakeProvider()
 

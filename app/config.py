@@ -68,6 +68,26 @@ class Settings(BaseSettings):
     # NOT 1: two tools document a second round in their own descriptions
     # (ANALYZE_IMAGE says "get the document id from get_documents first"), and
     # at 1 the budget is exhausted before the chained call can run.
+    # Measured in staging, per reply: a turn that makes NO model call returns
+    # in 4.6 s; one model call costs ~25 s; two cost ~57 s, clustered within
+    # +/-2 s across questions of very different lengths. That flatness is the
+    # tell — it is not generation time, which tracks output length. It is an
+    # unbounded output budget being spent.
+    #
+    # 800 tokens is roughly 600 words: far above the three sentences the
+    # grounding rules ask for, so a normal answer still finishes on its own and
+    # only a runaway one is cut. Bounding it bounds the worst case.
+    llm_max_tokens: int = 800
+
+    # There was NO timeout at all. `AnthropicProvider` passed only api_key and
+    # base_url, so the SDK defaults applied: read=600 s with max_retries=2 —
+    # a stalled call could hold a reader for thirty minutes. Audit R1.
+    llm_timeout_seconds: float = 60.0
+
+    # One retry, not the SDK's two. A retry after a timeout costs another full
+    # timeout, and the pipeline already fails open to a safe reply.
+    llm_max_retries: int = 1
+
     llm_max_tool_rounds: int = 2
     # Clarifying questions the assistant may ask per session before it must
     # answer with what it has.

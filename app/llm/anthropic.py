@@ -266,8 +266,10 @@ class AnthropicProvider:
         model: str,
         api_key: str,
         base_url: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 800,
         thinking: str = "off",
+        timeout: float | None = 60.0,
+        max_retries: int = 1,
     ) -> None:
         if _DATE_SUFFIX_RE.search(model):
             raise ValueError(
@@ -278,7 +280,13 @@ class AnthropicProvider:
         self.model_name = model
         self._max_tokens = max_tokens
         self._thinking = thinking
-        client_kwargs: dict = {"api_key": api_key}
+        # A timeout and a retry budget, explicitly. Passing only api_key and
+        # base_url left the SDK defaults in force — read=600 s, max_retries=2 —
+        # so a stalled call could hold a reader for half an hour with nothing
+        # in the pipeline able to cut it short. Audit R1.
+        client_kwargs: dict = {"api_key": api_key, "max_retries": max_retries}
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
         if base_url:
             client_kwargs["base_url"] = base_url
         self._client = AsyncAnthropic(**client_kwargs)
