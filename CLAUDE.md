@@ -230,7 +230,7 @@ Original build phases 0–7 complete, plus `project_docs/implementation-plan.md`
 phases 0–4 (Tasks 1–11, 13–28). **Task 12 — retiring the legacy regex chain —
 is deliberately blocked**; see `project_docs/handover.md`.
 
-Suite green on aiosqlite (3,020 tests, clean under shuffled seeds).
+Suite green on aiosqlite (3,059 tests, clean under shuffled seeds).
 `scripts/run_evals` is 17/17 on BOTH engines. ruff + pyright clean. All
 clinical content is DRAFT.
 
@@ -256,6 +256,31 @@ POSTGRES_PASSWORD=davi -e POSTGRES_DB=davi -p 5433:5432 pgvector/pgvector:pg16`
 `CREATE EXTENSION vector;` and point `TEST_DATABASE_URL` / `TEST_ALEMBIC_URL`
 at it. The three `test_coexistence.py` failures are expected — see
 open-items C13.
+
+### A turn costs what its question is worth
+
+Measured, agentic engine: a corpus question that the validated profile answers
+verbatim makes **zero model calls** and returns in ~20 ms of server work; a
+personal or compositional question makes one to three. Before this the agentic
+engine re-implemented the expensive half of the pipeline and skipped the free
+half — `_dispatch` returns into `_dispatch_agentic` ~230 lines ABOVE
+`serve_extractive`, so it could not reach it. "what is diabetes" cost 4,291
+prompt tokens, 84% of them unusable for the answer, and two round trips.
+
+Three rules fell out of that and should not be quietly reverted:
+
+- **The pedigree is not unioned into retrieval scope when the message names its
+  own condition.** It reaches the answer through `[P]` instead. Unioning it let
+  `spread_across_conditions` guarantee an off-topic profile a slot, so a
+  diabetes question cited hypertension.
+- **`max_tokens` is a truncation guard, not a brevity control.** Brevity is a
+  prompt rule. A tool-calling round gets its own, larger budget — capping both
+  at the answer budget truncated the round and produced an EMPTY answer, which
+  the validator then replaced with the safe reply.
+- **The episode floor does not fire on a corpus lookup or on a recovery
+  message.** `validate_reply` REQUIRES an escalation directive at HIGH, so
+  "keep the risk, drop the banner" is not available: the only way to stop
+  repeating the sentence is not to raise the floor.
 
 ### The bypass class — the thing that keeps recurring
 
