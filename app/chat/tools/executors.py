@@ -24,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.abilities import (
     DocumentQuery,
+    StatedValue,
+    SummaryQuery,
     find_relation,
     normalize_document_kinds,
     tracker_query_for,
@@ -46,9 +48,14 @@ from app.chat.data_handlers import (
     handle_value_check,
     perform_medication_write,
 )
+from app.chat.tools.definitions import VALUE_CHECK_METRICS
 from app.coredata.service import document_owner
 from app.drugs.service import build_drug_reply, find_drug, find_substitutes
-from app.rag.extractive import build_extractive_answer, is_focused
+from app.rag.extractive import (
+    build_extractive_answer,
+    is_focused,
+    rendered_chunks,
+)
 from app.rag.retrieval import (
     resolve_scope,
     retrieve_chunks,
@@ -64,10 +71,14 @@ from app.rag.retrieval import (
 # its own chart trips the guard and has its whole reply replaced. It travels
 # OUT OF BAND instead, under `_visual`, which execute_tool lifts off the
 # payload before serialising and hands to the caller for the ChatResult.
-_PASSTHROUGH = ("documents", "citations")
+_PASSTHROUGH = ("documents",)
 
-#: Payload key carrying data for the caller, never for the model.
+#: Payload keys carrying data for the caller, never for the model.
 OUT_OF_BAND_VISUAL = "_visual"
+#: Corpus chunks the handler RENDERED — the caller cites these. They used
+#: to travel as a "citations" passthrough, i.e. straight into the prompt,
+#: where the model spent tokens on them and the caller never saw them.
+OUT_OF_BAND_SOURCES = "_sources"
 
 
 def _unwrap(ability: dict | None, **extra) -> dict | None:
@@ -84,6 +95,8 @@ def _unwrap(ability: dict | None, **extra) -> dict | None:
             payload[key] = ability[key]
     if ability.get("visual"):
         payload[OUT_OF_BAND_VISUAL] = ability["visual"]
+    if ability.get("used_chunks"):
+        payload[OUT_OF_BAND_SOURCES] = ability["used_chunks"]
     return payload
 
 
@@ -93,7 +106,12 @@ async def get_latest_metric(
     metric = str(args.get("metric", "")).strip()
     if not metric:
         return None
-    ability = await handle_metric_query(db, user_id, f"what is my latest {metric}")
+    # The tool description tells the model to send underscore keys
+    # ("blood_pressure"), and this parser reads English. Without the swap a
+    # reader WITH a reading on file was told there was none -- the same bug
+    # already fixed in check_value_against_range, left standing in its sibling.
+    spoken = metric.replace("_", " ")
+    ability = await handle_metric_query(db, user_id, f"what is my latest {spoken}")
     if ability is None:
         return None
     prov = ability.get("provenance", {})
@@ -143,11 +161,14 @@ async def get_documents(
 async def check_value_against_range(
     db: AsyncSession, user_id: uuid.UUID, args: dict, session_id
 ) -> dict | None:
-    metric = str(args.get("metric", "")).strip()
+    metric = str(args.get("metric", "")).strip().lower().replace(" ", "_")
     value = args.get("value")
     if not metric or value is None:
         return None
-    if _WEARABLE_GRADE_RE.search(metric):
+    # Off-enum, whatever the schema says. A wearable term here is the refusal;
+    # anything else is a metric with no reference range, which is the same
+    # answer for a different reason.
+    if metric not in VALUE_CHECK_METRICS or _WEARABLE_GRADE_RE.search(metric):
         # Davi has no reference ranges for wearable metrics and the client
         # contract forbids putting a band or grade on one. A sentence in the
         # tool description is not a guard -- this repo's own recurring lesson.
@@ -161,9 +182,17 @@ async def check_value_against_range(
             ),
         }
     secondary = args.get("secondary")
-    reading = f"{value}/{secondary}" if secondary is not None else f"{value}"
+    # STRUCTURED, not a synthesised English sentence for `parse_stated_value`
+    # to re-read: "my blood_sugar is 117" resolved to nothing, and "my random
+    # glucose is 130" resolved to the FASTING band. Same reason
+    # `handle_tracker_query` and `handle_summary_query` take a parsed query.
     ability = await handle_value_check(
-        db, user_id, f"my {metric} is {reading}", session_id
+        db, user_id, "", session_id,
+        stated=StatedValue(
+            metric=metric,
+            value=float(value),
+            secondary=float(secondary) if secondary is not None else None,
+        ),
     )
     return _unwrap(ability, metric=metric, value=value, secondary=secondary)
 
@@ -186,9 +215,15 @@ async def log_lifestyle_entry(
 async def get_health_summary(
     db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
 ) -> dict | None:
-    period = str(args.get("period", "week"))
+    # Structured argument straight through, as get_documents and
+    # get_tracker_total do. Synthesising an English sentence for the free-text
+    # parser to re-read is the bug that made every document tool call return
+    # nothing, and it would silently drop an unrecognised period to "week".
+    period = str(args.get("period") or "week")
+    if period not in ("week", "month", "year"):
+        period = "week"
     ability = await handle_summary_query(
-        db, user_id, f"health summary for the {period}"
+        db, user_id, "", query=SummaryQuery(period=period)
     )
     return _unwrap(ability, period=period)
 
@@ -296,9 +331,8 @@ async def get_condition_guidance(
     if not scope:
         return None
     chunks = await retrieve_chunks(db, scope, query, k=4)
-    reply = build_extractive_answer(
-        chunks, focused=is_focused(chunks, target_sections(query))
-    )
+    focused = is_focused(chunks, target_sections(query))
+    reply = build_extractive_answer(chunks, focused=focused)
     if reply is None:
         return None
     return {
@@ -310,6 +344,10 @@ async def get_condition_guidance(
         },
         "condition": condition,
         "section": section or "definition",
+        # This tool runs its OWN scoped retrieval, so the turn-level
+        # retrieval the caller holds is a different set entirely. Cite
+        # what the reply actually quotes.
+        OUT_OF_BAND_SOURCES: rendered_chunks(chunks, focused=focused),
     }
 
 
