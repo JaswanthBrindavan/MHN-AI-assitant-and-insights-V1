@@ -1317,7 +1317,9 @@ async def _build_citations(
 
 
 async def _agentic_citations(
-    db: AsyncSession, chunks: list[RetrievedChunk]
+    db: AsyncSession,
+    chunks: list[RetrievedChunk],
+    carried: set[str] | None = None,
 ) -> list[dict] | None:
     """Sources CONSULTED on the agentic path.
 
@@ -1339,13 +1341,23 @@ async def _agentic_citations(
     """
     if not chunks:
         return None
+    # Chunks whose condition came ONLY from topic carry-forward are dropped.
+    # Measured in staging: "sugar ke lakshan kya hote hain" — a question about
+    # diabetes — cited MC051 (hypertension) four times, because an earlier turn
+    # about a blood-pressure tablet had pulled it into scope and the model then
+    # ignored it. A citation the answer plainly did not use is worse than none:
+    # it tells the reader the wrong profile was consulted.
+    shown = [
+        c for c in chunks
+        if not carried or c.condition_code not in carried
+    ] or chunks
     try:
         index = await load_condition_index(db)
     except Exception:  # noqa: BLE001 — citations must never break a reply
         index = None
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    for chunk in chunks:
+    for chunk in shown:
         key = (chunk.condition_code, chunk.chunk_type)
         if key in seen:
             continue
@@ -1353,6 +1365,7 @@ async def _agentic_citations(
         display = chunk.condition_code
         if index is not None and chunk.condition_code in index.by_code:
             display = index.by_code[chunk.condition_code].display_name
+        section = _base_section(chunk.chunk_type)
         out.append(
             {
                 "source": "mcp_master_profile",
@@ -1360,6 +1373,9 @@ async def _agentic_citations(
                 "condition_code": chunk.condition_code,
                 "section": chunk.chunk_type,
                 "display_name": display,
+                # A client that renders one field showed "MC051" four times.
+                # Give it something a reader can actually read.
+                "label": f"{display} — {section.replace('_', ' ')}",
             }
         )
     return out or None
@@ -1761,7 +1777,10 @@ async def _dispatch_agentic(
         ),
         provenance=provenance,
         # Not when the reply was replaced: safe_reply shows none of this.
-        citations=None if degraded else await _agentic_citations(db, chunks),
+        citations=(
+            None if degraded
+            else await _agentic_citations(db, chunks, carried=_carried)
+        ),
         language=lang,
         trace=trace,
     )

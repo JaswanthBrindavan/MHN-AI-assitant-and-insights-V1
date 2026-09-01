@@ -220,7 +220,11 @@ def render_for_prompt(episodes: list[Episode]) -> str:
         "better yet: " + "; ".join(parts) + ". If this message looks like a "
         "follow-up about one of them, treat it as the SAME ongoing episode "
         "rather than a new complaint — and if something has lasted longer or "
-        "worsened, say so plainly and suggest they get it looked at."
+        "worsened, say so plainly and suggest they get it looked at. "
+        "Otherwise do NOT bring these up: answer only what was asked. Raise "
+        "one unprompted only if it is genuinely urgent and the recent turns "
+        "show you have not already raised it — a check-in repeated every turn "
+        "stops being heard, and it derails a reader who asked something else."
     )
 
 

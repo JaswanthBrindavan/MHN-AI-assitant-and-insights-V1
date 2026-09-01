@@ -54,10 +54,12 @@ _GROUNDING_RULES = (
     "numbers. Keep the answer brief and plain-English."
     " Each retrieved block is labelled with its section, as [n] (section). "
     "Answer from the block whose section matches the question and ignore the "
-    "others. Two or three sentences is usually enough — expand only when the "
-    "reader asks for more detail, or when a required safety reminder or a "
-    "clarifying confirmation applies, both of which always take precedence "
-    "over brevity."
+    "others. LENGTH: at most three sentences, and stop — a reader asked a "
+    "question, not for an essay. Do not restate the question, do not add a "
+    "closing summary, and do not append advice nobody asked for. Expand past "
+    "three sentences ONLY when the reader asks for more detail, or when a "
+    "required safety reminder or a clarifying confirmation applies; those two "
+    "always take precedence over brevity."
 )
 
 # When the [P] block carries the reader's OWN recorded data (lifestyle, vitals,
