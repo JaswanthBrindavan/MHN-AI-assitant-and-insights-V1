@@ -54,6 +54,7 @@ from app.chat.episodes import open_episodes
 from app.chat.episodes import worst_level as episodes_worst_level
 from app.chat.medication_flow import handle_medication_turn
 from app.chat.replies import (
+    CARRIED_ESCALATION,
     GREETING_REPLIES,
     HIGH_ESCALATION,
     IDENTITY_REPLIES,
@@ -613,6 +614,14 @@ async def _dispatch(
     except Exception:  # noqa: BLE001 — memory must never break a reply
         logger.warning("open-episode floor failed; using triage only", exc_info=True)
         record_fail_open("episode_floor")
+    # Which banner the reply leads with. When the floor comes from an
+    # unresolved EARLIER episode and this message raised nothing itself,
+    # "some of what you describe" is false — see CARRIED_ESCALATION.
+    escalation = (
+        CARRIED_ESCALATION
+        if episode_floor == HIGH and LEVEL_ORDER[risk] < LEVEL_ORDER[HIGH]
+        else HIGH_ESCALATION
+    )
     risk = max_level(risk, episode_floor)
     # Every reply composes in English; when the pivot is active the sidecar
     # translates the final text into the user's language and script. lang is
@@ -637,6 +646,13 @@ async def _dispatch(
     if tr.matched:
         t("Safety triage",
           f"{risk.upper()} — matched: {', '.join(repr(m) for m in tr.matched_terms[:4])}")
+    elif episode_floor != NONE:
+        # Saying "no red flags detected" beside a seek-care banner reads as a
+        # contradiction and hides WHY the turn escalated. This message raised
+        # nothing; an earlier unresolved one did.
+        t("Safety triage",
+          f"{risk.upper()} — nothing in this message, carried from an earlier "
+          "symptom you have not said has settled")
     else:
         t("Safety triage", "no red flags detected")
     t("Language", LANGUAGE_NAMES.get(lang, lang))
@@ -783,7 +799,7 @@ async def _dispatch(
         t("Engine", "agentic — the assistant can look things up for itself")
         return await _dispatch_agentic(
             db, user_id, message, provider, session_id, tr, risk, lang,
-            trace, t, pivot=pivot, episodes=_open,
+            trace, t, pivot=pivot, episodes=_open, escalation=escalation,
         )
 
     # 4) Deterministic data abilities — documents, tracker adds, metric
@@ -1031,7 +1047,7 @@ async def _dispatch(
               "content (no model call)")
             display = extractive
             if risk == HIGH:
-                display = f"{HIGH_ESCALATION} {display}"
+                display = f"{escalation} {display}"
             verdict = validate_reply(display, risk)
             if not verdict.ok:
                 t("Output validation",
@@ -1171,7 +1187,7 @@ async def _dispatch(
         else:
             display = strip_markers(grounded_answer)
             if risk == HIGH:
-                display = f"{HIGH_ESCALATION} {display}"
+                display = f"{escalation} {display}"
             # Numeric fidelity — the SAME ladder the agentic engine has always
             # run, on the engine that answers real users (audit high: drifted
             # lab values, misquoted readings and invented doses passed here
@@ -1483,6 +1499,7 @@ async def _dispatch_agentic(
     t,
     pivot: InboundPivot | None = None,
     episodes: list | None = None,
+    escalation: str = HIGH_ESCALATION,
 ) -> ChatResult:
     """The tool-driven path.
 
@@ -1632,7 +1649,7 @@ async def _dispatch_agentic(
         if _menu:
             display = display + "\n\n" + _menu
     if risk == HIGH:
-        display = f"{HIGH_ESCALATION} {display}"
+        display = f"{escalation} {display}"
 
     degraded: str | None = None
 
@@ -1658,7 +1675,7 @@ async def _dispatch_agentic(
             return False
         candidate = strip_markers(rewritten)
         if risk == HIGH:
-            candidate = f"{HIGH_ESCALATION} {candidate}"
+            candidate = f"{escalation} {candidate}"
         retry_ok, _ = values_traceable(candidate, sources)
         if not retry_ok:
             return False

@@ -84,6 +84,26 @@ HIGH_ESCALATION = (
     "promptly — contact a doctor or urgent care now rather than waiting."
 )
 
+# The same escalation, for a turn the reader did NOT raise anything in.
+#
+# When the floor comes from an unresolved earlier red flag rather than this
+# message, "some of what you describe" is simply false — they asked "what is
+# diabetes?" and described nothing. Measured in staging: that opening sentence
+# led a definition of diabetes, which reads as the assistant misunderstanding
+# the question, and an escalation that looks like a mistake is one people learn
+# to skip.
+# NOTE the wording is constrained: `validation.has_escalation` requires a real
+# directive from `_ESCALATION_MARKERS`, and it is right to. The first draft here
+# said "get it looked at promptly", which carries no marker — every carried-
+# escalation reply failed validation and was replaced by the safe reply, which
+# then led with the very sentence this variant exists to avoid. Keep
+# "seek medical care promptly" (or another marker) in any rewording.
+CARRIED_ESCALATION = (
+    "Before that — you mentioned something earlier that can be serious and "
+    "have not told me it has settled. Please seek medical care promptly about "
+    "it rather than waiting."
+)
+
 # Supportive self-harm reply. Tele-MANAS 14416 is India's national 24x7
 # mental-health helpline; the digit-fidelity check in app/translate/service.py
 # guarantees the number survives machine translation.
