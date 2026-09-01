@@ -1703,8 +1703,16 @@ async def _dispatch_agentic(
     # reader's language, and a per-reader prefix caches for nobody.
     system: list[str] = [stable, "\n\n".join(p for p in (volatile, directive) if p)]
 
+    # Charts the tools rendered. They travel OUT OF BAND -- an SVG is prompt
+    # the model cannot read, but the client still needs it, and until now the
+    # agentic engine built the chart, paid for it in tokens and then dropped
+    # it, so the same question returned a chart on legacy and none here.
+    tool_visuals: list[dict] = []
+
     async def _executor(call):
-        return await execute_tool(db, user_id, call, session_id)
+        return await execute_tool(
+            db, user_id, call, session_id, visuals=tool_visuals
+        )
 
     # Tools are offered only at NONE risk. A red flag stays on the safe path so
     # nothing can delay or dilute an escalation.
@@ -1898,6 +1906,7 @@ async def _dispatch_agentic(
             None if degraded
             else await _agentic_citations(db, chunks, carried=_carried)
         ),
+        visual=None if degraded else (tool_visuals[0] if tool_visuals else None),
         language=lang,
         trace=trace,
     )

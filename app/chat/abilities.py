@@ -823,7 +823,7 @@ def parse_section_detail_query(message: str) -> str | None:
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class TrackerQuery:
-    source: str   # "lifestyle" (summed) | "manual" (latest value)
+    source: str   # "lifestyle" (summed) | "manual" (latest) | "wearable" (Sahha)
     key: str
     period: str   # week | month | year
 
@@ -836,8 +836,17 @@ _TRACKER_TERMS: tuple[tuple[str, str, str], ...] = (
     (r"\btea\b", "lifestyle", "tea"),
     (r"\balcohol\b|\bdrink(?:s|ing)? alcohol\b|\bbeer\b|\bwine\b", "lifestyle", "alcohol"),
     (r"\bsmok(?:e|ed|ing)\b|\bcigarette", "lifestyle", "smoking"),
-    (r"\bsteps?\b|\bwalk(?:ed|ing)?\b", "manual", "steps"),
-    (r"\bsleep(?:ing)?\b|\bslept\b", "manual", "sleep"),
+    # Wearable metrics fall back to manual_tracking (steps, sleep) or to the
+    # logged vital (resting heart rate) when Sahha has nothing, so an account
+    # with no connected device keeps the answer it had.
+    (r"\bsteps?\b|\bwalk(?:ed|ing)?\b", "wearable", "steps"),
+    (r"\bsleep(?:ing)?\b|\bslept\b", "wearable", "sleep_duration"),
+    # NOT a bare "heart rate": this handler runs six slots ABOVE
+    # handle_metric_query, so a bare term would hijack "what is my heart rate"
+    # away from vital_reading.
+    (r"\bresting heart rate\b|\brhr\b", "wearable", "heart_rate_resting"),
+    (r"\bhrv\b|\bheart rate variability\b", "wearable",
+     "heart_rate_variability_sdnn"),
     (r"\bcalorie", "manual", "calories"),
     # Medications come from medicine_tracking, not a habit log. Without this,
     # "show me my meds" fell through to the data-query router and came back
@@ -870,6 +879,24 @@ def _tracker_period(low: str) -> str:
     if re.search(r"\byear\b", low):
         return "year"
     return "week"
+
+
+def tracker_query_for(metric: str, period: str) -> TrackerQuery | None:
+    """Resolve a TOOL's structured metric argument against the same term table.
+
+    Shares ``_TRACKER_TERMS`` with the free-text parser, so the tool and the
+    legacy chain can never disagree about what "sleep" means, but skips the
+    framing/norm/advice guards: a tool call is already an explicit request for
+    a lookup, and synthesising an English sentence for a parser to re-read is
+    how ``get_documents`` came to answer nothing on the agentic engine.
+    """
+    low = metric.strip().lower()
+    if period not in ("week", "month", "year"):
+        period = "week"
+    for pattern, source, key in _TRACKER_TERMS:
+        if re.search(pattern, low):
+            return TrackerQuery(source=source, key=key, period=period)
+    return None
 
 
 def parse_tracker_query(message: str) -> TrackerQuery | None:

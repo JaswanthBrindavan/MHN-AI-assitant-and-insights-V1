@@ -26,9 +26,12 @@ from app.chat.abilities import (
     DocumentQuery,
     find_relation,
     normalize_document_kinds,
+    tracker_query_for,
 )
 from app.chat.context import build_patient_context
 from app.chat.data_handlers import (
+    _NO_WEARABLE_RANGE,
+    _WEARABLE_GRADE_RE,
     handle_ai_result_query,
     handle_doctor_consult_query,
     handle_document_query,
@@ -39,6 +42,7 @@ from app.chat.data_handlers import (
     handle_suggestion_query,
     handle_summary_query,
     handle_tracker_add,
+    handle_tracker_query,
     handle_value_check,
     perform_medication_write,
 )
@@ -52,7 +56,18 @@ from app.rag.retrieval import (
 )
 
 # Keys a handler may return that the model can use directly.
-_PASSTHROUGH = ("documents", "visual", "citations")
+#
+# "visual" is NOT one of them. A rendered chart is ~3.3 KB of SVG — roughly
+# 900 prompt tokens on a high-traffic tool — that the model cannot read and
+# has no use for, and its numbers are a fidelity trap besides: the SVG stores
+# a bar as `58</text>` while the values list holds `58.0`, so a model quoting
+# its own chart trips the guard and has its whole reply replaced. It travels
+# OUT OF BAND instead, under `_visual`, which execute_tool lifts off the
+# payload before serialising and hands to the caller for the ChatResult.
+_PASSTHROUGH = ("documents", "citations")
+
+#: Payload key carrying data for the caller, never for the model.
+OUT_OF_BAND_VISUAL = "_visual"
 
 
 def _unwrap(ability: dict | None, **extra) -> dict | None:
@@ -67,6 +82,8 @@ def _unwrap(ability: dict | None, **extra) -> dict | None:
     for key in _PASSTHROUGH:
         if ability.get(key):
             payload[key] = ability[key]
+    if ability.get("visual"):
+        payload[OUT_OF_BAND_VISUAL] = ability["visual"]
     return payload
 
 
@@ -130,6 +147,19 @@ async def check_value_against_range(
     value = args.get("value")
     if not metric or value is None:
         return None
+    if _WEARABLE_GRADE_RE.search(metric):
+        # Davi has no reference ranges for wearable metrics and the client
+        # contract forbids putting a band or grade on one. A sentence in the
+        # tool description is not a guard -- this repo's own recurring lesson.
+        return {
+            "graded": False,
+            "metric": metric,
+            "deterministic_reply": _NO_WEARABLE_RANGE["reply"],
+            "note": (
+                "There is no reference range for wearable readings. Report "
+                "the figure; do not call it high, low, normal or reassuring."
+            ),
+        }
     secondary = args.get("secondary")
     reading = f"{value}/{secondary}" if secondary is not None else f"{value}"
     ability = await handle_value_check(
@@ -161,6 +191,45 @@ async def get_health_summary(
         db, user_id, f"health summary for the {period}"
     )
     return _unwrap(ability, period=period)
+
+
+async def get_tracker_total(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    # Structured arguments straight through, as get_documents does. The
+    # enum value is resolved against the SAME _TRACKER_TERMS table the free-text
+    # parser uses, so the two engines cannot answer the same question with
+    # different numbers.
+    query = tracker_query_for(
+        str(args.get("metric") or ""), str(args.get("period") or "week")
+    )
+    if query is None:
+        # NOT None: registry turns a None payload into "Nothing on file for
+        # that", and a metric this tool does not cover is not the reader
+        # having no data. "heart rate", "blood pressure" and "weight" all
+        # land here and are all data this app holds.
+        return {
+            "found": False,
+            "note": (
+                "This tool does not track that. It is NOT a statement that "
+                "the reader has no such data — use get_latest_metric for "
+                "vitals and body measurements before saying anything is "
+                "missing."
+            ),
+            "metric": str(args.get("metric") or ""),
+        }
+    ability = await handle_tracker_query(db, user_id, "", query=query)
+    # Report the metric and period the READ actually used, not the ones asked
+    # for: the handler resolves an HRV sibling, falls back from the wearable to
+    # a manual log, and clamps a month/year ask to the weekly rollup it has.
+    # A payload naming a window the number does not cover is what lets the
+    # model paraphrase a week's total as a month's.
+    provenance = (ability or {}).get("provenance", {})
+    return _unwrap(
+        ability,
+        metric=provenance.get("metric", query.key),
+        period=provenance.get("period", query.period),
+    )
 
 
 async def get_family_members(

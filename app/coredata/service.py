@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 import sqlalchemy as sa
 from sqlalchemy import func, select
@@ -40,6 +41,8 @@ from app.models.coredata import (
     Prescription,
     Relation,
     Report,
+    SahhaDailyTotal,
+    SahhaWeeklyTotal,
     ScanImaging,
     Vaccination,
     VitalReading,
@@ -699,6 +702,172 @@ async def latest_manual_metrics(
             unit=r.unit or _MANUAL_UNIT.get(r.type),
         )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Wearable (Sahha) rollups — read only
+# --------------------------------------------------------------------------- #
+# Per-metric aggregation, ported from mhn-spring's SahhaMetricCatalog. The
+# rollups carry NO unit column and their `total` is a SUM regardless, so this
+# table is the only thing that stops a week of resting heart rate reading as
+# ~420 bpm.
+#
+# metric -> (display label, unit as stored, is_sum)
+SAHHA_METRICS: dict[str, tuple[str, str, bool]] = {
+    "steps":                        ("steps",              "count",  True),
+    "sleep_duration":               ("sleep",              "minute", True),
+    "heart_rate_resting":           ("resting heart rate", "bpm",    False),
+    "heart_rate_variability_sdnn":  ("HRV (SDNN)",         "ms",     False),
+    "heart_rate_variability_rmssd": ("HRV (RMSSD)",        "ms",     False),
+}
+
+# SDNN and RMSSD are DIFFERENT measures of the same thing, and which one a
+# device reports is the device's choice. Asking for one and finding nothing is
+# not an answer -- read the sibling before saying the reader has no HRV. They
+# are never merged: the label names whichever one answered.
+HRV_SIBLING = {
+    "heart_rate_variability_sdnn": "heart_rate_variability_rmssd",
+    "heart_rate_variability_rmssd": "heart_rate_variability_sdnn",
+}
+
+
+def sahha_meta(metric: str) -> tuple[str, str, bool]:
+    """Catalogue entry for a metric, or a bare-number default for an unknown one.
+
+    Sahha's vocabulary grows, so an unrecognised metric must degrade to a
+    number without a unit -- never a KeyError in a read path.
+    """
+    return SAHHA_METRICS.get(metric, (metric, "", False))
+
+
+@dataclass(frozen=True)
+class WearablePoint:
+    bucket_start: date
+    value: float   # the SUM for sum-metrics, total/entries for the rest
+    entries: int
+
+
+_SAHHA_GRAIN = {"day": SahhaDailyTotal, "week": SahhaWeeklyTotal}
+
+
+def _headline(metric: str, total: float | Decimal, entries: int) -> float:
+    """total for SUM metrics, the mean otherwise — mhn-spring's own formula
+    (SahhaHealthServiceImpl.headline: `total` when SUM or entries == 1, else
+    total/entries at 2dp HALF_UP). Copied so the two agree.
+
+    The division is done in Decimal with ROUND_HALF_UP, not with `round()`:
+    Python rounds a tie to even and Java's BigDecimal rounds it up, so 421/8
+    is 52.62 one side and 52.63 the other. Ties land whenever `entries` is a
+    power of two, which is ordinary, and chat and the app must not print
+    different numbers for the same week.
+
+    An unknown metric defaults to the MEAN, never the sum: a mean of a counter
+    reads low, while a sum of a rate reads like a medical emergency.
+    """
+    is_sum = sahha_meta(metric)[2]
+    if is_sum or entries == 1:
+        return float(total)
+    if entries < 1:
+        # No readings means no mean. `wearable_totals` drops these rows; this
+        # keeps a direct caller from dividing by zero -- and from the older
+        # `entries <= 1` behaviour, which showed a week's SUM of resting heart
+        # rate (420 bpm) as if it were the average.
+        return 0.0
+    mean = (Decimal(str(total)) / Decimal(entries)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    return float(mean)
+
+
+def wearable_display(metric: str, value: float) -> tuple[float, str]:
+    """One headline value in the units a PERSON is shown, and that unit.
+
+    Sleep is stored in MINUTES and shown in hours. This is the only place that
+    conversion happens, so the sentence and the chart cannot disagree about the
+    same week -- a chart of raw minutes beside a sentence in hours is two
+    different answers to one question.
+    """
+    unit = sahha_meta(metric)[1]
+    if unit == "minute":
+        return round(value / 60, 1), "h"
+    if unit == "count":
+        return round(value), "steps"
+    # Never more than the 2dp mhn-spring's own mean carries. A single-reading
+    # bucket passes numeric(16,4) straight through, and "59.995 bpm" reads as
+    # instrument-grade precision no wrist device has.
+    return round(value, 2), unit
+
+
+def format_wearable(metric: str, value: float) -> str:
+    """Reader-facing text for one headline value."""
+    shown, unit = wearable_display(metric, value)
+    if unit == "h":
+        return f"{shown:.1f} h"
+    if unit == "steps":
+        return f"{shown:,.0f} steps"
+    return f"{shown:g} {unit}".strip()
+
+
+async def wearable_totals(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    metric: str,
+    *,
+    grain: str = "day",
+    limit: int = 7,
+    since: date | None = None,
+    until: date | None = None,
+) -> list[WearablePoint]:
+    """The last `limit` buckets for one wearable metric, oldest first.
+
+    Reads the PRE-AGGREGATED rollup rather than recomputing from
+    sahha_biomarker: it is the number mhn-spring's own charts show; weekly
+    buckets open on SUNDAY, which Python's Monday-based weekday()/isocalendar()
+    would shift by a day; `day` was assigned in Spring's write-time zone, which
+    is not recoverable from the data; and the rollups were built
+    `WHERE value IS NOT NULL`, so non-numeric metrics (sleep_start_time and
+    friends) can never appear here.
+
+    A bucket with no readings is an ABSENT ROW, not a zero. Gaps stay gaps.
+
+    ``since``/``until`` bound ``bucket_start`` to a HALF-OPEN CALENDAR span,
+    never to a rolling `window_start()` offset: these are calendar buckets, and
+    slicing them by "now minus N days" includes or drops an edge bar depending
+    on the hour the question is asked. Bounded, because the last N buckets that
+    EXIST are not the last N days -- for a sparse or lapsed device they can span
+    months, and the chart's bars have to be the days the sentence's total
+    covers or a reader who adds them up gets a different figure with no way to
+    see why. Unbounded is still available and still means "the last N rows".
+
+    A row with ``entries < 1`` is dropped: a bucket holding no readings carries
+    no number, and for an AVERAGE metric there is nothing to divide by.
+    """
+    model = _SAHHA_GRAIN[grain]
+    where = [model.user_id == user_id, model.metric == metric, model.entries >= 1]
+    if since is not None:
+        where.append(model.bucket_start >= since)
+    if until is not None:
+        where.append(model.bucket_start < until)
+    rows = (
+        await db.execute(
+            select(model)
+            .where(*where)
+            .order_by(model.bucket_start.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    points = [
+        WearablePoint(
+            bucket_start=r.bucket_start,
+            # r.total NOT floated first: numeric(16,4) arrives as a Decimal on
+            # Postgres and the exact value is what the HALF_UP mean needs.
+            value=_headline(metric, r.total, r.entries),
+            entries=r.entries,
+        )
+        for r in rows
+    ]
+    points.reverse()          # chronological, for charting
+    return points
 
 
 # --------------------------------------------------------------------------- #

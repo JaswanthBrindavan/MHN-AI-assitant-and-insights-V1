@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import timedelta
+from dataclasses import replace
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,7 @@ from app.chat.abilities import (
     StatedValue,
     SummaryQuery,
     TrackerAdd,
+    TrackerQuery,
     param_tokens,
     parse_ai_result_query,
     parse_doctor_consult_query,
@@ -43,8 +45,11 @@ from app.coredata.service import (
     _MANUAL_UNIT,
     _RESOURCE_TYPE,
     DOCUMENT_KINDS,
+    HRV_SIBLING,
+    WearablePoint,
     active_medications,
     add_lifestyle_log,
+    format_wearable,
     latest_body_measurement,
     latest_documents,
     latest_manual_metrics,
@@ -54,7 +59,10 @@ from app.coredata.service import (
     recent_doctor_consults,
     resolve_family_member,
     resolve_family_member_by_name,
+    sahha_meta,
     vital_series,
+    wearable_display,
+    wearable_totals,
     window_start,
 )
 
@@ -254,6 +262,33 @@ def _reclassify_glucose(value: float, *, fasting: bool) -> dict:
     }
 
 
+# A wearable number is never graded. Davi has no reference ranges for sleep,
+# steps, HRV or a wrist-measured resting heart rate, and the client contract
+# forbids putting a band, grade or traffic light on one -- 48 bpm in a trained
+# reader is not a finding. It lives here, next to the handler both engines
+# reach, so the reader's own typed phrasing is covered too; the tool executor
+# checks its structured `metric` argument against the same pattern, because a
+# metric this parser cannot read ("hrv") would otherwise slip past.
+# A bare clinic pulse ("my heart rate is 72") is untouched.
+_WEARABLE_GRADE_RE = re.compile(
+    r"\bresting heart rate\b|\brhr\b|\bhrv\b|"
+    r"\bheart rate variability\b|\bsleep\b|\bsteps?\b",
+    re.IGNORECASE,
+)
+_NO_WEARABLE_RANGE: dict = {
+    "reply": (
+        "I don't have a reference range for wearable readings like resting "
+        "heart rate, heart rate variability, sleep or steps, so I can't tell "
+        "you whether that figure is high or low. What is normal there depends "
+        "on the device and on the person. I can show you what your device "
+        "recorded, and your doctor is the right person to say what it means "
+        "for you."
+    ),
+    "action": "discuss_with_clinician",
+    "provenance": {"path": "value_check", "declined": "wearable_no_range"},
+}
+
+
 async def handle_value_check(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -270,6 +305,10 @@ async def handle_value_check(
     """
     stated = parse_stated_value(message)
     if stated is not None:
+        # Gated on a PARSED value on purpose: an unqualified match would swallow
+        # "how much sleep did I get this week", which is a lookup, not a grade.
+        if _WEARABLE_GRADE_RE.search(message):
+            return _NO_WEARABLE_RANGE
         backend = await _try_backend(db, user_id, stated.metric, stated.value)
         if backend is not None:
             return backend
@@ -659,6 +698,9 @@ async def handle_metric_query(
                     [p.at.strftime("%d %b") for p in series],
                     [p.value for p in series],
                     unit=unit,
+                    source="vital",
+                    metric=query.metric,
+                    window_days=30,
                 )
     elif spec["source"] == "body":
         point = await latest_body_measurement(db, user_id, spec["body_type"])
@@ -764,6 +806,10 @@ async def handle_summary_query(
             f"Lifestyle totals — {label}",
             labels,
             [totals[k] for k in labels],
+            source="lifestyle",
+            window_days={"week": 7, "month": 30, "year": 365}.get(
+                query.period, 7
+            ),
         )
     return {
         "reply": (
@@ -1455,18 +1501,91 @@ _TRACKER_PHRASE = {
     "smoking": ("cigarette", "cigarettes"),
 }
 _PERIOD_WORDS = {"week": "7 days", "month": "30 days", "year": "year"}
+# Wearable metric → the manual_tracking type that answers it when no device is
+# connected. heart_rate_resting has no manual twin but vital_reading does, so
+# it falls through to handle_metric_query instead (see below).
+_WEARABLE_MANUAL = {"steps": "steps", "sleep_duration": "sleep"}
+
+
+def _fresh_buckets(
+    points: list[WearablePoint], window_open: date
+) -> list[WearablePoint]:
+    """Drop WEEKLY rollups that ended before the asked-about window opened.
+
+    ``wearable_totals`` returns the last rows that EXIST, at any age. Without
+    this a device that stopped syncing a year ago answers "how did I sleep this
+    week" with last August's number, in the present tense — and one stale
+    weekly row permanently outranks a manual entry logged yesterday, because
+    the fall-through fires only on "no rows at all".
+    """
+    return [
+        p for p in points
+        if p.bucket_start + timedelta(days=7) >= window_open
+    ]
+
+
+async def _wearable_chart(
+    db: AsyncSession, user_id: uuid.UUID, metric: str, label: str,
+    headline: WearablePoint,
+) -> dict | None:
+    """The daily bars for exactly the week the sentence names.
+
+    Not "the last 7 daily rows": those straddle two weekly buckets on every day
+    but the week's last, so the bars did not add up to the total printed above
+    them, and for a sparse device they could span months under a "last 7 days"
+    title. Chart text passes through no validator on either engine, so a wrong
+    title is permanent.
+
+    Every day of the week gets a slot, ``None`` where the device recorded
+    nothing — the run of slots is the axis for both mobile clients, and a
+    measured 0 and an unmeasured day are different readings.
+    """
+    start = headline.bucket_start
+    days = [start + timedelta(days=i) for i in range(7)]
+    daily = await wearable_totals(
+        db, user_id, metric, grain="day", limit=7,
+        since=start, until=start + timedelta(days=7),
+    )
+    by_day = {d.bucket_start: d for d in daily}
+    values: list[float | None] = [
+        wearable_display(metric, by_day[d].value)[0] if d in by_day else None
+        for d in days
+    ]
+    if sum(v is not None for v in values) < 2:
+        # One bar is not a trend, and chart_payload pads a flat single-bar
+        # series by +/-1, which looks like data.
+        return None
+    return chart_payload(
+        "bar",
+        f"{label} — week of {start.strftime('%d %b %Y')}",
+        [d.strftime("%d %b") for d in days],
+        values,
+        unit=wearable_display(metric, 0.0)[1],
+        source="wearable",
+        metric=metric,
+        grain="day",
+        window_days=7,
+    )
 
 
 async def handle_tracker_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    query: TrackerQuery | None = None,
 ) -> dict | None:
     """Answer "how much water did I drink this week?" from the reader's logs.
 
     These reached the LLM before: 4-12s and a paraphrase, for a number the
     reader logged themselves and we already read for the [P] block. A lookup is
     exact and roughly 150ms.
+
+    ``message`` is parsed unless ``query`` is given. A TOOL CALL already has the
+    metric and the period as structured data and passes ``query`` directly --
+    it must NOT synthesise an English sentence for this parser to re-read. That
+    is the bug that made every document tool call return nothing.
     """
-    query = parse_tracker_query(message)
+    if query is None:
+        query = parse_tracker_query(message)
     if query is None:
         return None
 
@@ -1498,7 +1617,70 @@ async def handle_tracker_query(
             },
         }
 
-    if query.source == "lifestyle":
+    wearable_reply: str | None = None
+    visual: dict | None = None
+    if query.source == "wearable":
+        # SDNN and RMSSD are two different HRV measures and a device reports
+        # whichever it reports. Try the asked-for key, then its sibling, and
+        # name the one that answered -- never merge them, and never tell a
+        # reader with seven RMSSD readings that they have no HRV.
+        keys = [query.key]
+        if query.key in HRV_SIBLING:
+            keys.append(HRV_SIBLING[query.key])
+        points: list[WearablePoint] = []
+        for key in keys:
+            points = _fresh_buckets(
+                await wearable_totals(db, user_id, key, grain="week", limit=1),
+                since.date(),
+            )
+            if points:
+                query = replace(query, key=key)
+                break
+        label, _unit, is_sum = sahha_meta(query.key)
+        if points:
+            p = points[0]
+            # The rollups are weekly and daily only. A month or year question
+            # gets a week's number, so it must SAY so and the provenance must
+            # report the week it actually read -- a receipt claiming "month"
+            # beside a week's total is a confident wrong answer.
+            note = "" if query.period == "week" else (
+                "I only have weekly totals from your connected device. "
+            )
+            query = replace(query, period="week")
+            wearable_reply = (
+                f"{note}Your {label} {'totalled' if is_sum else 'averaged'} "
+                f"{format_wearable(query.key, p.value)} in the week of "
+                f"{p.bucket_start.strftime('%d %b %Y')}, across {p.entries} "
+                f"reading{'' if p.entries == 1 else 's'} from your connected "
+                "device. That is what your device recorded, not a measurement "
+                "I can verify."
+            )
+            visual = await _wearable_chart(db, user_id, query.key, label, p)
+        elif query.key in _WEARABLE_MANUAL:
+            # No device data — answer from what they logged by hand, as before.
+            query = replace(
+                query, source="manual", key=_WEARABLE_MANUAL[query.key]
+            )
+        elif query.key == "heart_rate_resting":
+            # No device data, but a logged pulse is still the honest answer.
+            # This USED to return None and let handle_metric_query answer six
+            # slots below -- which works only for a caller that HAS a chain
+            # underneath it. A tool call has none, and turned the same None
+            # into "Nothing on file" while a real reading sat one table away.
+            # Serving it here is the one answer both engines can give.
+            return await handle_metric_query(
+                db, user_id, "what is my latest heart rate"
+            )
+        else:
+            wearable_reply = (
+                f"I don't have any {label} readings on record for you. Those "
+                "come from a connected wearable, so there is nothing here "
+                "until one is linked."
+            )
+
+    if wearable_reply is not None:
+        reply = wearable_reply
+    elif query.source == "lifestyle":
         totals = await lifestyle_totals(db, user_id, since)
         amount = totals.get(query.key)
         if not amount:
@@ -1531,7 +1713,7 @@ async def handle_tracker_query(
                 f"{unit}, recorded {when}."
             )
 
-    return {
+    out: dict = {
         "reply": reply,
         "action": "self_care",
         "provenance": {
@@ -1541,6 +1723,9 @@ async def handle_tracker_query(
             "period": query.period,
         },
     }
+    if visual:
+        out["visual"] = visual
+    return out
 
 
 # --------------------------------------------------------------------------- #

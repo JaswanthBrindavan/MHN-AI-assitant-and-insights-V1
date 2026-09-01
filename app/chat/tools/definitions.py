@@ -390,6 +390,38 @@ GET_MEDICATION_ADHERENCE = ToolSpec(
 )
 
 
+GET_TRACKER_TOTAL = ToolSpec(
+    name="get_tracker_total",
+    description=(
+        "Look up what the reader has logged, or what their connected wearable "
+        "recorded, for one tracked thing -- water, coffee, tea, alcohol, "
+        "smoking, steps, sleep, resting heart rate, HRV or their current "
+        "medications. Logged habits honour the period; the wearable rollups "
+        "are WEEKLY, so a month or year ask comes back as one week and the "
+        "reply says so -- use the period the result reports, never the one "
+        "you asked for. Always prefer this over answering from memory: these "
+        "are the reader's own numbers and guessing at them is never "
+        "acceptable. Report the figure and do not grade it -- there is no "
+        "reference range for sleep, steps, HRV or a wearable resting heart "
+        "rate."
+    ),
+    input_schema=_obj(
+        {
+            "metric": {
+                "type": "string",
+                "enum": [
+                    "water", "coffee", "tea", "alcohol", "smoking",
+                    "steps", "sleep", "resting heart rate", "hrv",
+                    "medications",
+                ],
+            },
+            "period": {"type": "string", "enum": ["week", "month", "year"]},
+        },
+        ["metric"],
+    ),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_LATEST_METRIC,
     GET_REPORT_PARAMETER,
@@ -397,6 +429,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     CHECK_VALUE_AGAINST_RANGE,
     LOG_LIFESTYLE_ENTRY,
     GET_HEALTH_SUMMARY,
+    GET_TRACKER_TOTAL,
     GET_FAMILY_MEMBERS,
     GET_CONDITION_GUIDANCE,
     LOOKUP_MEDICINE,

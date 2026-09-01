@@ -263,3 +263,38 @@ async def test_requesting_an_erasure_invalidates_the_pending_memo(db_session):
     await db_session.flush()
 
     assert await erasure.is_pending(db_session, user_id) is True
+
+
+async def test_the_wearable_answer_still_costs_two_reads(db_session, engine):
+    """One weekly rollup for the sentence, one daily read for the chart.
+
+    The chart is scoped to the week the sentence names by the QUERY, not
+    fetched wide and filtered in Python, so bounding it to the right week did
+    not buy a third round trip. The HRV sibling retry and the resting-heart-rate
+    fall-through only run when the first read came back empty.
+    """
+    from datetime import date, timedelta
+
+    from app.chat.data_handlers import handle_tracker_query
+    from app.models.coredata import SahhaDailyTotal, SahhaWeeklyTotal
+
+    user_id = uuid.uuid4()
+    today = date.today()
+    week = today - timedelta(days=(today.weekday() + 1) % 7)
+    db_session.add(SahhaWeeklyTotal(
+        user_id=user_id, metric="steps", bucket_start=week,
+        total=21000, entries=3, days_counted=3,
+    ))
+    for offset in range(3):
+        db_session.add(SahhaDailyTotal(
+            user_id=user_id, metric="steps", bucket_start=week + timedelta(days=offset),
+            total=7000, entries=1, days_counted=1,
+        ))
+    await db_session.flush()
+
+    counter = _count_queries(engine)
+    out = await handle_tracker_query(
+        db_session, user_id, "how many steps did I take this week"
+    )
+    assert out is not None and out["visual"] is not None
+    assert counter["n"] == 2, f"{counter['n']} reads for one wearable answer"

@@ -66,6 +66,8 @@ COREDATA_TABLES = {
     "period_settings",
     "period_status",
     "period_tracking",
+    "sahha_daily_total",
+    "sahha_weekly_total",
 }
 
 
@@ -228,6 +230,43 @@ class ManualTracking(Base):
     created_at: Mapped[datetime | None] = mapped_column(
         sa.DateTime(timezone=True), nullable=True
     )
+
+
+class _SahhaRollup:
+    """The shape every ``sahha_*_total`` rollup shares (all three are identical).
+
+    Read-only; mhn-spring's V40 owns them and rebuilds them delete-then-insert
+    on every sync and again nightly, so a recent bucket is not settled.
+
+    ``total`` is a plain SUM for EVERY metric, including the ones whose only
+    honest figure is a mean (resting heart rate, HRV, the scores). The mean is
+    ``total / entries`` -- see ``app.coredata.service.SAHHA_METRICS``.
+
+    ``metric`` is varchar, NOT an enum, deliberately: Sahha's vocabulary grows
+    and an unknown value must be a row, not a failed read.
+    """
+
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True)
+    metric: Mapped[str] = mapped_column(sa.String(64), primary_key=True)
+    bucket_start: Mapped[date] = mapped_column(sa.Date, primary_key=True)
+    total: Mapped[float] = mapped_column(sa.Numeric(16, 4), nullable=False)
+    entries: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    days_counted: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+
+
+class SahhaDailyTotal(Base, _SahhaRollup):
+    """One row per (user, metric, day)."""
+
+    __tablename__ = "sahha_daily_total"
+
+
+class SahhaWeeklyTotal(Base, _SahhaRollup):
+    """One row per (user, metric, week). ``bucket_start`` is the SUNDAY that
+    opens the week -- not PostgreSQL's Monday, and not Python's
+    ``date.weekday()``. Never re-derive it; read it.
+    """
+
+    __tablename__ = "sahha_weekly_total"
 
 
 class MedicineTracking(Base):

@@ -221,6 +221,20 @@
    "expects_tools": [
     "list_medications"
    ]
+  },
+  {
+   "name": "tracker_wearable_sleep",
+   "message": "how much sleep did I get this week?",
+   "expects_tools": [
+    "get_tracker_total"
+   ]
+  },
+  {
+   "name": "tracker_lifestyle_water",
+   "message": "how much water have I been drinking lately?",
+   "expects_tools": [
+    "get_tracker_total"
+   ]
   }
  ]
 }
