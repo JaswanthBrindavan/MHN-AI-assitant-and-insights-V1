@@ -16,3 +16,5 @@ build/
 *.egg-info/
 .claude/
 db/
+docs/
+project_docs/
