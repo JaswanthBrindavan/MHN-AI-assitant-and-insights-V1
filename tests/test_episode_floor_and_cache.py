@@ -49,7 +49,7 @@ async def test_an_unresolved_emergency_episode_raises_a_later_calm_turn(
     await db_session.flush()
 
     result = await handle_chat(
-        db_session, user_id, "what is diabetes", FakeProvider()
+        db_session, user_id, "should i be worried about this", FakeProvider()
     )
 
     assert result.risk_level == HIGH, (
@@ -69,7 +69,7 @@ async def test_the_floor_is_capped_at_high_not_emergency(db_session):
     await db_session.flush()
 
     result = await handle_chat(
-        db_session, user_id, "what is diabetes", FakeProvider()
+        db_session, user_id, "should i be worried about this", FakeProvider()
     )
     assert result.risk_level == HIGH
     assert result.risk_level != EMERGENCY
@@ -330,7 +330,7 @@ async def test_a_carried_escalation_does_not_claim_the_reader_described_it(
     await db_session.flush()
 
     result = await handle_chat(
-        db_session, user_id, "what is diabetes", FakeProvider()
+        db_session, user_id, "should i be worried about this", FakeProvider()
     )
     assert result.risk_level == HIGH
     assert not result.response_message.startswith(HIGH_ESCALATION)
@@ -494,3 +494,77 @@ def test_real_self_harm_disclosures_still_fire(message):
     result = triage(message)
     assert result.self_harm is True, message
     assert result.level == EMERGENCY, message
+
+
+# --------------------------------------------------------------------------
+# Reported by a reader: the escalation sentence led EVERY reply
+#
+# "its not necessary to keep on repeating the same thing again and again ...
+#  even after i said i doing fine ... we can just ask that once in a while
+#  rather than for every response. And when user says he is doing fine then
+#  the symptoms should marked as inactive."
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("message", [
+    "im doing fine",
+    "i am fine now",
+    "im fine",
+    "im okay now",
+    "nothing hurts now",
+    "all settled",
+    "back to normal",
+])
+def test_the_ways_people_actually_say_they_are_better(message):
+    """None of these was recognised, so nothing was ever marked inactive."""
+    from app.chat.episodes import is_recovery_message
+
+    assert is_recovery_message(message) is True, message
+
+
+@pytest.mark.parametrize("message", [
+    "im fine but i have chest pain",
+    "feeling ok but my chest hurts",
+])
+def test_a_message_that_reports_a_flag_is_not_a_recovery(message):
+    """The guard the loose phrasings need. Silencing a real report is the one
+    failure this table must never produce."""
+    from app.chat.episodes import is_recovery_message
+
+    assert is_recovery_message(message, has_red_flag=True) is False, message
+
+
+async def test_saying_you_are_fine_closes_the_episode(db_session):
+    from app.chat.episodes import open_episodes
+
+    user_id = uuid.uuid4()
+    await record_episode(db_session, user_id, "chest pain", EMERGENCY)
+    await db_session.flush()
+
+    await handle_chat(db_session, user_id, "im doing fine now", FakeProvider())
+    assert await open_episodes(db_session, user_id) == []
+
+
+async def test_a_corpus_lookup_does_not_re_escalate(db_session):
+    """The reader asked what a word means. Repeating an urgent instruction
+    there is how it stops being read."""
+    user_id = uuid.uuid4()
+    await record_episode(db_session, user_id, "chest pain", EMERGENCY)
+    await db_session.flush()
+
+    result = await handle_chat(
+        db_session, user_id, "what is prediabetes", FakeProvider()
+    )
+    assert result.risk_level == NONE
+    assert "seek medical care" not in result.response_message.lower()
+
+
+async def test_a_personal_turn_still_re_escalates(db_session):
+    """The cut must not silence the turns where it can change what they do."""
+    user_id = uuid.uuid4()
+    await record_episode(db_session, user_id, "chest pain", EMERGENCY)
+    await db_session.flush()
+
+    result = await handle_chat(
+        db_session, user_id, "should i be worried about this", FakeProvider()
+    )
+    assert result.risk_level == HIGH

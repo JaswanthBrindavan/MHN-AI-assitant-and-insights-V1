@@ -223,7 +223,7 @@ async def record(
     # reporting recovery only re-touched the episode — the [P] block kept
     # asserting an unresolved symptom for two more weeks, and telling Davi
     # you were better could only EXTEND that.
-    if message and is_recovery_message(message):
+    if message and is_recovery_message(message, has_red_flag=bool(flags)):
         resolved_any = False
         for term in (flags or []):
             try:
