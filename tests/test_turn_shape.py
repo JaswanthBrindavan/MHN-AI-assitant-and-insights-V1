@@ -287,3 +287,72 @@ def test_a_compositional_question_still_reaches_the_model(message):
     from app.rag.extractive import is_definitional_ask
 
     assert not is_definitional_ask(message), message
+
+
+# --------------------------------------------------------------------------
+# A tool-calling round needs more room than the answer
+#
+# Observed in staging on "why am i urinating frequently?":
+#   Output validation — blocked (empty) — replaced with the safe reply
+# The answer budget was applied to the tool round too, so the round truncated,
+# stop_reason came back `max_tokens`, `wants_tools` went False for lack of a
+# complete tool_use block, and the turn arrived with empty text.
+# --------------------------------------------------------------------------
+
+def test_a_tool_round_gets_more_budget_than_the_answer():
+    from app.llm.anthropic import AnthropicProvider
+
+    p = AnthropicProvider(model="claude-sonnet-5", api_key="k", max_tokens=800)
+    assert p._tool_max_tokens > p._max_tokens
+    assert p._tool_max_tokens >= 2400, (
+        "a truncated tool round produces an EMPTY answer, which the validator "
+        "then replaces with the safe reply — a non-answer from a question the "
+        "model was midway through answering"
+    )
+
+
+def test_the_answer_budget_stays_tight():
+    """The tool headroom must not undo the latency fix."""
+    from app.config import get_settings
+
+    assert get_settings().llm_max_tokens <= 1200
+
+
+# --------------------------------------------------------------------------
+# Telling the assistant you are better must not be answered with an escalation
+# --------------------------------------------------------------------------
+
+@_aio
+async def test_a_recovery_turn_is_not_escalated_at(db_session):
+    """Observed in staging: the reader said "i am feeling better now" and the
+    reply opened with "you mentioned something earlier ... seek medical care
+    promptly". The episodes ARE closed in this same turn — but by
+    `memory_assembly.record`, which runs after the floor is read.
+    """
+    from app.chat.episodes import open_or_touch
+    from app.triage.red_flags import EMERGENCY
+
+    user = uuid.uuid4()
+    await open_or_touch(db_session, user, "chest pain", EMERGENCY)
+    await db_session.flush()
+
+    result = await handle_chat(
+        db_session, user, "i am feeling better now", CountingProvider()
+    )
+    assert result.risk_level == NONE, (
+        f"a recovery report was escalated at; got {result.risk_level}"
+    )
+    assert "seek medical care" not in result.response_message.lower()
+
+
+@_aio
+async def test_a_recovery_that_also_reports_a_flag_still_escalates(db_session):
+    """"feeling better but the chest pain is back" is not a close-out."""
+    from app.triage.red_flags import EMERGENCY
+
+    result = await handle_chat(
+        db_session, uuid.uuid4(),
+        "im feeling better but i have chest pain and left arm pain",
+        CountingProvider(),
+    )
+    assert result.risk_level == EMERGENCY
