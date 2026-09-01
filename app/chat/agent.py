@@ -233,7 +233,9 @@ _CORRECTIONS = {
     "fidelity": (
         "Your previous answer stated a value that does not appear in the "
         "reader's records: {detail}. Use only values the tools returned, "
-        "quoted exactly, or leave the number out."
+        "quoted exactly, or leave the number out. Do not COMPUTE a figure "
+        "either — no averages, no per-day or per-night breakdowns, no unit "
+        "conversions. Report the total the tool gave you and stop."
     ),
     "ungrounded_value": (
         "Your previous answer stated a dose or measurement with nothing to "

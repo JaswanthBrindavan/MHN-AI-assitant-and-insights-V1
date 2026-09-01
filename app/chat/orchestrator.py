@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat import memory_assembly
+from app.chat.abilities import parse_correlation_query
 from app.chat.agent import append_directive, recover, run_agent
 from app.chat.context import (
     build_health_snapshot,
@@ -35,8 +36,10 @@ from app.chat.conversation import (
     maybe_compact,
     questions_asked,
 )
+from app.chat.correlation import READ_FAILED as CORRELATION_READ_FAILED
 from app.chat.data_handlers import (
     handle_ai_result_query,
+    handle_correlation_query,
     handle_doctor_consult_query,
     handle_document_query,
     handle_family_list_query,
@@ -86,7 +89,12 @@ from app.drugs.service import (
     find_drug,
     find_substitutes,
 )
-from app.grounding.claims import GroundingReport, analyze_grounding, strip_markers
+from app.grounding.claims import (
+    MARKER_RE,
+    GroundingReport,
+    analyze_grounding,
+    strip_markers,
+)
 from app.grounding.fidelity import unit_values, values_traceable
 from app.i18n.language import (
     LANGUAGE_NAMES,
@@ -155,6 +163,66 @@ def lang_hint(pivot, message: str) -> str:
 
 
 
+@dataclass(frozen=True)
+class Used:
+    """What the ANSWER used — carried out of a path WITH the answer.
+
+    NOT "what retrieval returned". Retrieval runs ahead of the engine branch,
+    so a tracker total, a drug lookup and a corpus answer all leave the same
+    function with the same `chunks` variable in scope; deriving citations from
+    that variable is what made "how much water did I drink" cite four
+    unrelated condition profiles.
+
+    `chunks` is the numbered block list markers index into (prompt order);
+    `markers` names the blocks the answer actually used. The default is
+    "nothing from the corpus", so a path that declares nothing cites nothing —
+    the safe direction, and the only one that survives a sixth call site.
+    """
+
+    chunks: tuple[RetrievedChunk, ...] = ()
+    markers: tuple[str, ...] = ()
+    patient: bool = False
+
+
+def used_rendered(chunks: Sequence[RetrievedChunk]) -> Used:
+    """Blocks the answer rendered VERBATIM — every one of them was used."""
+    return Used(tuple(chunks), tuple(str(i) for i in range(1, len(chunks) + 1)))
+
+
+def used_cited(
+    text: str, chunks: Sequence[RetrievedChunk], patient_text: str = ""
+) -> Used:
+    """A GENERATED answer used exactly the blocks it CITED.
+
+    Both engines put the same numbered blocks and the same grounding rules in
+    front of the model, so both have marker evidence; the agentic engine threw
+    it away with `strip_markers` and cited the retrieved set instead.
+    `dict.fromkeys` dedupes in first-cited order, so identical text always
+    yields an identical citation list.
+    """
+    return Used(
+        tuple(chunks),
+        tuple(dict.fromkeys(MARKER_RE.findall(text))),
+        bool(patient_text),
+    )
+
+
+def used_plus(used: Used, extra: Sequence[RetrievedChunk]) -> Used:
+    """`used`, plus corpus blocks a TOOL retrieved and rendered itself.
+
+    A tool answer carries no `[n]` — its blocks were never numbered into the
+    prompt — but the reply quotes them verbatim, so they are what it used.
+    """
+    if not extra:
+        return used
+    off = len(used.chunks)
+    return Used(
+        used.chunks + tuple(extra),
+        used.markers + tuple(str(off + i) for i in range(1, len(extra) + 1)),
+        used.patient,
+    )
+
+
 @dataclass
 class ChatResult:
     response_message: str
@@ -163,7 +231,12 @@ class ChatResult:
     provenance: dict = field(default_factory=dict)
     grounding: dict | None = None
     session_id: uuid.UUID | None = None
+    # NEVER set at a construction site: `handle_chat` derives it from
+    # `used`, which is the only thing a path declares. Forgetting to
+    # declare `used` yields NO citations — the one failure direction
+    # that cannot mislead a reader.
     citations: list[dict] | None = None
+    used: Used | None = None
     visual: dict | None = None
     language: str = "en"
     # Truthful decision trace (the pipeline's actual steps, not simulated
@@ -522,6 +595,86 @@ async def _drug_info_reply(
     return None
 
 
+async def _correlation_reply(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider: LLMProvider,
+    session_id: uuid.UUID | None,
+    risk: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult | None:
+    """A deterministic co-occurrence readout for a two-metric question.
+
+    SHARED across both engines, and it has to be. "does coffee affect my
+    sleep" is a question a model will happily answer from its own weights with
+    a causal sentence, and there is no dataset behind that sentence -- the same
+    shape as the interaction and dosing refusals. Answering it deterministically
+    is the only way both engines say the same non-causal thing.
+
+    Placed AFTER the drug slots so a medication question never reaches here,
+    and BEFORE the engine branch so the legacy tracker slot -- which used to
+    swallow these and answer with a coffee total -- never sees them.
+
+    NONE risk only: a red flag needs the symptom path, not four weeks of
+    averages, and a reassuring number beside chest pain is a reason to delay
+    care. Fail-open, in a SAVEPOINT: a rollup that is missing in a standalone
+    deployment must leave the session usable for the RAG fallback.
+    """
+    if risk != NONE:
+        return None
+    try:
+        async with db.begin_nested():
+            ability = await handle_correlation_query(db, user_id, message)
+    except Exception:  # noqa: BLE001 — a pattern read must never break a reply
+        logger.warning("correlation read failed; continuing", exc_info=True)
+        record_fail_open("correlation")
+        # Fail open, but NOT back to the model. Returning None here would hand
+        # the question to the RAG path, and a model asked "does coffee affect
+        # my sleep" answers it causally from its own weights -- which is the
+        # only reason this slot exists. Say the read failed instead.
+        if parse_correlation_query(message) is None:
+            return None
+        ability = {
+            "reply": CORRELATION_READ_FAILED,
+            "action": "self_care",
+            "provenance": {"path": "correlation_query", "degraded": "read_failed"},
+        }
+    if ability is None:
+        return None
+    prov = ability["provenance"]
+    if prov.get("degraded"):
+        t("Pattern check", "the lookup failed — said so, rather than guessing")
+    elif prov.get("declined") == "medication":
+        t("Pattern check",
+          "the question named a medicine — routed to the prescriber rather "
+          "than answered about something else")
+    elif prov.get("declined"):
+        t("Pattern check",
+          f"{prov['input']} against a reading I have no daily series for — "
+          "said which pairs I can do instead")
+    else:
+        t("Pattern check",
+          f"{prov['input']} beside {prov['outcome']} over "
+          f"{prov['window_days']} days — "
+          + ("co-occurrence only, no cause claimed"
+             if prov["enough"] else "not enough days; declined to compare"))
+    await _write_receipt(
+        db, user_id=user_id, session_id=session_id, message=message,
+        model_name=provider.model_name,
+    )
+    return ChatResult(
+        response_message=ability["reply"],
+        risk_level=risk,
+        recommended_action=ability["action"],
+        provenance=prov,
+        language=lang,
+        trace=trace,
+    )
+
+
 async def _scope_with_carry_forward(
     db: AsyncSession,
     message: str,
@@ -837,6 +990,18 @@ async def _dispatch(
     if drug_info is not None:
         return drug_info
 
+    # 3.47) Two-metric "does X affect my Y" questions — a deterministic
+    #       co-occurrence readout, SHARED for the same reason as 3.4 and 3.46.
+    #       It sits here rather than in the legacy chain because
+    #       `parse_tracker_query` matched these first and answered them as a
+    #       coffee total: a handler at or after the tracker slot would be dead
+    #       on arrival for the exact phrasings it exists to serve.
+    correlation = await _correlation_reply(
+        db, user_id, message, provider, session_id, risk, lang, trace, t
+    )
+    if correlation is not None:
+        return correlation
+
     # 3.5) Engine selection. Everything above — the triage floor, the scope
     #      guard, the emergency directive, the canned conversational replies
     #      and the drug-combination refusal — is SHARED and has already run,
@@ -940,7 +1105,11 @@ async def _dispatch(
                     risk_level=risk,
                     recommended_action=ability["action"],
                     provenance=ability["provenance"],
-                    citations=ability.get("citations"),
+                    # A deterministic handler answered from the reader's
+                    # OWN rows. Only the suggestions handler renders
+                    # corpus text, and it hands back exactly the chunks
+                    # it rendered — everything else declares nothing.
+                    used=used_rendered(ability.get("used_chunks") or ()),
                     visual=ability.get("visual"),
                     documents=ability.get("documents"),
                     language=lang,
@@ -1029,6 +1198,9 @@ async def _dispatch(
     # the engine that currently answers real users. Declared here because both
     # the extractive branch and the main RAG branch set it.
     legacy_degraded: str | None = None
+    # What the ANSWER used — set where the answer is, in both branches
+    # below. Left empty, this turn cites nothing.
+    legacy_used = Used()
     try:
         _idx = await load_condition_index(db)
         _names = sorted(
@@ -1103,24 +1275,6 @@ async def _dispatch(
                 legacy_degraded = "validation"
             else:
                 t("Output validation", "passed all safety checks")
-            try:
-                _index = await load_condition_index(db)
-            except Exception:  # noqa: BLE001
-                _index = None
-            extractive_citations = [
-                {
-                    "marker": str(i + 1),
-                    "source": "mcp_master_profile",
-                    "condition_code": c.condition_code,
-                    "section": c.chunk_type,
-                    "display_name": (
-                        _index.by_code[c.condition_code].display_name
-                        if _index and c.condition_code in _index.by_code
-                        else c.condition_code
-                    ),
-                }
-                for i, c in enumerate(rendered_chunks(chunks, focused=_focused))
-            ]
             await _write_receipt(
                 db, user_id=user_id, session_id=session_id, message=message,
                 model_name="extractive",
@@ -1142,12 +1296,9 @@ async def _dispatch(
                     "chunks": [c.id for c in chunks],
                     **({"degraded": legacy_degraded} if legacy_degraded else {}),
                 },
-                # A reply replaced by safe_reply shows none of these
-                # sections, so citing them would point the reader at
-                # content that is not in front of them.
-                citations=(
-                    None if legacy_degraded else (extractive_citations or None)
-                ),
+                # Exactly what the renderer emitted, never the retrieved
+                # set. (A replaced reply is dropped in handle_chat.)
+                used=used_rendered(rendered_chunks(chunks, focused=_focused)),
                 language=lang,
                 trace=trace,
             )
@@ -1232,6 +1383,7 @@ async def _dispatch(
             display = safe_reply(risk, session_id)
             legacy_degraded = "grounding"
         else:
+            legacy_used = used_cited(grounded_answer, chunks, patient_text)
             display = strip_markers(grounded_answer)
             if risk == HIGH:
                 display = f"{escalation} {display}"
@@ -1298,7 +1450,6 @@ async def _dispatch(
     )
 
     action = "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
-    citations = await _build_citations(db, report, chunks, bool(patient_text))
     return ChatResult(
         response_message=display,
         risk_level=risk,
@@ -1311,112 +1462,65 @@ async def _dispatch(
             **({"degraded": legacy_degraded} if legacy_degraded else {}),
         },
         grounding=report.to_dict() if report else None,
-        citations=citations,
+        used=legacy_used,
         language=lang,
         trace=trace,
     )
 
 
-async def _build_citations(
-    db: AsyncSession,
-    report: GroundingReport | None,
-    chunks: list[RetrievedChunk],
-    has_patient_context: bool,
-) -> list[dict] | None:
-    """Structured citations for the markers the answer actually cited."""
-    if report is None or not report.cited:
-        return None
-    try:
-        index = await load_condition_index(db)
-    except Exception:  # noqa: BLE001
-        index = None
-    citations: list[dict] = []
-    for marker in report.cited:
-        if marker == "P":
-            if has_patient_context:
-                citations.append(
-                    {"marker": "P", "source": "patient_context",
-                     "display_name": "Your health record"}
-                )
-            continue
-        if marker == "GK":
-            citations.append(
-                {"marker": "GK", "source": "general_knowledge",
-                 "display_name": "General knowledge (nothing retrieved)"}
-            )
-            continue
-        i = int(marker) - 1
-        if 0 <= i < len(chunks):
-            chunk = chunks[i]
-            display = chunk.condition_code
-            if index is not None and chunk.condition_code in index.by_code:
-                display = index.by_code[chunk.condition_code].display_name
-            citations.append(
-                {
-                    "marker": marker,
-                    "source": "mcp_master_profile",
-                    "condition_code": chunk.condition_code,
-                    "section": chunk.chunk_type,
-                    "display_name": display,
-                }
-            )
-    return citations or None
+async def _cite(
+    db: AsyncSession, used: Used | None
+) -> tuple[list[dict] | None, list[str]]:
+    """The ONE place a citation is produced — plus the chunk ids behind it.
 
-
-async def _agentic_citations(
-    db: AsyncSession,
-    chunks: list[RetrievedChunk],
-    carried: set[str] | None = None,
-) -> list[dict] | None:
-    """Sources CONSULTED on the agentic path.
-
-    The agentic engine runs no `analyze_grounding`, so there are no `[n]`
-    markers to derive per-sentence citations from — `_build_citations` cannot
-    be reused. These are the profile sections that were placed in the prompt.
-
-    That distinction is deliberate and is carried in the payload as
-    `attribution: "consulted"`: this says "the answer was composed with these in
-    front of the model", NOT "this sentence came from that block". Claiming the
-    stronger thing without markers to back it would be a citation that cannot
-    be checked.
-
-    Without this the agentic engine returned NO citations at all — orchestrator
-    sets them at :851, :1053 and :1219 and nowhere in `_dispatch_agentic` — so a
-    reply composed entirely from the validated corpus was indistinguishable from
-    one invented by the model. A reader reported exactly that: a correct,
-    corpus-derived answer that looked like the lookup had never happened.
+    Both halves come out of the same `Used`, so provenance and citations
+    cannot disagree: there is no second slice for them to drift apart on.
     """
-    if not chunks:
-        return None
-    # Chunks whose condition came ONLY from topic carry-forward are dropped.
-    # Measured in staging: "sugar ke lakshan kya hote hain" — a question about
-    # diabetes — cited MC051 (hypertension) four times, because an earlier turn
-    # about a blood-pressure tablet had pulled it into scope and the model then
-    # ignored it. A citation the answer plainly did not use is worse than none:
-    # it tells the reader the wrong profile was consulted.
-    shown = [
-        c for c in chunks
-        if not carried or c.condition_code not in carried
-    ] or chunks
+    if used is None or not used.markers:
+        return None, []
     try:
         index = await load_condition_index(db)
     except Exception:  # noqa: BLE001 — citations must never break a reply
         index = None
     out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for chunk in shown:
-        key = (chunk.condition_code, chunk.chunk_type)
-        if key in seen:
+    ids: list[str] = []
+    for marker in used.markers:
+        if marker == "P":
+            if used.patient:
+                out.append(
+                    {"marker": "P", "source": "patient_context",
+                     "display_name": "Your health record"}
+                )
             continue
-        seen.add(key)
+        if marker == "GK":
+            # Only when nothing WAS retrieved. The entry asserts a fact about
+            # retrieval, and emitting it unconditionally put "General
+            # knowledge (nothing retrieved)" in the same payload as
+            # `provenance.chunks = [3 ids]` -- a direct contradiction, and the
+            # counterexample to this function's own docstring. `log` mode is
+            # the default and ships the answer, so it reached the client.
+            if not used.chunks:
+                out.append(
+                    {"marker": "GK", "source": "general_knowledge",
+                     "display_name": "General knowledge (nothing retrieved)"}
+                )
+            continue
+        i = int(marker) - 1
+        if not (0 <= i < len(used.chunks)):
+            continue  # the model invented a block number
+        chunk = used.chunks[i]
+        if chunk.id in ids:
+            continue
         display = chunk.condition_code
         if index is not None and chunk.condition_code in index.by_code:
             display = index.by_code[chunk.condition_code].display_name
         section = _base_section(chunk.chunk_type)
+        ids.append(chunk.id)
         out.append(
             {
+                "marker": marker,
                 "source": "mcp_master_profile",
-                "attribution": "consulted",
+                "chunk_id": chunk.id,
                 "condition_code": chunk.condition_code,
                 "section": chunk.chunk_type,
                 "display_name": display,
@@ -1425,7 +1529,7 @@ async def _agentic_citations(
                 "label": f"{display} — {section.replace('_', ' ')}",
             }
         )
-    return out or None
+    return (out or None), ids
 
 
 # C0/C1 control characters carry no linguistic meaning and NUL (0x00) is
@@ -1490,6 +1594,16 @@ async def handle_chat(
 
     chat_turns.inc(engine=engine, risk=result.risk_level)
     degraded = result.provenance.get("degraded")
+    # Citations are built HERE and nowhere else, from what the path
+    # DECLARED it used. A reply that was replaced (any degrade reason,
+    # either engine) shows none of that content, so it cites none of it —
+    # one rule in one place, instead of five call sites each remembering
+    # to pass None.
+    result.citations, _used_ids = await _cite(
+        db, None if degraded else result.used
+    )
+    # Every reply states what it used; [] is "nothing from the corpus".
+    result.provenance["used_chunks"] = _used_ids
     if degraded:
         # THE number that says whether the system is quietly answering badly.
         degradations.inc(engine=engine, reason=str(degraded))
@@ -1658,8 +1772,11 @@ async def _dispatch_agentic(
                         "conditions": sorted(codes),
                         "chunks": [c.id for c in chunks],
                     },
-                    citations=await _agentic_citations(
-                        db, chunks, carried=_carried
+                    # Exactly what the renderer emitted. The legacy twin
+                    # has used `rendered_chunks` since Phase 4; this
+                    # branch cited the whole retrieved set instead.
+                    used=used_rendered(
+                        rendered_chunks(chunks, focused=True)
                     ),
                     language=lang,
                     trace=trace,
@@ -1708,10 +1825,16 @@ async def _dispatch_agentic(
     # agentic engine built the chart, paid for it in tokens and then dropped
     # it, so the same question returned a chart on legacy and none here.
     tool_visuals: list[dict] = []
+    # Corpus blocks a TOOL retrieved and rendered itself
+    # (`get_condition_guidance` runs its own scoped retrieval). They
+    # never reach the numbered blocks, so the model cannot cite them
+    # with [n] — but the reply quotes them, so they are what it used.
+    tool_sources: list[RetrievedChunk] = []
 
     async def _executor(call):
         return await execute_tool(
-            db, user_id, call, session_id, visuals=tool_visuals
+            db, user_id, call, session_id,
+            visuals=tool_visuals, sources=tool_sources,
         )
 
     # Tools are offered only at NONE risk. A red flag stays on the safe path so
@@ -1747,6 +1870,9 @@ async def _dispatch_agentic(
             sorted({n.replace("_", " ") for n in outcome.tool_names})))
 
     display = strip_markers(outcome.text)
+    used = used_plus(
+        used_cited(outcome.text, chunks, patient_text), tool_sources
+    )
     # Progressive disclosure, on BOTH engines. The legacy renderer appends this
     # inside build_extractive_answer; the agentic engine has no renderer of its
     # own, so it is appended here — before the fidelity, validation and HIGH
@@ -1808,7 +1934,7 @@ async def _dispatch_agentic(
         explanation and no path forward, and two in a row look like a broken
         bot. The floor is unchanged; it is just reached less often.
         """
-        nonlocal display
+        nonlocal display, used
         rewritten = await recover(
             provider, system, outcome.messages, reason, detail
         )
@@ -1825,6 +1951,9 @@ async def _dispatch_agentic(
         if not validate_reply(candidate, risk, extra_terms).ok:
             return False
         display = candidate
+        used = used_plus(
+            used_cited(rewritten, chunks, patient_text), tool_sources
+        )
         return True
 
     # Fidelity FIRST: a drifted lab value is worse than a blocked reply, and it
@@ -1887,6 +2016,14 @@ async def _dispatch_agentic(
         "tools": outcome.tool_names,
         "rounds": outcome.rounds,
         "conditions": sorted(codes),
+        # What retrieval PUT IN FRONT of the model, matching legacy. Citations
+        # are marker-derived, and `_GROUNDING_RULES` only requires a marker on
+        # a sentence stating a clinical value — so an ordinary educational
+        # answer is legitimately marker-free, and without this key a
+        # corpus-derived reply left NO client-visible trace that the corpus
+        # was consulted at all. That is the reader-reported bug the deleted
+        # `_agentic_citations` was written to fix.
+        "chunks": [c.id for c in chunks],
         "usage": outcome.usage,
     }
     if outcome.forced:
@@ -1901,11 +2038,7 @@ async def _dispatch_agentic(
             "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
         ),
         provenance=provenance,
-        # Not when the reply was replaced: safe_reply shows none of this.
-        citations=(
-            None if degraded
-            else await _agentic_citations(db, chunks, carried=_carried)
-        ),
+        used=used,
         visual=None if degraded else (tool_visuals[0] if tool_visuals else None),
         language=lang,
         trace=trace,
