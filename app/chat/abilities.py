@@ -193,6 +193,12 @@ class TrackerAdd:
     quantity: float
     unit: str
     day_offset: int = 0  # 0 = today, 1 = yesterday
+    # The DRINK the reader named ("wine", "whisky", "chai"), not the log type
+    # it rolls up under. A bottle is 330 ml of beer and 750 of wine, so the
+    # serving size cannot be looked up without it -- see
+    # `app.coredata.service._VESSEL_ML`, which is keyed this way because
+    # mhn-spring's own seed is.
+    kind: str = ""
 
 
 _QTY = r"(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|half)"
@@ -202,7 +208,8 @@ _TRACKER_PATTERNS: tuple[tuple[re.Pattern[str], str, str], ...] = (
             # Statement verbs ("I had/drank …") plus command verbs
             # ("log/add/track/record 2 cups of coffee [to my tracker]").
             rf"\b(?:had|drank|drink|took|finished|log(?:ged)?|add|track|record)\s+{_QTY}\s*"
-            r"(cups?|glass(?:es)?|mugs?|shots?|pegs?|bottles?|cans?|litres?|liters?|ml)?\s*"
+            r"(cups?|glass(?:es)?|mugs?|shots?|pegs?|bottles?|cans?|pints?"
+            r"|litres?|liters?|ml)?\s*"
             r"(?:of\s+)?(coffee|tea|chai|water|beer|wine|whisky|whiskey|rum|vodka|alcohol|drinks?)\b",
             re.IGNORECASE,
         ),
@@ -246,11 +253,25 @@ _KIND_TO_LOG_TYPE = {
     "drink": "alcohol",
     "drinks": "alcohol",
 }
+# The vessel a bare "had a beer" means, when the message names no unit.
+# Water and alcohol are stored in MILLILITRES (mhn-spring's LifestyleMetric),
+# so an alcohol add with no vessel has no sanctioned size at all -- see
+# `canonical_amount`. Naming the vessel per DRINK rather than per log type is
+# what keeps "a beer" (a 330 ml bottle) from becoming "a drink" (nothing the
+# platform can size), which the handler would then have to refuse.
+_KIND_DEFAULT_UNIT = {
+    "water": "glass",
+    "beer": "bottle",
+    "wine": "glass",
+    "whisky": "peg", "whiskey": "peg", "rum": "peg", "vodka": "peg",
+    "alcohol": "drink", "drink": "drink", "drinks": "drink",
+}
 _UNIT_CANON = {
     "cup": "cup", "cups": "cup", "mug": "cup", "mugs": "cup",
     "glass": "glass", "glasses": "glass",
     "shot": "shot", "shots": "shot", "peg": "peg", "pegs": "peg",
     "bottle": "bottle", "bottles": "bottle", "can": "can", "cans": "can",
+    "pint": "pint", "pints": "pint",
     "litre": "litre", "litres": "litre", "liter": "litre", "liters": "litre",
     "ml": "ml",
     "cig": "cigarette", "cigs": "cigarette",
@@ -296,12 +317,13 @@ def parse_tracker_add(message: str) -> TrackerAdd | None:
         log_type = _KIND_TO_LOG_TYPE.get(kind)
         if log_type is None:
             return None
-        default_unit = {"water": "glass", "alcohol": "drink"}.get(log_type, "cup")
+        default_unit = _KIND_DEFAULT_UNIT.get(kind, "cup")
         return TrackerAdd(
             log_type=log_type,
             quantity=qty,
             unit=_UNIT_CANON.get(unit_raw, default_unit),
             day_offset=_day_offset(message),
+            kind=kind,
         )
     return None
 
@@ -859,6 +881,16 @@ _TRACKER_TERMS: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
+# Asking what is RECOMMENDED, not what the reader logged. Shared by every
+# parser that reads personal data, so "need" cannot mean a norm to one of them
+# and a lookup to another: "how many hours of sleep do i need" is answered by
+# the validated corpus, never by 28 days of the reader's own nights.
+_NORM_QUESTION_RE = re.compile(
+    r"\bshould\b|\bnormal\b|\bideal\b|\brecommended\b|\benough\b"
+    r"|\bneed(?:s|ed)?\b|\bsupposed to\b",
+    re.IGNORECASE,
+)
+
 _TRACKER_LOOKUP_RE = re.compile(
     # Widened after a staging run. "am i smoking less these days" carried none
     # of the original keywords, so it fell through to the model, which then
@@ -868,12 +900,58 @@ _TRACKER_LOOKUP_RE = re.compile(
     r"\bhow (?:much|many|long|often)\b|\bdid i\b|\bhave i\b|\bam i\b|"
     r"\bi(?:'|’)?ve been\b|\bmy\b|\bshow\b|\blist\b|\btotal\b|"
     r"\baverage\b|\bthis (?:week|month|year)\b|"
+    # A named calendar window is itself the framing cue. Without these,
+    # "water intake yesterday" carried none of the others and did not parse at
+    # all -- the bypass class: a deterministic slot reachable only if the
+    # parser succeeds. It fell through to the model, which answered a question
+    # about the reader's own log from its own weights.
+    r"\byesterday\b|\blast week\b|\btoday\b|\blast night\b|"
     r"\b(?:lately|recently|these days|so far)\b",
     re.IGNORECASE,
 )
 
+# The ONE period vocabulary. `app/chat/tools/definitions.py` builds the tool
+# enum from this and `tracker_query_for` coerces against it, so the free-text
+# parser and the tool cannot come to mean different windows.
+#
+# week/month/year are ROLLING (now minus N days, what they have always meant --
+# a bare "how much water" is still a rolling 7 days). The three calendar values
+# are bounded at both ends; see `app.coredata.service.calendar_window`.
+TRACKER_PERIODS = (
+    "week", "month", "year", "today", "yesterday", "this_week", "last_week",
+)
+
+# Calendar cues, tried FIRST: "last week" contains "week", and "this week" is
+# already a framing cue in _TRACKER_LOOKUP_RE, so a plain \bmonth\b/\byear\b
+# ladder would quietly hand both of them the rolling default.
+_CALENDAR_PERIOD_RE: tuple[tuple[str, str], ...] = (
+    # "today" is the most common hydration question there is, and it used to
+    # become the ROLLING WEEK: "how much water today" answered "14000 ml in
+    # the past 7 days". Both rollups carry today's bucket; only the window
+    # vocabulary was missing the word.
+    (r"\btoday\b|\bthis morning\b", "today"),
+    # "last night" is how a night's sleep is actually asked about, and this
+    # module already treats it as YESTERDAY for writes -- `_day_offset` maps
+    # it to 1 day. So "drank 2 glasses of water last night" logged to
+    # yesterday while "how much water last night" read the rolling week: one
+    # module, two answers, and the two engines then disagreed as well.
+    #
+    # The lookbehind keeps "the day before yesterday" out of this row.
+    # `\byesterday\b` matched inside the longer phrase and the ladder returns
+    # on the first hit, so a question about Sunday was answered with Monday's
+    # number, in a sentence that said "yesterday". Falling through to the
+    # rolling default is not right either, but it LABELS the window it used.
+    (r"(?<!day before )\byesterday\b|\blast night\b|\bovernight\b",
+     "yesterday"),
+    (r"\blast week\b|\bprevious week\b", "last_week"),
+    (r"\bthis week\b|\bweek so far\b|\bso far this week\b", "this_week"),
+)
+
 
 def _tracker_period(low: str) -> str:
+    for pattern, period in _CALENDAR_PERIOD_RE:
+        if re.search(pattern, low):
+            return period
     if re.search(r"\bmonth\b|\b30 days\b", low):
         return "month"
     if re.search(r"\byear\b", low):
@@ -891,12 +969,185 @@ def tracker_query_for(metric: str, period: str) -> TrackerQuery | None:
     how ``get_documents`` came to answer nothing on the agentic engine.
     """
     low = metric.strip().lower()
-    if period not in ("week", "month", "year"):
+    if period not in TRACKER_PERIODS:
         period = "week"
     for pattern, source, key in _TRACKER_TERMS:
         if re.search(pattern, low):
             return TrackerQuery(source=source, key=key, period=period)
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Two-metric questions ("does coffee affect my sleep") — a co-occurrence
+# readout, NOT a total of either metric.
+#
+# These parsed as a plain tracker query until now: "does coffee affect my
+# sleep" came back as a week's coffee total, because `parse_tracker_query`
+# scans `_TRACKER_TERMS` in order and coffee is above sleep. That is why the
+# handler runs in the SHARED prologue, above the tracker slot, and why this
+# parser has to claim the message before that one does.
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CorrelationQuery:
+    input_key: str               # lifestyle log_type
+    # sahha metric key, or None: the reader named an outcome that has no daily
+    # device series, and the handler says so rather than staying silent.
+    outcome_metric: str | None
+    # Why the message is CLAIMED but not answerable as a co-occurrence.
+    # "medication" -- the reader asked what a drug is doing to a reading,
+    # which is a side-effect question. Claiming it and saying so is the point:
+    # returning None sent it to `parse_tracker_query`, which answered
+    # "does my blood pressure tablet affect my steps when i drink coffee"
+    # with a coffee-vs-steps readout and never mentioned the drug.
+    declined: str = ""
+
+
+# The curated pair registry: five logged habits against four device readings.
+# Never a scan of every possible pair, and never a MEDICATION on either side —
+# a drug beside a symptom is a side-effect claim, which is medical advice.
+# Both sides are read off `_TRACKER_TERMS`, so there is exactly one term table
+# and "sleep" cannot come to mean different things to the two parsers.
+#
+# Every entry has a DAILY series on both sides: a `lifestyle_daily_total` for
+# the habit, a `sahha_daily_total` for the reading. Smoking and steps both do
+# and were simply missing, which left "does smoking affect my sleep" — the
+# most likely question of this shape there is — answered as a cigarette count.
+CORRELATION_INPUTS = ("water", "coffee", "tea", "alcohol", "smoking")
+CORRELATION_OUTCOMES = (
+    "sleep_duration", "steps", "heart_rate_resting",
+    "heart_rate_variability_sdnn",
+)
+
+# A bare "heart rate", for THIS parser only. `_TRACKER_TERMS` deliberately
+# omits it so "what is my heart rate" reaches `handle_metric_query` — but that
+# left "does alcohol affect my heart rate", the most natural phrasing there
+# is, unable to reach this guard at all, and the model answered a two-metric
+# question about the reader's body from its own weights. Consulted only after
+# the term table has failed, so "resting heart rate" and "heart rate
+# variability" still match themselves first.
+_BARE_HEART_RATE_RE = re.compile(r"\bheart rate\b|\bpulse\b", re.IGNORECASE)
+
+# An outcome with no daily device series to line a habit up against. Saying
+# "I cannot pair those" is the point: returning None instead hands the message
+# to `parse_tracker_query`, which answered "does coffee affect my blood
+# pressure" with a coffee total — the bypass this slot exists to close.
+_UNPAIRABLE_OUTCOME_RE = re.compile(
+    r"\bblood pressure\b|\bbp\b|\bblood sugar\b|\bglucose\b"
+    r"|\bsugar levels?\b|\bweight\b|\bcholesterol\b|\bcalorie",
+    re.IGNORECASE,
+)
+
+# The reader talking about THEMSELVES. Without this, "does coffee affect
+# sleep" — a question about the world, which the validated corpus answers —
+# was claimed here and answered out of the reader's private log, above the
+# scope guard and above RAG; "what is the relationship between alcohol and
+# sleep" came back as a count of the reader's own drinking days.
+_FIRST_PERSON_RE = re.compile(
+    r"\bmy\b|\bmine\b|\bme\b|\bi\b|\bi(?:\u2019|')(?:ve|m|d)\b",
+    re.IGNORECASE,
+)
+
+# A relational cue is REQUIRED. Two metrics named without one ("how much coffee
+# and how much sleep") is still a lookup, and stays on the path it has today.
+_CORRELATION_CUE_RE = re.compile(
+    r"\baffect\w*\b|\beffect\b|\bimpact\w*\b|\bcorrelat\w*\b|"
+    r"\brelated\b|\brelationship\b|\blink(?:ed)?\b|\bconnection\b|"
+    r"\bbecause of\b|\bdue to\b|\bwhen i\b|\bwhen i(?:'|’)?ve\b|"
+    r"\bon (?:the )?days\b|\bdays (?:i|when)\b|\bafter i\b|"
+    r"\bcompared? (?:to|with)\b|\bvs\.?\b|\bversus\b|"
+    # The CAUSAL half, which the list was built around and then omitted:
+    # "does coffee cause my poor sleep" and "does coffee make me sleep less"
+    # are the two most causal phrasings there are, and both fell through --
+    # the first to a coffee total, the second to the model.
+    r"\bcaus\w*\b|\bmakes?\s+me\b|\bmaking\s+me\b|\bmade\s+me\b|"
+    r"\blead(?:s|ing)?\s+to\b|\btrigger\w*\b|\bworsen\w*\b|\bruin\w*\b|"
+    r"\bkeep(?:s|ing)?\s+me\b|\bstop(?:s|ping)?\s+me\b|"
+    # The ATTRIBUTION half. "is my coffee the reason I sleep badly" and
+    # "why is my sleep so bad, is it the coffee" name a cause without using
+    # a causal verb, so the slot never claimed them -- and the agentic engine
+    # then answered from its own weights, stating causation about the
+    # reader's own records AND recommending they cut coffee out. That is the
+    # single worst output this module exists to prevent.
+    r"\bthe reason\b|\bresponsible for\b|\bto blame\b|\bblame\w*\b|"
+    r"\bis it (?:the|my|because)\b|\bdown to\b|\bthanks to\b|"
+    r"\b(?:lower|higher|less|more|shorter|longer|worse|better|bad|good)\s+"
+    r"(?:when|on|after|if)\b",
+    re.IGNORECASE,
+)
+# "is my hrv lower when i drink" — bare "drink", no beverage named, means
+# alcohol. Only consulted when no habit term matched at all, and only when the
+# message names no other drinkable thing.
+# ponytail: naive heuristic; the sentence says "you logged alcohol" so a wrong
+# guess is visible to the reader. Ask which they meant if that stops being enough.
+_BARE_DRINK_RE = re.compile(r"\bdrink(?:s|ing)?\b", re.IGNORECASE)
+_OTHER_DRINK_RE = re.compile(
+    r"\b(?:energy|soft|fizzy|juice|milk|soda|cola|smoothie)\b", re.IGNORECASE
+)
+
+
+def parse_correlation_query(message: str) -> CorrelationQuery | None:
+    """One logged habit and one device reading, asked about together. Else None.
+
+    Deliberately does NOT apply `parse_tracker_query`'s ADVICE guard: "is my
+    hrv lower when i drink" contains "lower", which that guard rejects, and it
+    is exactly the phrasing this exists to answer. It DOES apply the norm
+    guard, which was load-bearing and got dropped alongside it: "how many
+    hours of sleep do i need when i drink coffee" asks what a person needs,
+    and 28 days of the reader's own nights does not address that at all.
+
+    Two gates beyond a curated pair and a relational cue:
+
+    * a FIRST-PERSON marker, so a question about the world stays one and
+      reaches the corpus instead of the reader's private log;
+    * an unpairable-outcome branch, which returns a query with NO outcome
+      rather than None — returning None hands the message to
+      `parse_tracker_query`, and that is what made "does coffee affect my
+      blood pressure" come back as a coffee total.
+
+    A MEDICATION on either side is declined by name, above every habit term.
+    The check used to sit inside the bare-"drink" branch, where it guarded
+    nothing once any habit matched: "does my blood pressure tablet affect my
+    steps when i drink coffee" parsed as coffee-vs-steps and the drug was
+    never mentioned in the answer. Note the limit — this is a pure parser, so
+    it sees medication NOUNS, not a bare brand or generic name.
+    """
+    low = message.lower()
+    if not _CORRELATION_CUE_RE.search(low):
+        return None
+    if not _FIRST_PERSON_RE.search(low):
+        return None
+    if _NORM_QUESTION_RE.search(low):
+        return None
+    if _MED_CONTEXT_RE.search(low):
+        return CorrelationQuery(
+            input_key="", outcome_metric=None, declined="medication"
+        )
+    input_key: str | None = None
+    outcome: str | None = None
+    for pattern, source, key in _TRACKER_TERMS:
+        if not re.search(pattern, low):
+            continue
+        if input_key is None and source == "lifestyle" and key in CORRELATION_INPUTS:
+            input_key = key
+        elif outcome is None and source == "wearable" and key in CORRELATION_OUTCOMES:
+            outcome = key
+    if (
+        input_key is None
+        and _BARE_DRINK_RE.search(low)
+        and not _OTHER_DRINK_RE.search(low)
+        # (The medication check that used to live here is now at the top of
+        # the function, where it covers every branch rather than this one.)
+    ):
+        input_key = "alcohol"
+    if input_key is None:
+        return None
+    if outcome is None and _BARE_HEART_RATE_RE.search(low):
+        outcome = "heart_rate_resting"
+    if outcome is None:
+        if _UNPAIRABLE_OUTCOME_RE.search(low):
+            return CorrelationQuery(input_key=input_key, outcome_metric=None)
+        return None
+    return CorrelationQuery(input_key=input_key, outcome_metric=outcome)
 
 
 def parse_tracker_query(message: str) -> TrackerQuery | None:
@@ -906,6 +1157,12 @@ def parse_tracker_query(message: str) -> TrackerQuery | None:
     much water did I drink" share every noun, and only the framing differs.
     """
     low = message.lower()
+    # A two-metric question is not a request for a total of either one.
+    # "does coffee affect my sleep" satisfies every gate below and came back a
+    # coffee total; declining here is what lets the co-occurrence handler above
+    # the tracker slot ever see the phrasings it exists for.
+    if parse_correlation_query(message) is not None:
+        return None
     if not _TRACKER_LOOKUP_RE.search(low):
         return None
     # A question about the NORM is not a question about the reader's log.
@@ -913,7 +1170,7 @@ def parse_tracker_query(message: str) -> TrackerQuery | None:
     # and names a tracked habit, but it is asking what is recommended. The
     # metric parser has carried this guard for a while; the suite caught this
     # parser going without it.
-    if re.search(r"\bshould\b|\bnormal\b|\bideal\b|\brecommended\b|\benough\b", low):
+    if _NORM_QUESTION_RE.search(low):
         return None
     # Advice about a habit is not a reading of it either.
     if _METRIC_ADVICE_RE.search(low):

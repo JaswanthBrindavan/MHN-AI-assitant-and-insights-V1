@@ -20,7 +20,7 @@ from app.chat.data_handlers import (
 )
 from app.chat.orchestrator import handle_chat
 from app.chat.validation import validate_reply
-from app.coredata.service import format_wearable, wearable_totals
+from app.coredata.service import format_wearable, wearable_totals, week_start
 from app.llm.fake import FakeProvider
 from app.llm.tools import LLMTurn, ToolCall, ToolResultMessage
 from app.models.common import utcnow
@@ -237,10 +237,10 @@ def test_mmr_k_bounds():
 # asked about, so a fixed date here is a test that passes until the calendar
 # moves past it.
 # --------------------------------------------------------------------------- #
-def _week_start(day: date) -> date:
-    """The SUNDAY that opens the rollup week holding ``day`` — the rollups'
-    own convention, not PostgreSQL's Monday and not ``date.weekday()``."""
-    return day - timedelta(days=(day.weekday() + 1) % 7)
+# The SUNDAY that opens the rollup week — the rollups' own convention, not
+# PostgreSQL's Monday. Imported rather than re-spelled: two copies of a
+# calendar convention is two things to drift.
+_week_start = week_start
 
 
 def _sahha(metric: str, day: date, total: float, entries: int) -> SahhaDailyTotal:
@@ -519,7 +519,7 @@ async def test_the_named_week_always_carries_its_year(db_session):
 
     out = await handle_tracker_query(db_session, USER, "how many steps this week")
     assert out is not None
-    assert THIS_WEEK.strftime("in the week of %d %b %Y") in out["reply"]
+    assert THIS_WEEK.strftime("the week of %d %b %Y") in out["reply"]
 
 
 # --------------------------------------------------------------------------- #
@@ -744,9 +744,70 @@ async def test_a_wearable_number_is_never_graded(db_session):
         assert validate_reply(payload["deterministic_reply"], "none").ok
 
 
+async def test_a_wearable_synonym_cannot_reach_a_band(db_session):
+    """The brief's specific question. With a free-text `metric` the reader got
+    a band or a refusal purely according to which synonym the model wrote:
+    "resting heart rate" and "rhr" refused, while "heart rate", "pulse" and
+    "resting pulse" were all graded against 60-100 bpm — and any underscore
+    spelling answered "nothing on file", because the free-text parser could
+    not read its own tool's argument. An enum forecloses all three."""
+    from app.chat.tools.definitions import (
+        CHECK_VALUE_AGAINST_RANGE,
+        VALUE_CHECK_METRICS,
+    )
+    from app.chat.tools.registry import execute_tool
+    from app.health.ranges import RANGES
+
+    schema = CHECK_VALUE_AGAINST_RANGE.input_schema["properties"]["metric"]
+    assert set(schema["enum"]) == (set(RANGES) | {"blood_pressure"}) - {
+        "heart_rate"
+    }
+    # `heart_rate` is off the enum deliberately. The executor calls the handler
+    # with an EMPTY message, so the wearable refusal -- which reads the
+    # reader's own words -- cannot fire on the tool path. While it was a legal
+    # value, "my watch says my resting heart rate is 48" refused on legacy and
+    # came back with a band on agentic: one deterministic guard, reachable on
+    # one engine only, which is this repo's recurring bug class.
+    assert "heart_rate" not in VALUE_CHECK_METRICS
+    for synonym in ("heart_rate", "heart rate", "pulse", "resting pulse",
+                    "rhr", "sleep_duration", "heart rate variability"):
+        assert synonym not in VALUE_CHECK_METRICS
+        result = await execute_tool(
+            db_session, USER,
+            ToolCall(id="c1", name="check_value_against_range",
+                     arguments={"metric": synonym, "value": 48}),
+            None,
+        )
+        payload = json.loads(result.content)
+        assert payload.get("graded") is False, synonym
+        assert "typical range" not in payload["deterministic_reply"], synonym
+
+    # ...and the underscore spelling of a metric that IS in the enum answers
+    # properly rather than "nothing on file".
+    result = await execute_tool(
+        db_session, USER,
+        ToolCall(id="c1", name="check_value_against_range",
+                 arguments={"metric": "blood_sugar", "value": 117}),
+        None,
+    )
+    assert "Nothing on file" not in result.content
+    assert "117" in result.content
+
+
+async def test_the_grading_copy_does_not_call_a_pulse_a_resting_heart_rate():
+    """`ranges.py` labelled `heart_rate` "resting heart rate", so the fallback
+    path emitted the exact sentence the wearable guard exists to stop, with a
+    threshold attached."""
+    from app.health.ranges import classify
+
+    verdict = classify("heart_rate", 48)
+    assert verdict is not None
+    assert verdict.label == "heart rate"
+
+
 async def test_the_typed_phrasing_is_not_graded_either(db_session):
-    """The executor synthesises "my {metric} is {value}" and hands it to this
-    handler, so one guard closes both engines and the reader's own words."""
+    """The executor passes the metric STRUCTURALLY, so this handler still owns
+    the reader's own words on the legacy path."""
     from app.chat.data_handlers import handle_value_check
 
     out = await handle_value_check(db_session, USER, "my resting heart rate is 48")
@@ -842,7 +903,10 @@ async def test_both_engines_report_the_same_wearable_number_and_chart(
     )
 
     monkeypatch.setattr(get_settings(), "chat_engine", "agentic")
-    provider = _CallsTrackerTool({"metric": "sleep", "period": "week"})
+    # The legacy parser reads "this week" as the CALENDAR week, so the tool
+    # argument has to be the same period value or the two engines answer the
+    # same question over different windows.
+    provider = _CallsTrackerTool({"metric": "sleep", "period": "this_week"})
     agentic = await handle_chat(
         db_session, USER, question, provider, uuid.uuid4()
     )

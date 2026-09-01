@@ -575,11 +575,20 @@ def test_real_metric_lookups_still_parse(message):
 @pytest.mark.parametrize(
     ("message", "source", "key", "period"),
     [
-        ("how much water did I drink this week?", "lifestyle", "water", "week"),
-        ("how many steps did I walk yesterday?", "wearable", "steps", "week"),
-        ("how much coffee have I had this week?", "lifestyle", "coffee", "week"),
+        ("how much water did I drink this week?", "lifestyle", "water",
+         "this_week"),
+        ("how many steps did I walk yesterday?", "wearable", "steps",
+         "yesterday"),
+        ("how much coffee have I had this week?", "lifestyle", "coffee",
+         "this_week"),
         ("did I log any smoking this month?", "lifestyle", "smoking", "month"),
         ("my sleep this month", "wearable", "sleep_duration", "month"),
+        # A bare ask keeps the ROLLING week it has always had.
+        ("how much water have I had", "lifestyle", "water", "week"),
+        ("how much water last week", "lifestyle", "water", "last_week"),
+        # No framing keyword at all -- "yesterday" is the cue, and without it
+        # in _TRACKER_LOOKUP_RE this fell through to the model.
+        ("water intake yesterday", "lifestyle", "water", "yesterday"),
     ],
 )
 def test_tracker_lookups_parse(message, source, key, period):

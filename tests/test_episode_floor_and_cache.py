@@ -405,57 +405,72 @@ def test_an_ordinary_question_is_still_not_an_interaction_query():
         assert extract_interaction_query(message) is None, message
 
 
-async def test_citations_drop_a_condition_only_carried_from_an_earlier_turn(
-    db_session,
-):
+_CHUNKS = [
+    ("a", "MC001", "symptoms", "Diabetes — symptoms:\nThirst."),
+    ("b", "MC051", "definition", "Hypertension — definition:\nHigh BP."),
+]
+
+
+def _chunks():
+    from app.rag.retrieval import RetrievedChunk
+
+    return [
+        RetrievedChunk(id=i, condition_code=c, chunk_type=t, content=x, score=0.9)
+        for i, c, t, x in _CHUNKS
+    ]
+
+
+async def test_citations_drop_a_condition_the_answer_did_not_use(db_session):
     """Staging cited MC051 (hypertension) four times on a diabetes question.
 
     An earlier turn about a blood-pressure tablet had pulled MC051 into scope;
-    the model ignored it; the citation list reported it anyway. A citation the
-    answer plainly did not use tells the reader the wrong profile was consulted.
+    the model ignored it; the citation list reported it anyway. The old fix
+    filtered on WHERE the scope came from, which only worked when the carried
+    topic was a minority of the retrieved set. The markers the answer emitted
+    say it directly and need no heuristic.
     """
-    from app.chat.orchestrator import _agentic_citations
-    from app.rag.retrieval import RetrievedChunk
+    from app.chat.orchestrator import _cite, used_cited
 
-    chunks = [
-        RetrievedChunk(id="a", condition_code="MC001", chunk_type="symptoms",
-                       content="Diabetes — symptoms:\nThirst.", score=0.9),
-        RetrievedChunk(id="b", condition_code="MC051", chunk_type="definition",
-                       content="Hypertension — definition:\nHigh BP.", score=0.4),
-    ]
-    cites = await _agentic_citations(db_session, chunks, carried={"MC051"})
+    cites, ids = await _cite(
+        db_session, used_cited("Thirst is common with diabetes [1].", _chunks())
+    )
     assert cites is not None
     assert {c["condition_code"] for c in cites} == {"MC001"}
+    assert ids == ["a"]
 
 
 async def test_citations_carry_a_label_a_reader_can_read(db_session):
     """A client rendering one field showed "MC051" four times."""
-    from app.chat.orchestrator import _agentic_citations
+    from app.chat.orchestrator import _cite, used_rendered
     from app.rag.retrieval import RetrievedChunk
 
-    cites = await _agentic_citations(
+    cites, _ids = await _cite(
         db_session,
-        [RetrievedChunk(id="a", condition_code="MC001", chunk_type="symptoms_2",
-                        content="Diabetes — symptoms:\nThirst.", score=0.9)],
+        used_rendered([
+            RetrievedChunk(id="a", condition_code="MC001",
+                           chunk_type="symptoms_2",
+                           content="Diabetes — symptoms:\nThirst.", score=0.9)
+        ]),
     )
     assert cites is not None
     assert "symptoms" in cites[0]["label"]
     assert "symptoms_2" not in cites[0]["label"]
 
 
-async def test_citations_never_end_up_empty_when_everything_was_carried(
-    db_session,
-):
-    """Filtering must not silently remove the evidence that a lookup happened."""
-    from app.chat.orchestrator import _agentic_citations
-    from app.rag.retrieval import RetrievedChunk
+async def test_a_carried_condition_the_answer_DID_use_is_still_cited(db_session):
+    """The other half: filtering must not remove evidence of a real lookup.
 
-    chunks = [
-        RetrievedChunk(id="b", condition_code="MC051", chunk_type="definition",
-                       content="Hypertension — definition:\nHigh BP.", score=0.4),
-    ]
-    cites = await _agentic_citations(db_session, chunks, carried={"MC051"})
+    This used to be guaranteed by an `or chunks` fallback that cited the whole
+    retrieved set whenever the filter emptied it — i.e. by re-committing the
+    original defect. A marker cites it because the answer cited it.
+    """
+    from app.chat.orchestrator import _cite, used_cited
+
+    cites, ids = await _cite(
+        db_session, used_cited("Blood pressure runs high in it [2].", _chunks())
+    )
     assert cites and cites[0]["condition_code"] == "MC051"
+    assert ids == ["b"]
 
 
 # --------------------------------------------------------------------------

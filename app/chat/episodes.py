@@ -20,12 +20,13 @@ import logging
 import re as _re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, timedelta
+from datetime import timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import ActiveSymptomState
+from app.models.common import as_utc as _aware
 from app.models.common import utcnow
 from app.triage.red_flags import LEVEL_ORDER, NONE, max_level
 
@@ -39,19 +40,6 @@ STALE_AFTER = timedelta(days=14)
 # How many open episodes to carry into a prompt. More than a handful is noise,
 # and the most recent are the ones a follow-up is about.
 RECALL_LIMIT = 5
-
-
-def _aware(value):
-    """Normalise a stored timestamp to UTC-aware.
-
-    SQLite (unit tests) hands back NAIVE datetimes even for a
-    DateTime(timezone=True) column, while PostgreSQL returns aware ones.
-    Comparing the two raises. Everything written here goes through utcnow(),
-    which is UTC, so attaching the zone is safe rather than a guess.
-    """
-    if value is None or value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)

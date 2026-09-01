@@ -5,11 +5,32 @@ from __future__ import annotations
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import overload
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
+
+
+@overload
+def as_utc(value: datetime) -> datetime: ...
+@overload
+def as_utc(value: None) -> None: ...
+def as_utc(value: datetime | None) -> datetime | None:
+    """Normalise a stored timestamp to UTC-aware.
+
+    SQLite (unit tests) hands back NAIVE datetimes even for a
+    ``DateTime(timezone=True)`` column, while PostgreSQL returns aware ones.
+    Comparing the two raises, so a comparison that works in production blows up
+    on the suite -- or, worse, the other way round. Everything this backend
+    writes goes through ``utcnow()``, which is UTC, so attaching the zone is
+    safe rather than a guess.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
 
 _clock_lock = threading.Lock()
 _last_now: datetime | None = None
