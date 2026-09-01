@@ -105,6 +105,18 @@ def _effective_columns(sql: str, table: str) -> set[str] | None:
             r'(?i)DROP COLUMN (?:IF EXISTS )?"?(\w+)"?', body
         ):
             cols.discard(drop.group(1).lower())
+        # A RENAME is a DROP of the old name and an ADD of the new one, and
+        # skipping it is how `lifestyle_daily_total.log_type` stayed mapped
+        # after mhn-spring's V35 renamed it to `metric`: every read raised
+        # UndefinedColumn in production while this guard reported parity.
+        # The whole point of the guard is that the other team can move a
+        # column without us noticing, and a rename is the quietest way they
+        # can do it — nothing is added and nothing is removed on net.
+        for ren in re.finditer(
+            r'(?i)RENAME COLUMN "?(\w+)"?\s+TO\s+"?(\w+)"?', body
+        ):
+            cols.discard(ren.group(1).lower())
+            cols.add(ren.group(2).lower())
     return cols
 
 

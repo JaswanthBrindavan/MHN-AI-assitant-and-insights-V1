@@ -53,6 +53,7 @@ COREDATA_TABLES = {
     "vital_reading",
     "body_measurement",
     "lifestyle_log",
+    "lifestyle_daily_total",
     "manual_tracking",
     "medicine_tracking",
     "family_connect",
@@ -197,17 +198,82 @@ class LifestyleLog(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
     log_type: Mapped[str] = mapped_column(
         _pg_enum("lifestyle_log_type_enum", "water", "alcohol", "coffee",
-                 "tea", "smoking"),
+                 "tea", "smoking", "energy_drink", "other_drink"),
         nullable=False,
     )
     quantity: Mapped[float] = mapped_column(sa.Numeric(6, 2), nullable=False)
     unit: Mapped[str] = mapped_column(sa.String(20), nullable=False)
+    # `quantity` is the CANONICAL measure and the one the rollups sum -- ml for
+    # water and alcohol, servings for everything else -- because `resolveUnit`
+    # 400s any other unit and `MetricFanout.of` adds
+    # `new Measure(primary(type), quantity)`. See LIFESTYLE_UNITS.
+    #
+    # These two are mhn-spring's per-row copies of that same number (V35,
+    # ManualTrackingServiceImpl:208-212). Only `volume_ml` feeds a rollup, the
+    # derived `drink_volume_ml` whole-day fluid series; `servings` feeds none.
+    # NULL on every row written before V35. Neither is a total to read.
+    volume_ml: Mapped[float | None] = mapped_column(
+        sa.Numeric(9, 2), nullable=True
+    )
+    servings: Mapped[float | None] = mapped_column(
+        sa.Numeric(6, 2), nullable=True
+    )
     metadata_json: Mapped[dict | None] = mapped_column(
         "metadata", JSONColumn, nullable=True
     )
     logged_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), nullable=False
     )
+
+
+class LifestyleDailyTotal(Base):
+    """One row per (user, metric, day) — mhn-spring's pre-aggregated graph
+    feed for ``lifestyle_log``. Read-only.
+
+    Read INSTEAD of re-bucketing ``lifestyle_log`` in Python for one reason
+    that matters to anything pairing a habit with a wearable reading: this
+    ``bucket_start`` and ``sahha_daily_total.bucket_start`` were both assigned
+    by Spring in ``app.tracking.zone`` at write time, and that zone is not
+    recoverable from the data. ``date(logged_at)`` would be the UTC day, so a
+    late-evening log would land on a different "day" than the night's sleep it
+    is being compared with.
+
+    The cost of that alignment: rows Davi writes through
+    ``add_lifestyle_log`` reach this table only when Spring reconciles, so the
+    most recent day or two can lag the log. Callers that compare days should
+    exclude today anyway (a day in progress is not a day).
+
+    ``total`` is ``SUM(quantity)`` for the day, in the metric's own unit --
+    which is safe because the platform stores exactly one unit per metric and
+    rejects any other. It is still read here only for PRESENCE ("was anything
+    logged that day"): ``lifestyle_totals`` answers amounts off the log
+    itself, where a row Davi has just written is already visible.
+    """
+
+    __tablename__ = "lifestyle_daily_total"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, primary_key=True)
+    # mhn-spring's V35 RENAMED this column from `log_type` to `metric` and
+    # retyped it — `db/existing_schema.sql:6540-6543`, on all four rollup
+    # tables. Mapping the old name raised UndefinedColumn on every read: the
+    # V28 failure again, and `test_schema_parity` did not catch it because it
+    # replayed ADD and DROP COLUMN but not RENAME.
+    #
+    # The new enum is WIDER than the log-type one. Alongside the seven habits
+    # it carries three DERIVED metrics — `caffeine_mg`, `ethanol_g` and
+    # `drink_volume_ml` — which are mhn-spring's own unit-safe totals. Anything
+    # wanting an amount rather than a presence should read those rather than
+    # summing `lifestyle_log.quantity`, which mixes units.
+    metric: Mapped[str] = mapped_column(
+        _pg_enum("lifestyle_metric_enum", "water", "alcohol", "coffee",
+                 "tea", "smoking", "energy_drink", "other_drink",
+                 "caffeine_mg", "ethanol_g", "drink_volume_ml"),
+        primary_key=True,
+    )
+    bucket_start: Mapped[date] = mapped_column(sa.Date, primary_key=True)
+    total: Mapped[float] = mapped_column(sa.Numeric(12, 2), nullable=False)
+    entries: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    days_counted: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
 
 class ManualTracking(Base):
@@ -289,6 +355,11 @@ class MedicineTracking(Base):
     stopped_at: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
     starts_at: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
     ends_at: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+    # Soft delete, same trap as medical_condition: a deleted course still has
+    # `stopped_at IS NULL`, so it reads as current until this is filtered.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
 
 
 class FamilyConnect(Base):
@@ -551,6 +622,12 @@ class MedicalCondition(Base):
     # predating it reads NULL. NULL is treated as NOT private, matching the
     # column default rather than inventing a stricter rule than the app's.
     private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    # Soft delete. A row the reader deleted in the app keeps its `status` --
+    # 'active' -- so a reader that ignores this column reports a DELETED
+    # condition as a current one.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
 
 
 # --------------------------------------------------------------------------- #
