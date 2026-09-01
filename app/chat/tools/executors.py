@@ -22,6 +22,11 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.abilities import (
+    DocumentQuery,
+    find_relation,
+    normalize_document_kinds,
+)
 from app.chat.context import build_patient_context
 from app.chat.data_handlers import (
     handle_ai_result_query,
@@ -98,13 +103,24 @@ async def get_report_parameter(
 async def get_documents(
     db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
 ) -> dict | None:
-    kinds = args.get("kinds") or ["document"]
-    if not isinstance(kinds, list):
-        kinds = [str(kinds)]
-    who = str(args.get("relation") or args.get("owner_name") or "").strip()
-    phrase = f"show me {who + ' ' if who else ''}{' '.join(str(k) for k in kinds)}"
-    ability = await handle_document_query(db, user_id, phrase)
-    return _unwrap(ability, asked_about=who or "you")
+    # Pass the tool's own structured arguments straight through. This used to
+    # rebuild an English sentence ("show me report") and re-parse it, but the
+    # parser demands an ownership marker, so EVERY call parsed to None and the
+    # tool returned nothing -- on the agentic engine that is every document
+    # request the reader makes.
+    who = str(args.get("relation") or "").strip().lower()
+    named = str(args.get("owner_name") or "").strip()
+    relation = find_relation(f"my {who}") if who else None
+    query = DocumentQuery(
+        kinds=normalize_document_kinds(args.get("kinds")),
+        relation=relation,
+        # A relation word we do not recognise is treated as a name, so the
+        # family lookup can answer "no such connected member" instead of
+        # quietly showing the reader their own documents.
+        owner_name=named or (who if who and relation is None else None),
+    )
+    ability = await handle_document_query(db, user_id, "", query=query)
+    return _unwrap(ability, asked_about=who or named or "you")
 
 
 async def check_value_against_range(

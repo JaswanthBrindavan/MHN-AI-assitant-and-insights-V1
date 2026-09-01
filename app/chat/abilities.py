@@ -116,6 +116,30 @@ _POSSESSIVE_STOP = frozenset(
 )
 
 
+def normalize_document_kinds(values: object) -> tuple[str, ...]:
+    """Canonical document kinds from a TOOL CALL's free-form ``kinds`` list.
+
+    The model sends whatever word it likes -- "labs", "lab_report", "scans".
+    This reuses the SAME ``_DOC_KIND_TERMS`` vocabulary the message parser
+    uses, so the tool path and the typed path can never drift apart.
+
+    An unrecognised kind falls back to EVERY kind rather than none: over-
+    answering is recoverable, and returning nothing is what made the tool
+    look broken in the first place.
+    """
+    if not isinstance(values, (list, tuple)):
+        values = [values] if values else []
+    kinds: list[str] = []
+    for raw in values:
+        low = str(raw).lower().replace("_", " ")
+        for pattern, kind in _DOC_KIND_TERMS:
+            if re.search(rf"\b(?:{pattern})\b", low) and kind not in kinds:
+                kinds.append(kind)
+    if "any" in kinds:
+        return ALL_DOCUMENT_KINDS
+    return tuple(kinds) or ALL_DOCUMENT_KINDS
+
+
 def parse_document_query(message: str) -> DocumentQuery | None:
     low = message.lower()
     if not _DOC_INTENT_RE.search(low):

@@ -315,9 +315,20 @@ async def _try_backend(
 # Documents
 # --------------------------------------------------------------------------- #
 async def handle_document_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    query: DocumentQuery | None = None,
 ) -> dict | None:
-    query: DocumentQuery | None = parse_document_query_fuzzy(message)
+    """List stored documents. ``message`` is parsed unless ``query`` is given.
+
+    A TOOL CALL already has the kinds and the owner as structured data and
+    passes ``query`` directly. It must NOT hand us a rebuilt English sentence:
+    the parser requires an ownership marker (my/our/all/the/every), a
+    synthesised "show me report" carries none, and every document tool call
+    silently returned nothing.
+    """
+    if query is None:
+        query = parse_document_query_fuzzy(message)
     if query is None:
         return None
 
