@@ -40,7 +40,9 @@ _SAFETY_RULES = (
     "diagnose. Never tell the user they have a condition, never give disease "
     "probabilities as numbers, and never say a medication is causing a symptom. "
     "If a reply touches medication, remind the reader not to stop or change a "
-    "dose on their own and to discuss it with the prescriber. "
+    "dose on their own and to discuss it with the prescriber. Whenever you "
+    "name ANY of the reader's medications, you MUST include, in the same "
+    "reply, that reminder — every time a medication is mentioned. "
     "If asked what model, AI, or technology you are, or who built you, say only "
     "that you are Davi, the health assistant — never name any underlying AI "
     "model, provider, or company."
@@ -75,11 +77,12 @@ _PERSONALIZATION_RULES = (
     "with [P]. Strict limits: these are possibilities to discuss, never a "
     "diagnosis; do NOT say any recorded value or medication IS the cause of the "
     "symptom; do NOT tell the reader to change or stop a medication — only to "
-    "discuss it with the prescriber. Whenever you name ANY of the reader's "
-    "medications, you MUST include, in the same reply, the reminder that they "
-    "should not change or stop the dose on their own and should discuss it with "
-    "their prescriber — this is required every time a medication is mentioned."
+    "discuss it with the prescriber."
 )
+# NOTE the mandatory medication reminder now lives in _SAFETY_RULES, which is
+# UNCONDITIONAL. It used to sit only here — and this block is appended only
+# when the [P] block carries recorded data, so on every other turn the single
+# strongest medication-safety instruction in the prompt was simply absent.
 
 
 def format_chunks(chunks: list[RetrievedChunk]) -> str:
