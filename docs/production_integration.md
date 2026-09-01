@@ -120,11 +120,18 @@ exactly this.
 
 ## Reference ranges (verified: `ideal_ranges.resolve`, `thp_age_range`)
 
-`traditional_health_parameters` + `thp_age_range` (graduated
-min/low_danger/low_warn/ideal/high_warn/high_danger/max, age-banded, with
-`thp_alternate_units` conversions) are the curated ideal ranges. Davi's
-value-check reads them (age from `user.dob`) and maps severity → escalation;
+`traditional_health_parameters` + `thp_age_range` (min/low_warn/ideal/
+high_warn/max, age-banded, with `thp_alternate_units` conversions) are the
+curated ideal ranges. Davi's value-check reads them (age from `user.dob`) and
+grades on `low_warn`/`high_warn` ONLY -- `min`/`max` are the graph axis bounds.
 DRAFT constants are the fallback when no THP matches.
+
+mhn-spring's **V28 dropped `low_danger`/`high_danger`**, so the range check is
+two-zone (below `low_warn` / at or above `high_warn` → consult a doctor) and
+this path no longer emits `seek_care_promptly`; that action still comes from
+the triage floor. A column mapped here that production does not have makes
+every SELECT on the table raise `UndefinedColumn` --
+`tests/test_schema_parity.py` is the guard.
 
 ## Writes Davi makes to shared tables
 

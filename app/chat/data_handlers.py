@@ -150,10 +150,18 @@ def _article(label: str) -> str:
 
 
 def _backend_reply(v, reading: str) -> dict:
-    """Compose a safe reply from a graduated backend verdict (thp_age_range).
+    """Compose a safe reply from a backend verdict (thp_age_range).
 
-    Severity routes to care: normal → reassure; warn → consult a doctor;
-    danger → seek care promptly. Never diagnoses.
+    Two zones since mhn-spring's V28: normal → reassure; warn → consult a
+    doctor. Never diagnoses.
+
+    The third zone ("well above … seek medical advice promptly", action
+    ``seek_care_promptly``) is gone with the columns that drove it — see
+    ``app.health.reference._classify_bands`` for why that escalation was
+    never real and is not being replaced. Out-of-range now answers the same
+    way the rest of the app does (an abnormal report flag also routes to
+    ``discuss_with_clinician``), and ``seek_care_promptly`` still reaches the
+    API from the triage floor, which is the escalation that means something.
     """
     ideal = f"{_g(v.ideal_low)}–{_g(v.ideal_high)} {v.unit}".strip()
     art = _article(v.label)
@@ -169,22 +177,13 @@ def _backend_reply(v, reading: str) -> dict:
                            "severity": "normal"},
         }
     word = {"high": "above", "low": "below"}.get(v.direction, "outside")
-    if v.severity == "danger":
-        lead = (
-            f"{art} {v.label} of {reading} is well {word} the usual range "
-            f"for your age ({ideal}). Please seek medical advice promptly — "
-            f"contact your doctor or urgent care."
-        )
-        action = "seek_care_promptly"
-    else:
-        lead = (
-            f"{art} {v.label} of {reading} is {word} the usual range for "
-            f"your age ({ideal}). Please consult your doctor to review it."
-        )
-        action = "discuss_with_clinician"
+    lead = (
+        f"{art} {v.label} of {reading} is {word} the usual range for "
+        f"your age ({ideal}). Please consult your doctor to review it."
+    )
     return {
         "reply": f"{lead} {_NOT_A_DIAGNOSIS_LINE}",
-        "action": action,
+        "action": "discuss_with_clinician",
         "provenance": {"path": "value_check", "source": "backend_ranges",
                        "severity": v.severity},
     }
@@ -315,9 +314,20 @@ async def _try_backend(
 # Documents
 # --------------------------------------------------------------------------- #
 async def handle_document_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    query: DocumentQuery | None = None,
 ) -> dict | None:
-    query: DocumentQuery | None = parse_document_query_fuzzy(message)
+    """List stored documents. ``message`` is parsed unless ``query`` is given.
+
+    A TOOL CALL already has the kinds and the owner as structured data and
+    passes ``query`` directly. It must NOT hand us a rebuilt English sentence:
+    the parser requires an ownership marker (my/our/all/the/every), a
+    synthesised "show me report" carries none, and every document tool call
+    silently returned nothing.
+    """
+    if query is None:
+        query = parse_document_query_fuzzy(message)
     if query is None:
         return None
 

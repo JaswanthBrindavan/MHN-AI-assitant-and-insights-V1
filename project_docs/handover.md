@@ -6,11 +6,44 @@
 > several defects in this project came from acting on a plausible-but-wrong
 > assumption about the repo, and these documents exist to prevent exactly that.
 
-**Branch:** `praveen-mhn`. **Verified:** 3,020 passed · 7 pg-deselected ·
-clean under shuffled seeds · ruff clean · pyright 0 · `run_evals` **17/17 on
-both engines**.
+**Branch:** `praveen-mhn`, level with `main`. **Verified:** 3,059 passed ·
+7 pg-deselected · clean under shuffled seeds · ruff clean · pyright 0 ·
+`run_evals` **17/17 on both engines**.
 
 ---
+
+## Where the chat stands, measured
+
+100 questions driven through the deployed app on 2026-09-01, timing every
+request from inside the page. **Zero failures.**
+
+| | |
+|---|---|
+| median | **8.6 s** |
+| p90 | 18.1 s |
+| p95 | 27.7 s |
+| max | 38.3 s |
+| over 40 s | **none** — was 8 of 27 before this work, worst 79.7 s |
+
+Same questions, before and after: "my dad has sugar will i get it"
+79.7 s → 6.5 s · "whats the diff between type 1 and type 2" 59.8 s → 6.2 s ·
+"is thyroid curable" 58.8 s → 11.5 s · "what is a normal blood sugar level"
+25.1 s → 6.4 s.
+
+Deterministic paths are now sub-second: a scope decline 127 ms, a drug lookup
+264 ms, an interaction refusal 645-775 ms — including the colloquial phrasings
+("my bp tablet", "my blood thinner") that used to bypass the refusal entirely.
+
+**What is still slow is one coherent group**, and it is not a bug: first-person
+symptom reports. "i feel breathless climbing stairs" 38.3 s, "i keep feeling
+tired all the time" 30.6 s, "why am i urinating a lot these days" 29.6 s,
+"i feel dizzy when i stand up" 28.6 s. These need the full agentic loop —
+records, tools, personal context — so no corpus shortcut applies. That group is
+the next latency target, and it needs a different fix from the one that worked
+for corpus questions.
+
+Devanagari input works and costs two extra sidecar round trips
+(मुझे थकान महसूस होती है, 27.7 s). Romanized Hinglish is still not detected.
 
 # ⇢ START HERE — do these before anything else
 
@@ -22,6 +55,7 @@ the plan. The short version, in order:
 | # | Do this | Why first |
 |---|---|---|
 | **0** | **Run the nightly sweep once, by hand.** Actions → *nightly sweep* → Run workflow (needs repo secrets `DAVI_BASE_URL`, `DAVI_SERVICE_TOKEN`). | `SELECT … FROM job_runs WHERE name='nightly_sweep'` returns **0 rows**. It has never run. So **no erasure request has ever completed**, retention has never run, and `user_memory_document` is empty. Watch it: the first run clears the entire accumulated backlog in one batch against a database two other services share. |
+| **0b** | **Health Summary + Correlations** — two implementation specs landed in `project_docs/` (1,600 lines). The reader's own logs — water, sleep, caffeine, weekly trends — are recorded and shown in the app but the chat summary does not use them. This is the current feature request. |
 | **1** | **Triage recall for plain-language emergencies** — audit **C1**, **C2**. | The only class where one ordinary sentence produces a clinically wrong answer with nothing behind it. *"one side of my face has gone droopy and i cant lift my arm"* measures **none** today. Note C1's headline in the audit was overstated and is corrected in place — read the correction box before acting. Needs clinician sign-off on new phrases; the symptom-combination tier does not, and generalises where a phrase list cannot. |
 | **2** | **Make the output guards do what the docs claim** — **C4** (a four-site reorder), **C3**, **C7** (`GROUNDING_MODE` defaults to `log`). | Cheapest safety-per-line on the list. Turns three ornamental checks into real ones. |
 | **3** | **The one-line correctness batch** — **D1**, **D2**, **S10**, **S3**, **R1**, **R6**. | Each under ten lines, each closes a defect that fails *silently*. One review instead of six. **R1**: the production LLM call has no timeout — 600 s × 3 attempts. **D1**: one failing account jams the whole erasure queue. **D2**: the sweep marks itself `succeeded` before the destructive work runs. |
