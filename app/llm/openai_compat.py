@@ -188,12 +188,14 @@ class OpenAICompatibleProvider:
         model: str,
         api_key: str = "",
         timeout: float = 60.0,
+        max_tokens: int = 800,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.model_name = model
         self._api_key = api_key
         self._timeout = timeout
+        self._max_tokens = max_tokens
         # Indirection so tests can inject a stub without patching globals.
         self._client_factory = _default_client
 
@@ -225,6 +227,10 @@ class OpenAICompatibleProvider:
             ],
             "temperature": 0,
             "stream": False,
+            # This adapter sent NO output cap at all, so the ceiling was
+            # whatever the server chose. An unbounded budget is what made a
+            # reply cost ~25 s of generation.
+            "max_tokens": self._max_tokens,
         }
         if tools:
             payload["tools"] = _to_openai_tools(tools)

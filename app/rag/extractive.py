@@ -28,7 +28,8 @@ _DEFINITIONAL_RES = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"|\brisk factors?\b",
     r"\bcomplications?\b|\bwhat happens if\b|\bleft untreated\b",
     r"\bhow common\b|\bprevalence\b|\bhow many people\b",
-    r"\btypes? of\b|\bstages? of\b|\bkinds? of\b",
+    r"\btypes? of\b|\bstages? of\b|\bkinds? of\b"
+    r"|\bdiff(?:erence)? between\b|\bvs\.?\b|\bversus\b",
     r"\bprevent|\bavoid\b|\breduce (?:the )?risk\b",
 ))
 

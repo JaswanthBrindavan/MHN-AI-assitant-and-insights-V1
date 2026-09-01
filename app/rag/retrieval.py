@@ -135,6 +135,14 @@ _SECTION_INTENT: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"red flags?\b", ("signs", "symptoms", "complications")),
     (r"types? of\b", ("classification",)),
     (r"kinds? of\b", ("classification",)),
+    # A comparison between two forms of one condition is answered by the
+    # classification section, not the definition. Measured in staging at
+    # 59.8 s, because it reached neither: "diff" was not a word this table
+    # knew, so the question fell through to the full agentic loop.
+    (r"difference between\b", ("classification",)),
+    (r"diff between\b", ("classification",)),
+    (r"vs\.?\b", ("classification",)),
+    (r"versus\b", ("classification",)),
     ("associated", ("associated_conditions",)),
     ("along with", ("associated_conditions",)),
     ("alongside", ("associated_conditions",)),
