@@ -59,6 +59,11 @@ _DRUG_QUERY_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+# "is it ok to take X and Y together" put "together" inside the second term,
+# so the reply read "Whether metformin and telmisartan together can be taken
+# together...". Stripped before the noise passes.
+_TERM_TOGETHER = re.compile(r"\s+together$", re.IGNORECASE)
+
 _TERM_TRAILING_NOISE = re.compile(
     r"\s+(?:tablets?|capsules?|syrup|medicine|medication|drug|please|now|today)$",
     re.IGNORECASE,
@@ -482,20 +487,45 @@ _INTERACTION_TERM_NOISE = re.compile(
 )
 
 
+def _interaction_term(raw: str) -> str | None:
+    """Clean one side of a combination question. None only if nothing is left.
+
+    The noise strippers exist to turn "my dolo tablet" into "dolo". They can
+    also strip a colloquial reference down to almost nothing: "my bp tablet"
+    loses "my" and "tablet" and becomes "bp", two characters.
+
+    That MUST NOT abandon the refusal. Measured in staging: "can i take
+    metformin with my bp tablet" returned None here, so `_interaction_refusal`
+    never fired, the turn went to the agentic engine, and the model answered
+    from its own weights — "commonly prescribed together ... generally
+    considered routine" — about the reader's real prescriptions, from a
+    catalogue that holds NO interaction data. The same question naming both
+    drugs was refused correctly.
+
+    The interaction SHAPE is the safety signal, not the resolvability of the
+    names. When cleaning leaves too little, fall back to the reader's own
+    words: echoing "my bp tablet" back is honest and still routes them to a
+    pharmacist.
+    """
+    term = raw.strip().strip("?.!,").strip()
+    term = _TERM_TOGETHER.sub("", term).strip()
+    cleaned = _INTERACTION_TERM_NOISE.sub("", term).strip()
+    cleaned = _TERM_TRAILING_NOISE.sub("", cleaned).strip()
+    if len(cleaned) >= 3:
+        return cleaned
+    return term or None
+
+
 def extract_interaction_query(message: str) -> tuple[str, str] | None:
     """Return the two combined terms if the message asks about mixing them."""
     for pattern in _INTERACTION_PATTERNS:
         m = pattern.search(message)
         if m:
-            terms = []
-            for raw in (m.group(1), m.group(2)):
-                term = raw.strip().strip("?.!,").strip()
-                term = _INTERACTION_TERM_NOISE.sub("", term).strip()
-                term = _TERM_TRAILING_NOISE.sub("", term).strip()
-                if len(term) < 3:
-                    return None
-                terms.append(term)
-            return (terms[0], terms[1])
+            first = _interaction_term(m.group(1))
+            second = _interaction_term(m.group(2))
+            if not first or not second:
+                return None
+            return (first, second)
     return None
 
 

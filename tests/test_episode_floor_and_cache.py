@@ -346,3 +346,151 @@ async def test_a_symptom_described_now_still_gets_the_direct_wording(db_session)
     )
     if result.risk_level == HIGH:
         assert result.response_message.startswith(HIGH_ESCALATION)
+
+
+# --------------------------------------------------------------------------
+# Chrome-session findings
+# --------------------------------------------------------------------------
+
+def test_a_colloquial_drug_reference_still_triggers_the_refusal():
+    """Found by driving the deployed chat as a real user.
+
+    "can i take metformin with my bp tablet" returned None from the extractor,
+    so `_interaction_refusal` never fired, the turn reached the agentic engine,
+    and the model answered from its own weights — "commonly prescribed
+    together ... generally considered routine" — about the reader's REAL
+    prescriptions, from a catalogue holding no interaction data at all. Naming
+    both drugs was refused correctly, so the gap was purely in the phrasing.
+
+    Cause: the noise strippers reduce "my bp tablet" to "bp", and a
+    3-character minimum then discarded the whole match.
+    """
+    from app.drugs.service import extract_interaction_query
+
+    for message in (
+        "can i take metformin with my bp tablet",
+        "can i take metformin with my bp tablet?",
+        "can i take dolo with my bp tablet",
+    ):
+        assert extract_interaction_query(message) is not None, message
+
+
+def test_the_refusal_echoes_the_readers_own_words_when_cleaning_strips_too_much():
+    from app.drugs.service import extract_interaction_query
+
+    pair = extract_interaction_query("can i take metformin with my bp tablet")
+    assert pair is not None
+    assert pair[0] == "metformin"
+    assert "bp" in pair[1]
+
+
+def test_together_is_not_part_of_the_drug_name():
+    """The reply read "telmisartan together can be taken together"."""
+    from app.drugs.service import extract_interaction_query
+
+    pair = extract_interaction_query(
+        "is it ok to take metformin and telmisartan together"
+    )
+    assert pair == ("metformin", "telmisartan")
+
+
+def test_an_ordinary_question_is_still_not_an_interaction_query():
+    from app.drugs.service import extract_interaction_query
+
+    for message in (
+        "whats a normal blood sugar level",
+        "what is diabetes",
+        "what are the symptoms of diabetes",
+    ):
+        assert extract_interaction_query(message) is None, message
+
+
+async def test_citations_drop_a_condition_only_carried_from_an_earlier_turn(
+    db_session,
+):
+    """Staging cited MC051 (hypertension) four times on a diabetes question.
+
+    An earlier turn about a blood-pressure tablet had pulled MC051 into scope;
+    the model ignored it; the citation list reported it anyway. A citation the
+    answer plainly did not use tells the reader the wrong profile was consulted.
+    """
+    from app.chat.orchestrator import _agentic_citations
+    from app.rag.retrieval import RetrievedChunk
+
+    chunks = [
+        RetrievedChunk(id="a", condition_code="MC001", chunk_type="symptoms",
+                       content="Diabetes — symptoms:\nThirst.", score=0.9),
+        RetrievedChunk(id="b", condition_code="MC051", chunk_type="definition",
+                       content="Hypertension — definition:\nHigh BP.", score=0.4),
+    ]
+    cites = await _agentic_citations(db_session, chunks, carried={"MC051"})
+    assert cites is not None
+    assert {c["condition_code"] for c in cites} == {"MC001"}
+
+
+async def test_citations_carry_a_label_a_reader_can_read(db_session):
+    """A client rendering one field showed "MC051" four times."""
+    from app.chat.orchestrator import _agentic_citations
+    from app.rag.retrieval import RetrievedChunk
+
+    cites = await _agentic_citations(
+        db_session,
+        [RetrievedChunk(id="a", condition_code="MC001", chunk_type="symptoms_2",
+                        content="Diabetes — symptoms:\nThirst.", score=0.9)],
+    )
+    assert cites is not None
+    assert "symptoms" in cites[0]["label"]
+    assert "symptoms_2" not in cites[0]["label"]
+
+
+async def test_citations_never_end_up_empty_when_everything_was_carried(
+    db_session,
+):
+    """Filtering must not silently remove the evidence that a lookup happened."""
+    from app.chat.orchestrator import _agentic_citations
+    from app.rag.retrieval import RetrievedChunk
+
+    chunks = [
+        RetrievedChunk(id="b", condition_code="MC051", chunk_type="definition",
+                       content="Hypertension — definition:\nHigh BP.", score=0.4),
+    ]
+    cites = await _agentic_citations(db_session, chunks, carried={"MC051"})
+    assert cites and cites[0]["condition_code"] == "MC051"
+
+
+# --------------------------------------------------------------------------
+# Audit finding C6 — a dietary idiom fired the self-harm crisis reply
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("message", [
+    "I have been cutting down on sugar",
+    "im cutting back on salt",
+    "trying to cut out sweets",
+    "i cut down on carbs",
+    "should i cut down on rice",
+])
+def test_cutting_down_on_food_is_not_self_harm(message):
+    """"been cutting" matched "I have been cutting down on sugar".
+
+    A reader asking a diet question got the self-harm crisis reply with a
+    helpline number — and, once the episode floor landed, a 14-day EMERGENCY
+    episode pinning every later turn to seek-care.
+    """
+    result = triage(message)
+    assert result.self_harm is False, message
+    assert result.level == NONE, message
+
+
+@pytest.mark.parametrize("message", [
+    "i have been cutting myself",
+    "i keep cutting myself",
+    "i want to hurt myself",
+    "i cut my wrists",
+    "i dont want to live",
+    "i have been cutting my arms",
+])
+def test_real_self_harm_disclosures_still_fire(message):
+    """The guard must be narrow. Recall on this table is the whole point."""
+    result = triage(message)
+    assert result.self_harm is True, message
+    assert result.level == EMERGENCY, message

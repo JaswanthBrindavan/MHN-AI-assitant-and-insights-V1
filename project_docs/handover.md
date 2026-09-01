@@ -6,9 +6,45 @@
 > several defects in this project came from acting on a plausible-but-wrong
 > assumption about the repo, and these documents exist to prevent exactly that.
 
-**Branch:** `praveen-mhn`, ahead of `main`, tree clean.
-**Verified:** 1,863 passed · clean under shuffled seeds · ruff clean ·
-pyright 0 · `run_evals` **17/17 on both engines** · coverage ~91%.
+**Branch:** `praveen-mhn`. **Verified:** 3,020 passed · 7 pg-deselected ·
+clean under shuffled seeds · ruff clean · pyright 0 · `run_evals` **17/17 on
+both engines**.
+
+---
+
+# ⇢ START HERE — do these before anything else
+
+`project_docs/audit.md` (2026-09-01) replaced `drawbacks.md` and is now the
+standing risk register: 80 verified findings across safety, security, data
+integrity, reliability and product gaps. Its §"Recommended order of work" is
+the plan. The short version, in order:
+
+| # | Do this | Why first |
+|---|---|---|
+| **0** | **Run the nightly sweep once, by hand.** Actions → *nightly sweep* → Run workflow (needs repo secrets `DAVI_BASE_URL`, `DAVI_SERVICE_TOKEN`). | `SELECT … FROM job_runs WHERE name='nightly_sweep'` returns **0 rows**. It has never run. So **no erasure request has ever completed**, retention has never run, and `user_memory_document` is empty. Watch it: the first run clears the entire accumulated backlog in one batch against a database two other services share. |
+| **1** | **Triage recall for plain-language emergencies** — audit **C1**, **C2**. | The only class where one ordinary sentence produces a clinically wrong answer with nothing behind it. *"one side of my face has gone droopy and i cant lift my arm"* measures **none** today. Note C1's headline in the audit was overstated and is corrected in place — read the correction box before acting. Needs clinician sign-off on new phrases; the symptom-combination tier does not, and generalises where a phrase list cannot. |
+| **2** | **Make the output guards do what the docs claim** — **C4** (a four-site reorder), **C3**, **C7** (`GROUNDING_MODE` defaults to `log`). | Cheapest safety-per-line on the list. Turns three ornamental checks into real ones. |
+| **3** | **The one-line correctness batch** — **D1**, **D2**, **S10**, **S3**, **R1**, **R6**. | Each under ten lines, each closes a defect that fails *silently*. One review instead of six. **R1**: the production LLM call has no timeout — 600 s × 3 attempts. **D1**: one failing account jams the whole erasure queue. **D2**: the sweep marks itself `succeeded` before the destructive work runs. |
+| **4** | **`S1` — `APP_ENV` defaults to `"dev"`** so the refuse-to-start guard is inert, and `APP_ENV` appears in no deploy descriptor. | `AUTH_ENABLED=true` is the real control and is documented, so this is a disarmed backstop rather than a live hole — but it is the backstop for header impersonation on a service sharing the production database. |
+| **5** | **Observability, before any structural work** — **R7** (no logging config at all: every INFO is discarded), **R8** (nothing scrapes `/metrics`), **R3**, **R9**. | Everything below this line is work whose success you currently cannot observe. |
+
+**Two decisions waiting on the owner, not on an agent:**
+
+- **Hinglish is answered in English.** `detect_language` is script-range based,
+  so romanized Hindi never engages the pivot (audit **M6**). The fix needs a
+  small set of high-frequency romanized function words as a *router* to decide
+  whether to ask the sidecar — and `app/i18n/language.py` deliberately
+  documents "NO word lists". That tension is a design call, not a bug fix.
+- **`"crushing chest pain"` alone measures HIGH, not EMERGENCY**, despite
+  being listed in `EMERGENCY_PHRASES`. Only the ACS co-occurrence rule reaches
+  EMERGENCY. It may be deliberate. It has been flagged three times and left
+  alone each time.
+
+**Read the audit's own correction box first.** Two of its findings were
+re-measured by hand before publishing and *both moved* — one was overstated,
+one understated. A 0% refutation rate in the automated verification pass means
+individual severities are a starting point, not a verdict. Re-measure before
+acting.
 
 ---
 
@@ -72,16 +108,17 @@ failing a fresh clone. Regenerate the schema dump with
 
 ---
 
-## Where to pick up
+## Where to pick up (the older backlog)
 
-Ordered. Each is independently useful.
+Superseded in priority by START HERE above — these are the pre-audit items and
+remain valid, just lower.
 
-| # | What | Why it waits for the PR |
+| # | What | Notes |
 |---|---|---|
-| 1 | **Second cache breakpoint** on the memory block | The block is byte-stable and ready. Verify the saving against a real key rather than claiming it — `python -m scripts.cache_probe --model claude-sonnet-5`. |
-| 2 | **Rebuild-on-write triggers** | The nightly sweep rebuilds and a 1-hour freshness ceiling covers the gap, but an upload at 14:02 should rebuild at 14:02. |
-| 3 | **The remaining reads** — mood, sleep/wearables, lifestyle aggregates, `report_parameter_value` | Tools, not document fields: fast-moving or rarely needed. Plan in [`whole-app-coverage.md`](./whole-app-coverage.md). |
-| 4 | **Task 12** — retire the regex chain | You are running staging. **Audit the other ten step-4/step-5 handlers first** — two engine-split bugs have already been found there. |
+| 1 | **Second cache breakpoint** on the memory block | Byte-stable and ready. Verify against a real key rather than claiming it — `python -m scripts.cache_probe --model claude-sonnet-5`. |
+| 2 | **Rebuild-on-write triggers** | The sweep rebuilds and a 1-hour freshness ceiling covers the gap — but the sweep has never run, so today nothing rebuilds at all. |
+| 3 | **The remaining reads** — mood, sleep/wearables, lifestyle aggregates, `report_parameter_value` | Plan in [`whole-app-coverage.md`](./whole-app-coverage.md). See also audit **M5**: the reader's OWN diagnoses, surgeries and non-medication allergies are never read, while their family history is. |
+| 4 | **Task 12** — retire the regex chain | **Audit the other step-4/step-5 handlers first.** Three bypasses of this class have now been found, the most recent by using the deployed app: a colloquial drug name ("my bp tablet") skipped the interaction refusal entirely. |
 
 ---
 
