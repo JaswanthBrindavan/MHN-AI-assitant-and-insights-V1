@@ -17,6 +17,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
+import sqlalchemy as sa
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -333,20 +334,50 @@ async def _global_fallback_rows(db: AsyncSession, message: str) -> list[McpChunk
     """Token-prefiltered search over ALL chunks for messages naming no condition.
 
     Lets symptom-only questions ("frequent urination and excessive thirst")
-    reach the corpus. SQL prefilter keeps the candidate set small; final
-    ranking happens in ``_keyword_rank``.
+    reach the corpus.
+
+    The candidate window is ordered by HOW MANY of the query tokens a chunk
+    matches, not by condition_code. Ordering by code with a 200-row cap over a
+    ~15,000-chunk corpus took the alphabetically first 200 matches rather than
+    the 200 best — so the ranking that follows only ever saw an arbitrary slice,
+    and a one-word change to the question moved the slice.
+
+    Reported from staging, two adjacent turns:
+
+        "my legs swell up at night"      -> MC190, MC190, MC190, MC190
+        "my legs are swelling at night"  -> MC006, MC009, MC006, MC041
+
+    Neither set is wrong exactly — both are what the window happened to
+    contain. `%swell%` also matches "swelling" while `%swelling%` does not match
+    "swell", so the two pools genuinely differ; ordering by code then sliced
+    each from a different part of the corpus. Ranking by match count first makes
+    the window the most relevant rows, so the overlap between two phrasings of
+    one question is high instead of accidental.
+
+    The tie-break stays fully deterministic, so a LIMIT can never rotate the
+    pool between identical calls.
     """
     tokens = [t for t in _tokens(message) if len(t) >= 5][:8]
     if not tokens:
         return []
     conditions = [McpChunk.content.ilike(f"%{t}%") for t in tokens]
-    # ORDER BY makes the candidate SELECTION deterministic: LIMIT without it
-    # lets Postgres synchronized seq-scans rotate the pool between calls.
+    # How many distinct query tokens this chunk contains. One integer per row,
+    # computed in the database, so the cap keeps the best rows rather than the
+    # first ones.
+    match_count = sum(
+        (sa.case((McpChunk.content.ilike(f"%{t}%"), 1), else_=0) for t in tokens),
+        sa.literal(0),
+    )
     rows = (
         await db.execute(
             select(McpChunk)
             .where(or_(*conditions))
-            .order_by(McpChunk.condition_code, McpChunk.chunk_type, McpChunk.id)
+            .order_by(
+                match_count.desc(),
+                McpChunk.condition_code,
+                McpChunk.chunk_type,
+                McpChunk.id,
+            )
             .limit(GLOBAL_FALLBACK_CANDIDATES)
         )
     ).scalars().all()
