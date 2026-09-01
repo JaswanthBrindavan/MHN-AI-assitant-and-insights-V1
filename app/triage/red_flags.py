@@ -256,6 +256,18 @@ CHEST_STEM_RE = re.compile(
     r"pressure|burning|squeez\w*)"
     r"|\b(?:pain|ache|pressure|tightness|heaviness)\b[^,.!?]{0,20}\bchest\b")
 
+# "Cutting down/back on <food>" is the single most common false friend for the
+# self-harm table — a dietary idiom, not a disclosure. Stripped before the
+# self-harm scan the same way negated chest pain is stripped before the ACS
+# pairing (_CHEST_NEGATION_RE). Deliberately narrow: only the "cut down/back
+# on|out" shape, so "I cut myself" and "I have been cutting" keep their
+# meaning.
+_CUTTING_IDIOM_RE = re.compile(
+    r"cut(?:ting|s)?\s+(?:down|back)(?:\s+(?:on|to))?"
+    r"|cut(?:ting|s)?\s+out"
+)
+
+
 # Self-harm / suicide risk phrases (DRAFT — pending clinician sign-off).
 # Matching any of these is an EMERGENCY with a dedicated supportive directive.
 SELF_HARM_PHRASES: tuple[str, ...] = (
@@ -278,7 +290,14 @@ SELF_HARM_PHRASES: tuple[str, ...] = (
     "dont want to be here anymore",
     # Method-specific phrasing a distressed person actually types (DRAFT).
     "cutting myself",
-    "been cutting",
+    # NOT a bare "been cutting": it matched "I have been cutting down on
+    # sugar". A reader asking a diet question got the self-harm crisis reply
+    # with a helpline number, and — since the episode floor landed — a 14-day
+    # EMERGENCY episode pinning every later turn to seek-care. Measured, not
+    # theorised. The self-harm senses are kept; the dietary idiom is not one.
+    "been cutting myself",
+    "have been cutting my",
+    "keep cutting myself",
     "cut my wrists",
     "cut my wrist",
     "hang myself",
@@ -353,7 +372,10 @@ def triage(message: str) -> TriageResult:
     matched: list[str] = []
     level = NONE
 
-    self_harm_hits = _find(text, SELF_HARM_PHRASES)
+    # Strip the dietary idiom before the self-harm scan — see
+    # _CUTTING_IDIOM_RE. Applied here only, so the phrase tables stay
+    # negation-blind everywhere else (recall first).
+    self_harm_hits = _find(_CUTTING_IDIOM_RE.sub(" ", text), SELF_HARM_PHRASES)
     if self_harm_hits:
         level = max_level(level, EMERGENCY)
         matched += self_harm_hits

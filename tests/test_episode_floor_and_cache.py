@@ -456,3 +456,41 @@ async def test_citations_never_end_up_empty_when_everything_was_carried(
     ]
     cites = await _agentic_citations(db_session, chunks, carried={"MC051"})
     assert cites and cites[0]["condition_code"] == "MC051"
+
+
+# --------------------------------------------------------------------------
+# Audit finding C6 — a dietary idiom fired the self-harm crisis reply
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("message", [
+    "I have been cutting down on sugar",
+    "im cutting back on salt",
+    "trying to cut out sweets",
+    "i cut down on carbs",
+    "should i cut down on rice",
+])
+def test_cutting_down_on_food_is_not_self_harm(message):
+    """"been cutting" matched "I have been cutting down on sugar".
+
+    A reader asking a diet question got the self-harm crisis reply with a
+    helpline number — and, once the episode floor landed, a 14-day EMERGENCY
+    episode pinning every later turn to seek-care.
+    """
+    result = triage(message)
+    assert result.self_harm is False, message
+    assert result.level == NONE, message
+
+
+@pytest.mark.parametrize("message", [
+    "i have been cutting myself",
+    "i keep cutting myself",
+    "i want to hurt myself",
+    "i cut my wrists",
+    "i dont want to live",
+    "i have been cutting my arms",
+])
+def test_real_self_harm_disclosures_still_fire(message):
+    """The guard must be narrow. Recall on this table is the whole point."""
+    result = triage(message)
+    assert result.self_harm is True, message
+    assert result.level == EMERGENCY, message

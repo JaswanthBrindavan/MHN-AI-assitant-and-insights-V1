@@ -32,7 +32,9 @@ Follow those instructions for requirement coverage, bug detection, security, per
 
 ### Task Plans
 Current implementation plans and task-specific documents are stored in:
-`project_docs/` (architecture.md, drawbacks.md, implementation-plan.md).
+`project_docs/` (architecture.md, audit.md, implementation-plan.md).
+`audit.md` is the standing risk register — drawbacks, security and
+missing features — and supersedes the completed drawbacks.md.
 `docs/` holds the verified production contracts, not plans.
 
 Treat the current task's implementation plan as the source of truth for what should be implemented.
@@ -246,7 +248,8 @@ step-5 handlers have not been audited for the same problem.
 `project_docs/` carries the working record: `handover.md` (resume here),
 `memory.md` (invariants), `implementation-log.md` (what was decided and why),
 `findings.md` + `findings-phase-4.md` (review findings, including refuted
-ones), and `decisions-needed.md` (autonomous calls awaiting review).
+ones), `audit.md` (the standing risk register: drawbacks, security, missing
+features), and `decisions-needed.md` (autonomous calls awaiting review).
 
 ## Gotchas
 
