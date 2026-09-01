@@ -1,14 +1,17 @@
 """Backend-sourced reference ranges (production ``thp_age_range`` data).
 
 The clinically-curated, age-banded ideal ranges live in the production database
-(``traditional_health_parameters`` → ``thp_age_range``, with graduated
-min/low_danger/low_warn/ideal/high_warn/high_danger/max thresholds). This module
-reads them and classifies a value into a graduated severity, so the reply can
-match severity (reassure / consult a doctor / seek care promptly). When no
-backend entry matches (e.g. a metric not curated, or an empty DB), the caller
-falls back to the DRAFT constants in ``app.health.ranges``.
+(``traditional_health_parameters`` → ``thp_age_range``, with
+min/low_warn/ideal/high_warn/max thresholds). This module reads them and grades
+a value against the warning band, so the reply can match it (reassure /
+consult a doctor). When no backend entry matches (e.g. a metric not curated, or
+an empty DB), the caller falls back to the DRAFT constants in
+``app.health.ranges``.
 
 Never diagnoses — severity routes to care, it does not name a condition.
+
+``min``/``max`` are the graph axis bounds and grade nothing. See
+``_classify_bands`` for why the old danger tier is gone and what that costs.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.common import utcnow
 from app.models.core import User
 from app.models.coredata import ThpAgeRange, TraditionalHealthParameter
+from app.telemetry import record_fail_open
 
 logger = logging.getLogger("davi.health")
 
@@ -74,7 +78,7 @@ _DEFAULT_ADULT_AGE = 40
 
 @dataclass(frozen=True)
 class BackendVerdict:
-    severity: str    # "normal" | "warn" | "danger"
+    severity: str    # "normal" | "warn"
     direction: str   # "low" | "high" | ""
     ideal_low: float
     ideal_high: float
@@ -101,15 +105,37 @@ async def user_age(db: AsyncSession, user_id: uuid.UUID) -> int | None:
 
 
 def _classify_bands(r: ThpAgeRange, value: float) -> tuple[str, str]:
-    if value <= r.low_danger:
-        return "danger", "low"
-    if value <= r.low_warn:
+    """(severity, direction) from ``low_warn``/``high_warn`` ONLY.
+
+    Two zones, the model mhn-spring settled on in V28 when it dropped
+    ``low_danger``/``high_danger``.
+
+    NOTHING IS LOST BY DROPPING THE "danger" TIER, and it is not being dropped
+    quietly. It read the two dropped columns, which the staff dashboard never
+    collected and pinned to the graph bounds — ``low_danger == min`` and
+    ``high_danger == max`` on every row V18 seeded — so it only ever fired past
+    the end of the chart: LDL ≥ 228 mg/dL, total cholesterol ≥ 288, fasting
+    glucose ≥ 292. An LDL of 190 or a cholesterol of 260 already graded "warn".
+    The tier cannot be preserved either: the columns it read are gone, and
+    re-wiring "seek care promptly" onto every out-of-range value would send an
+    LDL of 105 to urgent care. So out-of-range keeps the answer it has today,
+    and the answer the rest of the app gives (report flags route to
+    ``discuss_with_clinician`` too — app/chat/data_handlers.py).
+
+    No reading gets a milder reply than it gets today: since V28 this lookup
+    raises before grading anything, and an extreme value gets an error page
+    rather than an escalation.
+
+    Boundaries are deliberate and pinned in tests. ``high_warn`` itself grades
+    HIGH, which is what today's code does — V28's header reads the ideal band
+    as inclusive at both ends, and going that way would flip an LDL of exactly
+    100 from "consult your doctor" to "that's reassuring".
+    """
+    if value < r.low_warn:
         return "warn", "low"
-    if value < r.high_warn:
-        return "normal", ""
-    if value < r.high_danger:
+    if value >= r.high_warn:
         return "warn", "high"
-    return "danger", "high"
+    return "normal", ""
 
 
 async def _match_thp(
@@ -156,31 +182,44 @@ async def _match_thp(
 async def evaluate_backend(
     db: AsyncSession, metric_key: str, value: float, age: int | None
 ) -> BackendVerdict | None:
-    """Graduated verdict from backend ranges, or None if none match."""
+    """Verdict from backend ranges, or None if none match."""
     try:
-        thp = await _match_thp(db, metric_key)
-        if thp is None:
-            return None
-        a = _DEFAULT_ADULT_AGE if age is None else age
-        # The age band covering the reader, else the closest by age_min.
-        ranges = (
-            await db.execute(
-                select(ThpAgeRange)
-                .where(ThpAgeRange.thp_id == thp.id)
-                .order_by(ThpAgeRange.age_min)
+        # Own SAVEPOINT, so that swallowing an error below does not poison the
+        # CALLER's transaction. It did: a failed statement leaves the whole
+        # transaction aborted, the ability's enclosing savepoint then failed to
+        # RELEASE, the reply was discarded, and the next query on that session
+        # (patient context) took the request down as a 500. Fail-open has to
+        # mean the session still works, not just that this function returns.
+        async with db.begin_nested():
+            thp = await _match_thp(db, metric_key)
+            if thp is None:
+                return None
+            a = _DEFAULT_ADULT_AGE if age is None else age
+            # The age band covering the reader, else the closest by age_min.
+            ranges = (
+                await db.execute(
+                    select(ThpAgeRange)
+                    .where(ThpAgeRange.thp_id == thp.id)
+                    .order_by(ThpAgeRange.age_min)
+                )
+            ).scalars().all()
+            if not ranges:
+                return None
+            chosen = next(
+                (r for r in ranges if r.age_min <= a <= r.age_max), ranges[0]
             )
-        ).scalars().all()
-        if not ranges:
-            return None
-        chosen = next(
-            (r for r in ranges if r.age_min <= a <= r.age_max), ranges[0]
-        )
-        severity, direction = _classify_bands(chosen, value)
-        return BackendVerdict(
-            severity=severity, direction=direction,
-            ideal_low=chosen.low_warn, ideal_high=chosen.high_warn,
-            unit=thp.units, label=thp.name,
-        )
+            severity, direction = _classify_bands(chosen, value)
+            return BackendVerdict(
+                severity=severity, direction=direction,
+                ideal_low=chosen.low_warn, ideal_high=chosen.high_warn,
+                unit=thp.units, label=thp.name,
+            )
     except Exception:  # noqa: BLE001 — backend lookup must never break a reply
-        logger.warning("backend range lookup failed", exc_info=True)
+        # Still a catch-all: the caller falls back to the DRAFT constants in
+        # app/health/ranges.py, which is the safe direction, and no schema
+        # surprise is worth a failed reply. But LOUD — ERROR with a traceback
+        # and a fail-open counter. As a WARNING this hid mhn-spring's V28 for
+        # the whole life of that bug; nothing scrapes a warning nobody reads.
+        logger.exception("backend range lookup failed")
+        record_fail_open("backend_ranges")
         return None

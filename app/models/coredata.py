@@ -442,9 +442,16 @@ class MedicineMaster(Base):
 class ThpAgeRange(Base):
     """Age-banded reference range for a health parameter (production data).
 
-    The graduated thresholds (min ≤ low_danger ≤ low_warn ≤ ideal ≤ high_warn ≤
-    high_danger ≤ max) are the clinically-curated ideal ranges the value-check
-    reads from the backend. Read-only here.
+    The thresholds (min ≤ low_warn ≤ ideal ≤ high_warn ≤ max) are the
+    clinically-curated ideal ranges the value-check reads from the backend.
+    ``min``/``max`` are the graph axis bounds, NOT clinical thresholds: only
+    ``low_warn``/``high_warn`` grade a value. Read-only here.
+
+    mhn-spring's V28 dropped ``low_danger``/``high_danger`` and rebuilt the
+    CHECK over what is left. Mapping a column production does not have makes
+    every SELECT on this table raise ``UndefinedColumn``, so check
+    ``db/existing_schema.sql`` before adding one — ``tests/test_schema_parity``
+    is the guard that would have caught V28.
     """
 
     __tablename__ = "thp_age_range"
@@ -454,11 +461,9 @@ class ThpAgeRange(Base):
     age_min: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     age_max: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     min: Mapped[float] = mapped_column(sa.Float, nullable=False)
-    low_danger: Mapped[float] = mapped_column(sa.Float, nullable=False)
     low_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
     ideal: Mapped[float] = mapped_column(sa.Float, nullable=False)
     high_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
-    high_danger: Mapped[float] = mapped_column(sa.Float, nullable=False)
     max: Mapped[float] = mapped_column(sa.Float, nullable=False)
 
 

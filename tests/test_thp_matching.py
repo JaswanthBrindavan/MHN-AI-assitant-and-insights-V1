@@ -33,8 +33,12 @@ async def _seed_v18(db) -> None:
     Order matters: `_match_thp` has no ORDER BY and takes the first row that
     matches at the best rank, so insertion order decides the winner.
     """
+    # V18 seeded `low_danger == min` and `high_danger == max` on every row, so
+    # after mhn-spring's V28 dropped the two danger columns the surviving
+    # thresholds are unchanged: min/max are the same numbers, now doing only
+    # the graph-bound job they always did.
     rows = [
-        # name, unit, status, (low_danger, low_warn, ideal, high_warn, high_danger)
+        # name, unit, status, (min, low_warn, ideal, high_warn, max)
         ("CHOL/HDL ratio", "Ratio", "approved", (0.0, 3.0, 4.0, 5.0, 8.4)),      # V18:54
         ("Glycated Hemoglobin (HbA1c)", "%", "approved", (0.0, 4.0, 5.0, 5.7, 16.1)),  # V18:79
         ("HDL/LDL Ratio", "ratio", "draft", (0.0, 0.4, 1.0, 999.0, 1198.8)),     # V18:84
@@ -45,19 +49,17 @@ async def _seed_v18(db) -> None:
         thp = TraditionalHealthParameter(name=name, units=unit, aliases=[])
         db.add(thp)
         await db.flush()
-        low_danger, low_warn, ideal, high_warn, high_danger = bands
+        low, low_warn, ideal, high_warn, high = bands
         db.add(
             ThpAgeRange(
                 thp_id=thp.id,
                 age_min=0,
                 age_max=120,
-                min=low_danger,
-                low_danger=low_danger,
+                min=low,
                 low_warn=low_warn,
                 ideal=ideal,
                 high_warn=high_warn,
-                high_danger=high_danger,
-                max=high_danger,
+                max=high,
             )
         )
     await db.flush()
@@ -70,9 +72,9 @@ async def _seed_v18(db) -> None:
         # said "above the typical range"; "HDL/LDL Ratio" spans 0.4–999, so
         # 190 lands mid-range.
         ("ldl", 190.0, "normal"),
-        # An ordinary HDL must not route to urgent care. "CHOL/HDL ratio"
-        # tops out at 8.4, so any real mg/dL reading is "danger".
-        ("hdl", 45.0, "danger"),
+        # An ordinary HDL must not be graded against "CHOL/HDL ratio", which
+        # spans 3.0-5.0, so any real mg/dL reading is out of range.
+        ("hdl", 45.0, "warn"),
     ],
 )
 async def test_a_value_is_not_graded_against_the_wrong_parameter(
@@ -92,6 +94,14 @@ async def test_a_value_is_not_graded_against_the_wrong_parameter(
     assert verdict.severity != must_not_be, (
         f"{metric}={value} was graded {verdict.severity!r} against "
         f"{verdict.label!r} ({verdict.unit}) — the wrong parameter"
+    )
+    # Severity alone is a weaker net than it was: V28 collapsed the danger
+    # tier, so "graded against a dimensionless ratio" now shows up as an
+    # ordinary "warn" rather than an alarming one. The unit is the tell that
+    # survives — a mg/dL reading judged by a Ratio parameter is the same bug.
+    assert verdict.unit.lower() != "ratio", (
+        f"{metric}={value} (mg/dL) was graded against {verdict.label!r}, "
+        f"a dimensionless ratio"
     )
 
 
@@ -189,9 +199,8 @@ async def test_unapproved_reference_data_never_grades_a_value(db_session):
     await db_session.flush()
     db_session.add(
         ThpAgeRange(
-            thp_id=thp.id, age_min=0, age_max=120, min=0.0, low_danger=0.0,
-            low_warn=50.0, ideal=80.0, high_warn=100.0, high_danger=228.0,
-            max=228.0,
+            thp_id=thp.id, age_min=0, age_max=120, min=0.0,
+            low_warn=50.0, ideal=80.0, high_warn=100.0, max=228.0,
         )
     )
     await db_session.flush()
@@ -210,9 +219,8 @@ async def test_a_hidden_parameter_is_not_used(db_session):
     await db_session.flush()
     db_session.add(
         ThpAgeRange(
-            thp_id=thp.id, age_min=0, age_max=120, min=0.0, low_danger=0.0,
-            low_warn=50.0, ideal=80.0, high_warn=100.0, high_danger=228.0,
-            max=228.0,
+            thp_id=thp.id, age_min=0, age_max=120, min=0.0,
+            low_warn=50.0, ideal=80.0, high_warn=100.0, max=228.0,
         )
     )
     await db_session.flush()
@@ -232,9 +240,8 @@ async def test_a_database_without_the_curation_columns_still_works(db_session):
     await db_session.flush()
     db_session.add(
         ThpAgeRange(
-            thp_id=thp.id, age_min=0, age_max=120, min=0.0, low_danger=0.0,
-            low_warn=50.0, ideal=80.0, high_warn=100.0, high_danger=228.0,
-            max=228.0,
+            thp_id=thp.id, age_min=0, age_max=120, min=0.0,
+            low_warn=50.0, ideal=80.0, high_warn=100.0, max=228.0,
         )
     )
     await db_session.flush()
