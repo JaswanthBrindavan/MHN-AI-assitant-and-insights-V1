@@ -61,7 +61,14 @@ class Settings(BaseSettings):
     chat_engine: str = "legacy"
     # Tool-call rounds before the agent is forced to answer in text. A bound,
     # not a target — the loop must always terminate.
-    llm_max_tool_rounds: int = 3
+    # 3 -> 2. Each round is a SEQUENTIAL model call, and measured wall clock is
+    # round-count x per-call latency and essentially nothing else (all non-model
+    # work in a turn measures 75-310 ms). Worst case drops from 5 calls to 3.
+    #
+    # NOT 1: two tools document a second round in their own descriptions
+    # (ANALYZE_IMAGE says "get the document id from get_documents first"), and
+    # at 1 the budget is exhausted before the chained call can run.
+    llm_max_tool_rounds: int = 2
     # Clarifying questions the assistant may ask per session before it must
     # answer with what it has.
     chat_max_clarifying_questions: int = 2

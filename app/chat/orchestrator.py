@@ -544,11 +544,27 @@ async def _scope_with_carry_forward(
     answers, and deriving one from the other gives both for one call.
     """
     message_codes = await resolve_scope(db, message, set())
-    codes = message_codes | await resolve_scope(db, "", user_codes)
     # Key on "did THIS message name a condition" rather than on `codes`, which
     # is never empty for a user with a pedigree, so the topic carries for
-    # everyone. Union with `codes` keeps pedigree context.
+    # everyone.
     message_named_condition = bool(message_codes)
+    if message_named_condition:
+        # The reader named their topic. Their pedigree is NOT also the topic.
+        #
+        # Unioning it in meant a reader whose father has hypertension asked
+        # "what is type 2 diabetes" and got a scope of {T2DM, MC001, HTN,
+        # MC051} — and `spread_across_conditions` then GUARANTEES the
+        # off-topic code a slot out of k=4, because it exists to stop one
+        # condition taking every slot. So the hypertension profile was
+        # retrieved, put in the prompt, and cited, on a question that named
+        # diabetes explicitly. Measured against the real corpus.
+        #
+        # Pedigree still reaches the answer — through the [P] block, which is
+        # where the reader's own context belongs. It does not belong in the
+        # retrieval scope of a question that named something else.
+        codes = message_codes
+    else:
+        codes = await resolve_scope(db, "", user_codes)
     carried: set[str] = set()
     if not message_named_condition and prior_turns:
         recent_user_text = " ".join(
@@ -1550,6 +1566,76 @@ async def _dispatch_agentic(
         db, message, user_codes, prior_turns
     )
     chunks = await retrieve_chunks(db, codes, message)
+
+    # A question the validated profile answers VERBATIM does not need a model.
+    #
+    # `serve_extractive` has existed in the legacy branch since Phase 4 and the
+    # agentic engine never reached it: `_dispatch` returns into this function
+    # ~230 lines ABOVE it, so this engine re-implemented the expensive half of
+    # that path (retrieval, memory, prompt assembly) and skipped the free half.
+    # Measured: "what is diabetes" costs 4,291 prompt tokens and TWO sequential
+    # model calls here, of which 3,601 tokens cannot contribute to the answer —
+    # while the extractive renderer produces a clinician-reviewed answer from
+    # the same chunks in 21 ms with no model call at all.
+    #
+    # The `is_focused` conjunct is load-bearing and is NOT in the legacy gate:
+    # without it a definitional-SHAPED question whose answer is not a profile
+    # section ("is diabetes curable") would be served a mismatched section with
+    # no model left to notice. `_prefer_section` fails open, so `bool(chunks)`
+    # alone does not mean the corpus actually holds the asked-for section.
+    #
+    # Deliberately NOT including legacy's `llm_provider == "fake"` arm: that
+    # would route every fake-provider test through here and leave the agentic
+    # loop untested.
+    if (
+        risk == NONE
+        and chunks
+        and _named
+        and is_definitional_ask(message)
+        and not is_personal_health_query(message)
+        and is_focused(chunks, target_sections(message))
+    ):
+        extractive = build_extractive_answer(
+            chunks, focused=True, with_menu=True
+        )
+        if extractive is not None:
+            t("Generate",
+              "answered directly from the clinically validated profile "
+              "content (no model call)")
+            verdict = validate_reply(extractive, risk)
+            if verdict.ok:
+                await memory_assembly.record(
+                    db, user_id, codes=codes, flags=tr.matched_terms,
+                    risk=risk, message=message,
+                )
+                await _write_receipt(
+                    db, user_id=user_id, session_id=session_id,
+                    message=message, model_name="extractive",
+                    retrieved=[c.to_dict() for c in chunks],
+                    grounding=None, grounding_status="extractive",
+                    used_rag=True,
+                )
+                t("Output validation", "passed all safety checks")
+                return ChatResult(
+                    response_message=extractive,
+                    risk_level=risk,
+                    recommended_action="discuss_with_clinician",
+                    provenance={
+                        "path": "agentic",
+                        "mode": "extractive",
+                        "used_rag": True,
+                        "conditions": sorted(codes),
+                        "chunks": [c.id for c in chunks],
+                    },
+                    citations=await _agentic_citations(
+                        db, chunks, carried=_carried
+                    ),
+                    language=lang,
+                    trace=trace,
+                )
+            # Validation failed on clinician-reviewed text: fall through to the
+            # model rather than serving a safe reply, since the model may yet
+            # compose something that passes.
 
     # Remember what was raised, at the severity the FLOOR decided — never a
     # severity the model inferred. Placed HERE, before generation, to match
