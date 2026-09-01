@@ -50,7 +50,7 @@ from app.chat.data_handlers import (
     handle_value_check,
 )
 from app.chat.db_release import ReleasingProvider
-from app.chat.episodes import open_episodes
+from app.chat.episodes import is_recovery_message, open_episodes
 from app.chat.episodes import worst_level as episodes_worst_level
 from app.chat.medication_flow import handle_medication_turn
 from app.chat.replies import (
@@ -643,10 +643,18 @@ async def _dispatch(
     _corpus_lookup = (
         is_definitional_ask(message) and not is_personal_health_query(message)
     )
+    # Nor on the turn where they tell us they are better. The episodes are
+    # closed later in THIS turn, by `memory_assembly.record` — but the floor
+    # is read here, before that, so a recovery report used to be answered
+    # with "you mentioned something earlier ... seek medical care promptly".
+    # Observed in staging: the reader said "i am feeling better now" and was
+    # escalated at in the same breath.
+    _recovery = is_recovery_message(message, has_red_flag=bool(tr.matched_terms))
     try:
         _open = await open_episodes(db, user_id)
         if (
             not _corpus_lookup
+            and not _recovery
             and LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]
         ):
             episode_floor = HIGH

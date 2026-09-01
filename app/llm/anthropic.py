@@ -279,6 +279,21 @@ class AnthropicProvider:
         self.model = model
         self.model_name = model
         self._max_tokens = max_tokens
+        # A tool-calling round has to fit the model's tool JSON — and its
+        # thinking blocks, when thinking is on — inside the SAME budget as
+        # the prose. Capping both at the answer budget truncated the round:
+        # stop_reason came back `max_tokens`, `wants_tools` went False
+        # because there was no complete tool_use block, and the turn
+        # arrived with EMPTY text. The reader then got
+        # `Output validation - blocked (empty) - replaced with the safe
+        # reply`: a non-answer, from a question the model was midway
+        # through answering properly. Observed in staging on
+        # "why am i urinating frequently?".
+        #
+        # The brevity rule that keeps answers short is a PROMPT rule. This
+        # number is a truncation guard, and it should only ever bite a
+        # runaway.
+        self._tool_max_tokens = max(max_tokens * 3, 2400)
         self._thinking = thinking
         # A timeout and a retry budget, explicitly. Passing only api_key and
         # base_url left the SDK defaults in force — read=600 s, max_retries=2 —
@@ -306,7 +321,9 @@ class AnthropicProvider:
     ) -> LLMTurn:
         payload: dict = {
             "model": self.model,
-            "max_tokens": self._max_tokens,
+            # Tools may be attached below; budget for the round that can carry
+            # them. See _tool_max_tokens.
+            "max_tokens": self._tool_max_tokens if tools else self._max_tokens,
             "system": _to_system_blocks(system),
             "messages": _to_anthropic_messages(messages),
         }
