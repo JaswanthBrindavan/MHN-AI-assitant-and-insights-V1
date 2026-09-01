@@ -199,8 +199,10 @@ async def _gather(db: AsyncSession, user_id: uuid.UUID) -> dict:
             db, user_id, utcnow() - timedelta(days=30)
         )
         if totals:
+            # The unit travels with the number: "water 2 glasses and 500 ml",
+            # never a bare 502 the model would then quote back as a fact.
             document["habits_30d"] = {
-                k: round(v, 1) for k, v in list(totals.items())[:6]
+                k: t.text() for k, t in list(totals.items())[:6]
             }
     except Exception:  # noqa: BLE001
         logger.warning("habit gather failed", exc_info=True)
