@@ -278,6 +278,18 @@ def _lead(escalation: str, risk: str, reply: str) -> str:
     return f"{escalation} {reply}" if risk == HIGH and reply else reply
 
 
+def _led_action(risk: str, reply: str, action: str) -> str:
+    """The action that matches the reply the reader actually got.
+
+    When `_lead` prefixes the escalation, the reply TELLS them to seek care
+    promptly while `recommended_action` still carried the handler's own verdict
+    — `self_care` for a correlation readout, `discuss_with_clinician` for a
+    summary. So the prose and the machine-readable field said different things
+    in one payload, and the field is the half the mobile clients render.
+    """
+    return "seek_care_promptly" if risk == HIGH and reply else action
+
+
 async def _stage(name: str, coro):
     """Time one pre-retrieval stage and log it. NOT in the user-facing trace.
 
@@ -703,7 +715,7 @@ async def _correlation_reply(
     return ChatResult(
         response_message=_lead(escalation, risk, ability["reply"]),
         risk_level=risk,
-        recommended_action=ability["action"],
+        recommended_action=_led_action(risk, ability["reply"], ability["action"]),
         provenance=prov,
         language=lang,
         trace=trace,
@@ -801,7 +813,7 @@ async def _summary_reply(
     return ChatResult(
         response_message=reply,
         risk_level=risk,
-        recommended_action=ability["action"],
+        recommended_action=_led_action(risk, ability["reply"], ability["action"]),
         provenance=provenance,
         visual=None if provenance.get("degraded") else ability.get("visual"),
         documents=ability.get("documents"),

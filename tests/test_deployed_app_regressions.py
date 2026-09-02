@@ -412,3 +412,29 @@ def test_the_ai_result_parser_is_kept_out_of_the_precedence_list():
     assert parse_ai_result_query("summarise my health") is not None, (
         "if this parser stops claiming a bare summary, it can join the list"
     )
+
+
+def test_a_carried_banner_and_the_action_field_cannot_disagree():
+    """The prose and the machine-readable field are one payload.
+
+    When the escalation leads the reply, the reader is told to seek care
+    promptly while `recommended_action` still carried the handler's own
+    verdict — `self_care` for a correlation readout. The mobile clients render
+    that field, so the two halves of the same answer said different things.
+    """
+    from app.chat.orchestrator import _lead, _led_action
+
+    banner = "Before that — you mentioned something earlier that can be serious."
+    answer = "You logged coffee on 9 of the past 28 days."
+
+    # Banner shown -> the action matches it.
+    assert _lead(banner, "high", answer).startswith("Before that")
+    assert _led_action("high", answer, "self_care") == "seek_care_promptly"
+
+    # No banner -> the handler's own verdict stands.
+    assert _lead(banner, "none", answer) == answer
+    assert _led_action("none", answer, "self_care") == "self_care"
+
+    # Empty reply -> no banner, and no escalation invented for it either.
+    assert _lead(banner, "high", "") == ""
+    assert _led_action("high", "", "self_care") == "self_care"
