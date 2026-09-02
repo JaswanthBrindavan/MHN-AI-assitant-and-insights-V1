@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta, timezone
 
 import sqlalchemy as sa
 from sqlalchemy import select
@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.common import utcnow
 from app.models.coredata import (
+    LifestyleDailyTotal,
     LifestyleLog,
     MoodLog,
     SahhaDailyTotal,
@@ -347,3 +348,334 @@ async def attention(
             logger.warning("attention check failed: %s", metric, exc_info=True)
             record_fail_open("patterns_attention")
     return out
+
+
+# --------------------------------------------------------------------------- #
+# "Yesterday at a glance" — the home-screen card
+# --------------------------------------------------------------------------- #
+#: Wearable and vital metrics the card reads, each with the absolute change
+#: that counts as a move, in that metric's OWN unit (see `OUTCOMES`).
+#:
+#: Absolute rather than a shared percentage because the metrics do not share a
+#: scale: eleven steps more than usual is a rounding artefact, three beats per
+#: minute on a resting heart rate is not, and no single ratio is right for both.
+YESTERDAY_METRICS: dict[str, float] = {
+    "sleep_duration": 30.0,                 # minutes
+    "steps": 1500.0,                        # steps
+    "heart_rate_resting": 3.0,              # bpm
+    "heart_rate_variability_sdnn": 6.0,     # ms
+    "spo2": 2.0,                            # percentage points
+    "mood": 2.0,                            # 1-10 slider stops
+}
+
+#: Manual trackers, in the unit `lifestyle_daily_total.total` keeps for each.
+YESTERDAY_HABITS: dict[str, float] = {
+    "water": 500.0,     # ml
+    "coffee": 1.0,      # servings
+    "alcohol": 15.0,    # ml
+}
+
+#: How far back the baseline looks. Two weeks is enough to survive a weekend
+#: and short enough to still describe how somebody is living now.
+YESTERDAY_BASELINE_DAYS = 14
+
+#: mhn-spring's `PeriodSymptom` entries carrying `redFlag = true`.
+#:
+#: Duplicated from a Java enum, knowingly. The alternative is an HTTP call to
+#: Spring on a home-screen render, and that enum's own comment says the list
+#: "changes about never" and that adding one is a reviewed code change. The
+#: cost of drift here is a symptom losing its place in the ordering — it is
+#: still shown, and nothing is diagnosed either way.
+SPRING_RED_FLAG_SYMPTOMS = frozenset({
+    "clots_large", "flooding", "spotting_between", "severe_pain",
+    "bleeding_after_menopause",
+})
+
+#: The zone the app's calendar days are cut in.
+#:
+#: mhn-spring pins this GLOBALLY — `tracking_zone text := 'Asia/Kolkata'` in the
+#: composed schema, with a comment saying the single default is deliberate — and
+#: it is the zone `period_day_log.log_date`, `lifestyle_daily_total.bucket_start`
+#: and `sahha_daily_total.bucket_start` were all written in.
+#:
+#: This card names ONE day, so it cannot use the trick a range summary can. A
+#: window may end a day late and over-collect harmlessly; "yesterday" cannot,
+#: because the extra day is today and attributing today's symptom to yesterday
+#: is the error the widening was meant to avoid. So the day is CUT in this zone
+#: instead, and each source is then queried in its own terms.
+#:
+#: A fixed offset rather than `ZoneInfo("Asia/Kolkata")` for two reasons. India
+#: has never observed daylight saving, so +05:30 IS the zone rather than an
+#: approximation of it; and a named zone needs the IANA database, which Windows
+#: does not ship — `ZoneInfoNotFoundError` on any developer machine without the
+#: `tzdata` package installed. If this ever stops being one global zone, this
+#: constant is the single place that has to become a lookup.
+TRACKING_ZONE = timezone(timedelta(hours=5, minutes=30), "IST")
+
+
+def tracking_today() -> date:
+    """Today as the app's own calendar reckons it, not as UTC does.
+
+    UTC+5:30 is always AHEAD, so for the five and a half hours before midnight
+    UTC the two disagree — and every day-bucketed table in this schema was
+    written on the near side of that disagreement.
+    """
+    return datetime.now(TRACKING_ZONE).date()
+
+
+def _tracking_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """The UTC instants a tracking-zone calendar day starts and ends at.
+
+    For the one source that is a TIMESTAMP rather than a calendar date:
+    `symptom_logs.created_at` is UTC, so `date(created_at)` is the UTC day and
+    comparing it to a tracking-zone day is the same mistake in the other
+    direction. A half-open range converted from the zone is exact.
+    """
+    start = datetime.combine(day, time.min, tzinfo=TRACKING_ZONE)
+    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
+
+
+#: At most this many symptoms are named. Two lines cannot list a whole day.
+MAX_SYMPTOMS = 3
+
+#: Sort floor for a ticked symptom, which carries no time of its own.
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _by_day(series: list[DayValue]) -> dict[date, float]:
+    return {p.day: p.value for p in series}
+
+
+def _signal_for(by_day: dict[date, float], day: date, *, min_change: float, span: int):
+    """Yesterday's figure against the days behind it, or None if unrecorded."""
+    from app.patterns.yesterday import baseline_of, day_signal
+
+    value = by_day.get(day)
+    if value is None:
+        return None
+    behind = [by_day.get(day - timedelta(days=n)) for n in range(1, span + 1)]
+    return day_signal(value, baseline_of(behind), min_change=min_change)
+
+
+async def _habit_totals(
+    db: AsyncSession, user_id, start: date, end: date,
+) -> dict[str, dict[date, float]]:
+    """Daily totals per habit, from mhn-spring's own rollup.
+
+    The rollup rather than `lifestyle_log` because `bucket_start` was assigned
+    in `app.tracking.zone` at write time, and that is the day boundary a
+    wearable night is aligned to. `date(logged_at)` would be the UTC day, so a
+    late-evening coffee would land against the wrong night's sleep.
+    """
+    rows = (
+        await db.execute(
+            select(
+                LifestyleDailyTotal.metric,
+                LifestyleDailyTotal.bucket_start,
+                LifestyleDailyTotal.total,
+            ).where(
+                LifestyleDailyTotal.user_id == user_id,
+                LifestyleDailyTotal.metric.in_(tuple(YESTERDAY_HABITS)),
+                LifestyleDailyTotal.bucket_start >= start,
+                LifestyleDailyTotal.bucket_start <= end,
+            )
+        )
+    ).all()
+
+    out: dict[str, dict[date, float]] = {m: {} for m in YESTERDAY_HABITS}
+    for r in rows:
+        out.setdefault(r.metric, {})[r.bucket_start] = float(r.total)
+    return out
+
+
+async def _symptoms_on(db: AsyncSession, user_id, day: date) -> tuple[str, ...]:
+    """What the reader said, and what they ticked, on one day."""
+    return await symptoms_between(db, user_id, day, day)
+
+
+async def ticked_between(
+    db: AsyncSession, user_id, since: date, until: date,
+) -> tuple[tuple[str, int], ...]:
+    """Cycle-tracking symptoms over an INCLUSIVE range, as (phrase, rank).
+
+    Split out of `symptoms_between` so a caller that ALREADY holds the chat
+    side can read just this one without a second pass over `symptom_logs`. The
+    health summary is that caller: it renders its own richer view of
+    `symptom_logs` (counts, dates, whether the episode is still open) and needs
+    only the codes that never reach chat.
+
+    The normalisation stays HERE, which is the point. mhn-spring stores
+    `PeriodSymptom` codes ("lower_back_pain") and chat stores the phrase
+    somebody typed ("lower back pain"); both must reduce to one spelling or a
+    reader sees the same complaint twice. Callers may difference the result
+    against phrases they already hold, because both sides are the same
+    lowercase spaced form — but no caller should be converting codes itself.
+
+    Rank mirrors `symptoms_between`: a Spring red flag ranks with the
+    high-severity chat rows, anything else alongside an ordinary mention.
+    """
+    from app.models.coredata import PeriodDayLog
+
+    rows = (
+        await db.execute(
+            select(PeriodDayLog.symptoms).where(
+                PeriodDayLog.user_id == user_id,
+                PeriodDayLog.log_date >= since,
+                PeriodDayLog.log_date <= until,
+            )
+        )
+    ).scalars().all()
+
+    out: dict[str, int] = {}
+    for codes in rows or []:
+        for code in codes or []:
+            phrase = str(code).replace("_", " ").strip().lower()
+            if not phrase:
+                continue
+            rank = 1 if str(code) in SPRING_RED_FLAG_SYMPTOMS else 2
+            out[phrase] = min(rank, out.get(phrase, rank))
+    return tuple(out.items())
+
+
+async def symptoms_between(
+    db: AsyncSession, user_id, since: date, until: date,
+    *, limit: int = MAX_SYMPTOMS,
+) -> tuple[str, ...]:
+    """What the reader said, and what they ticked, over an INCLUSIVE range.
+
+    Two sources, and they are not interchangeable:
+
+    * `symptom_logs` — anything mentioned in chat. Written by `log_symptom`
+      (ordinary symptoms, always `risk_level = "none"`) and by `open_or_touch`
+      (red-flag terms, `high` or `emergency`). **Most rows are `none`, and that
+      is normal** — a headache is not a reason to tell somebody to seek care.
+      Filtering on severity would leave this empty for most readers most days,
+      so severity ORDERS and never excludes.
+    * `period_day_log.symptoms` — codes the reader ticked in cycle tracking.
+      These never reach chat, so they are invisible to the table above.
+
+    `symptom_logs` is append-only, one row per mention, so a reader who said
+    "headache" four times yesterday has four rows. De-duplicated here, or the
+    card would name it four times.
+
+    **The two sources spell things differently and are merged on the spelling.**
+    mhn-spring stores `PeriodSymptom` CODES ("lower_back_pain"); chat stores the
+    free phrase somebody typed ("lower back pain"). Both are normalised to the
+    same lowercase, spaced form and then keyed on it, so one complaint logged
+    both ways is named once rather than appearing twice in two spellings. Any
+    caller merging these elsewhere would have to solve that again, which is the
+    reason this returns finished phrases rather than rows.
+
+    ``limit`` defaults to `MAX_SYMPTOMS`, which is sized for a two-line card.
+    The health summary passes a larger one: it is a full readout of the record
+    rather than a glance, and silently dropping the fourth symptom a reader
+    logged would be the summary asserting something it did not check.
+    """
+    from app.models.chat import SymptomLog
+    from app.triage.red_flags import LEVEL_ORDER
+
+    # phrase -> (rank, when). Lower rank first, then most recently said.
+    ranked: dict[str, tuple[int, datetime]] = {}
+
+    said = (
+        await db.execute(
+            select(SymptomLog.symptom, SymptomLog.risk_level, SymptomLog.created_at)
+            .where(
+                SymptomLog.user_id == user_id,
+                SymptomLog.created_at >= _tracking_day_bounds(since)[0],
+                SymptomLog.created_at < _tracking_day_bounds(until)[1],
+            )
+        )
+    ).all()
+    for row in said:
+        phrase = (row.symptom or "").strip().lower()
+        if not phrase:
+            continue
+        rank = 2 - LEVEL_ORDER.get(row.risk_level or "none", 0)
+        when = row.created_at or _EPOCH
+        seen = ranked.get(phrase)
+        if seen is None or rank < seen[0] or (rank == seen[0] and when > seen[1]):
+            ranked[phrase] = (rank, when)
+
+    for phrase, rank in await ticked_between(db, user_id, since, until):
+        seen = ranked.get(phrase)
+        if seen is None:
+            ranked[phrase] = (rank, _EPOCH)
+        elif rank < seen[0]:
+            ranked[phrase] = (rank, seen[1])
+
+    ordered = sorted(ranked.items(), key=lambda kv: (kv[1][0], -kv[1][1].timestamp()))
+    return tuple(phrase for phrase, _ in ordered[:limit])
+
+
+async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = None):
+    """Everything the card may say, for the last COMPLETE day.
+
+    Yesterday rather than today, for the reason `window_bounds` gives: a day in
+    progress is not a day, and the wearable rollups only catch up when Spring
+    reconciles overnight.
+
+    Every read is independent and every absence is honest. A reader with no
+    wearable simply arrives with fewer signals, and the ladder then says less
+    rather than inventing a figure to say it about. Each read also gets its own
+    SAVEPOINT, like `attention` above: one missing rollup must not blank a card
+    that four other sources could still fill.
+    """
+    from app.patterns.yesterday import YesterdayFacts
+
+    # The app's own calendar, not UTC's. Every day-bucketed table this reads was
+    # written in the tracking zone, and for five and a half hours every evening
+    # `utcnow().date()` names a different day than the rows do.
+    end = today or tracking_today()
+    day = end - timedelta(days=1)
+    span = YESTERDAY_BASELINE_DAYS
+
+    series: dict[str, dict[date, float]] = {}
+    for metric in YESTERDAY_METRICS:
+        try:
+            async with db.begin_nested():
+                got = await daily_series(db, user_id, metric, days=span + 2, today=end)
+            series[metric] = _by_day(got)
+        except Exception:  # noqa: BLE001 — one metric must not blank the card
+            logger.warning("yesterday metric failed: %s", metric, exc_info=True)
+            record_fail_open("patterns_yesterday")
+            series[metric] = {}
+
+    try:
+        async with db.begin_nested():
+            habits = await _habit_totals(db, user_id, day - timedelta(days=span), day)
+    except Exception:  # noqa: BLE001
+        logger.warning("yesterday habits failed", exc_info=True)
+        record_fail_open("patterns_yesterday")
+        habits = {m: {} for m in YESTERDAY_HABITS}
+
+    try:
+        async with db.begin_nested():
+            symptoms = await _symptoms_on(db, user_id, day)
+    except Exception:  # noqa: BLE001 — the top rung must not 500 the card
+        logger.warning("yesterday symptoms failed", exc_info=True)
+        record_fail_open("patterns_yesterday")
+        symptoms = ()
+
+    def metric_signal(name: str):
+        return _signal_for(
+            series.get(name, {}), day, min_change=YESTERDAY_METRICS[name], span=span,
+        )
+
+    def habit_signal(name: str):
+        return _signal_for(
+            habits.get(name, {}), day, min_change=YESTERDAY_HABITS[name], span=span,
+        )
+
+    return YesterdayFacts(
+        symptoms=symptoms,
+        sleep_minutes=metric_signal("sleep_duration"),
+        steps=metric_signal("steps"),
+        resting_heart_rate=metric_signal("heart_rate_resting"),
+        hrv=metric_signal("heart_rate_variability_sdnn"),
+        spo2=metric_signal("spo2"),
+        mood=metric_signal("mood"),
+        water_ml=habit_signal("water"),
+        caffeine_cups=habit_signal("coffee"),
+        alcohol_ml=habit_signal("alcohol"),
+    )

@@ -64,6 +64,7 @@ COREDATA_TABLES = {
     "thp_age_range",
     "medical_condition",
     "medicine_master",
+    "period_day_log",
     "period_settings",
     "period_status",
     "period_tracking",
@@ -776,6 +777,37 @@ class PeriodTracking(Base):
     # class, and the only one an exemption was hiding.
     cycle_length: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     flow_intensity: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+
+
+class PeriodDayLog(Base):
+    """One row per user per day on which anything was logged (mhn-spring's V5).
+
+    Where the symptoms actually live. The note on ``PeriodTracking`` above
+    explains why they are not there: V1 hung them off the cycle row, V5 dropped
+    that column outright, and the mapping that survived pointed at nothing.
+    **This table is the one with a writer**, and ``symptoms text[]`` is declared
+    in V5 with a validated vocabulary behind it — mhn-spring's ``PeriodSymptom``
+    enum, which is what the codes in the array come from.
+
+    Deliberately independent of bleeding: a day with no flow and three symptoms
+    is the ordinary mid-cycle entry, which is exactly the day worth reading.
+
+    Only the three columns anything here needs are mapped. Given the history
+    above, mapping a column this service does not read is a liability rather
+    than future-proofing.
+    """
+
+    __tablename__ = "period_day_log"
+
+    id: Mapped[int] = mapped_column(
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    log_date: Mapped[date] = mapped_column(sa.Date, nullable=False)
+    #: Codes, not labels — "lower_back_pain", not "Lower back pain".
+    symptoms: Mapped[list | None] = mapped_column(
+        sa.ARRAY(sa.String).with_variant(sa.JSON(), "sqlite"), nullable=True
+    )
 
 
 class UserThpSeries(Base):

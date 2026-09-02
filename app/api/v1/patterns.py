@@ -20,6 +20,7 @@ another — see ``app/patterns/render.py``.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,8 +34,11 @@ from app.patterns.service import (
     TREND_METRICS,
     attention,
     daily_series,
+    gather_yesterday,
+    tracking_today,
     trend,
 )
+from app.patterns.yesterday import summarise_yesterday
 
 router = APIRouter(prefix="/patterns", tags=["patterns"])
 
@@ -156,3 +160,50 @@ async def worth_a_look(
     both figures, and points at a doctor rather than at a conclusion.
     """
     return {"items": await attention(db, current_user)}
+
+
+@router.get("/yesterday")
+async def yesterday_at_a_glance(
+    current_user: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """The home-screen card — two lines about the day just gone.
+
+    Here rather than in each app because three clients render this card, and a
+    ladder of rules plus a page of copy would otherwise be written three times
+    and drift three ways. It is also almost entirely wording, and wording that
+    lives in a client can only be changed by shipping an app-store release.
+
+    `as_of` is the day the lines describe: **yesterday, not today**. A day in
+    progress is not a day, and the wearable rollups only catch up when Spring
+    reconciles overnight. Clients should show the date rather than assume it —
+    a reader opening the app at 00:30 is being told about the day before the
+    one they just finished.
+
+    `has_data` false means nothing was recorded at all, and there is no card to
+    draw. That is deliberately distinct from a steady day, which HAS data and
+    says so: "no major changes" and "nothing recorded" look identical on screen
+    and mean opposite things.
+
+    Owner-scoped, and only ever the caller's own row. There is no family path
+    here on purpose: `symptom_logs` has no sharing model, and the other family
+    reads honour `req_read`/`acc_read` and `file_access_exclusions` that this
+    would bypass entirely.
+    """
+    # Read the clock ONCE and hand the same date to both. Two calls to the clock
+    # can straddle midnight, and the result is a reply that names one day in
+    # `as_of` and describes another — a window in the wording that is not the
+    # window queried.
+    today = tracking_today()
+    facts = await gather_yesterday(db, current_user, today=today)
+    said = summarise_yesterday(facts)
+    day = (today - timedelta(days=1)).isoformat()
+
+    if said is None:
+        return {"as_of": day, "has_data": False, "headline": None, "detail": None}
+    return {
+        "as_of": day,
+        "has_data": True,
+        "headline": said.headline,
+        "detail": said.detail,
+    }
