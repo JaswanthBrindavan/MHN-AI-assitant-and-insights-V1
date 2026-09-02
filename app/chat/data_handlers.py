@@ -30,6 +30,8 @@ from app.chat.abilities import (
     SummaryQuery,
     TrackerAdd,
     TrackerQuery,
+    is_about_me_query,
+    is_my_conditions_query,
     param_tokens,
     parse_ai_result_query,
     parse_correlation_query,
@@ -97,6 +99,7 @@ from app.health import reference as health_reference
 from app.knowledge.registry import load_condition_index
 from app.models.chat import ConversationMessage, McpChunk
 from app.models.common import utcnow
+from app.models.core import User
 from app.models.coredata import MedicalCondition, Report, UnclassifiedFile
 from app.rag.retrieval import RetrievedChunk, resolve_scope
 from app.telemetry import record_fail_open
@@ -1891,6 +1894,7 @@ async def handle_report_param_ask(
             .limit(20)
         )
     ).scalars().all()
+    history: list[tuple] = []
     for r in rows:
         ai = (r.content or {}).get("ai") or {}
         results = ((ai.get("extraction") or {}).get("results")) or []
@@ -1923,21 +1927,65 @@ async def handle_report_param_ask(
                 flag_note = " It is within the printed reference range."
             else:
                 flag_note = ""
-            return {
-                "reply": (
-                    f"Your most recent {test_name} on record is "
-                    f"{value:g} {unit}".rstrip()
-                    + f" (from a report dated {when}).{flag_note} "
-                    f"{_NOT_MEDICAL_ADVICE}"
-                ),
-                "action": (
-                    "discuss_with_clinician" if abnormal
-                    else "review_with_clinician"
-                ),
-                "provenance": {"path": "report_param", "term": term,
-                               "matched": test_name},
-            }
-    return None
+            # Collect rather than return. This used to `return` on the first
+            # match, so "show my hba1c graph" got one number and no chart —
+            # the reader asked for a trend and was handed a reading. Every
+            # report on file carries the same parameter over time, and that
+            # series is what a graph is.
+            history.append((r.created_at, value, unit, test_name, flag,
+                            abnormal, when))
+            break        # one value per report: the newest entry in it
+
+    if not history:
+        return None
+
+    # `rows` is newest-first, so the head is the latest reading.
+    _, value, unit, test_name, flag, abnormal, when = history[0]
+    flag_note = (
+        f" It is flagged {flag} against the printed reference range."
+        if abnormal else (" It is within the printed reference range." if flag
+                          else "")
+    )
+
+    # Oldest-first for the chart; a trend read right to left is not a trend.
+    points = [h for h in reversed(history) if h[0] is not None]
+    visual = None
+    if len(points) >= 2:
+        visual = chart_payload(
+            "line",
+            f"{test_name} — last {len(points)} results",
+            [p[0].strftime("%d %b") for p in points],
+            [float(p[1]) for p in points],
+            unit=unit or None,
+        )
+
+    trend_note = ""
+    if len(points) >= 2:
+        # Stated as a change between two readings on file, never as a verdict
+        # about where it is heading or what it means.
+        first, last = float(points[0][1]), float(points[-1][1])
+        if first != last:
+            direction = "higher" if last > first else "lower"
+            trend_note = (
+                f" Across the {len(points)} results on file it has gone from "
+                f"{first:g} to {last:g} {unit}".rstrip() + f", {direction} "
+                f"than the earliest one here."
+            )
+
+    return {
+        "reply": (
+            f"Your most recent {test_name} on record is "
+            f"{value:g} {unit}".rstrip()
+            + f" (from a report dated {when}).{flag_note}{trend_note} "
+            f"{_NOT_MEDICAL_ADVICE}"
+        ),
+        "action": (
+            "discuss_with_clinician" if abnormal else "review_with_clinician"
+        ),
+        "provenance": {"path": "report_param", "term": term,
+                       "matched": test_name, "results": len(points)},
+        "visual": visual,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2749,3 +2797,103 @@ async def handle_medication_command(
         db, user_id, cmd.action, cmd.name,
         strength=cmd.strength, is_prn=cmd.is_prn,
     )
+
+
+# --------------------------------------------------------------------------- #
+# "Who am I" / "what health do I have" — about the READER
+# --------------------------------------------------------------------------- #
+async def handle_about_me_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """The reader's own record, when they ask about themselves.
+
+    Reported from the deployed app: "who am i" was answered with a description
+    of the ASSISTANT. It never matched the assistant-identity terms — those are
+    "who are YOU" — so no deterministic handler claimed it and the model filled
+    the gap with the nearest thing it knew about, which was itself.
+
+    "What health do I have" had the same shape: nothing claimed it, so a
+    question with an exact answer on file was composed by a model instead.
+
+    Both are answered here from the record, with the records framing every
+    other data reply uses. Nothing is graded and nothing is diagnosed: a
+    condition is reported because it is written down, not because we agree
+    with it.
+    """
+    wants_profile = is_about_me_query(message)
+    wants_conditions = is_my_conditions_query(message)
+    if not (wants_profile or wants_conditions):
+        return None
+
+    lines: list[str] = []
+
+    if wants_profile:
+        try:
+            row = (
+                await db.execute(
+                    select(User.name, User.dob, User.gender).where(
+                        User.id == user_id
+                    )
+                )
+            ).first()
+        except Exception:  # noqa: BLE001 — a missing profile is not an error
+            row = None
+        if row is not None:
+            name, dob, gender = row
+            bits = [b for b in (name, _age_phrase(dob), gender) if b]
+            if bits:
+                lines.append("You are " + ", ".join(str(b) for b in bits) + ".")
+
+    # Conditions, for both questions: "who am I" without them is a name, and
+    # the reader asking it in a health app is not asking for their name.
+    try:
+        conditions = await medical_records(db, user_id, type_="condition")
+    except Exception:  # noqa: BLE001
+        logger.warning("condition read failed", exc_info=True)
+        conditions = []
+
+    if conditions:
+        named = "; ".join(
+            f"{c.name}" + (f" ({c.status})" if c.status else "")
+            for c in conditions[:8]
+        )
+        lines.append(f"Your records list: {named}.")
+    else:
+        # Absence of a RECORD, never absence of a condition.
+        lines.append(
+            "There are no conditions on your record. That is what is written "
+            "down here, not a statement that you have none."
+        )
+
+    if wants_profile:
+        try:
+            meds = await active_medications(db, user_id)
+        except Exception:  # noqa: BLE001
+            meds = []
+        if meds:
+            lines.append(f"Current medications on record: {'; '.join(meds)}.")
+
+    lines.append(_NOT_MEDICAL_ADVICE)
+    return {
+        "reply": " ".join(lines),
+        "action": "review_with_clinician",
+        "provenance": {
+            "path": "about_me",
+            "asked": "profile" if wants_profile else "conditions",
+            "conditions": len(conditions),
+        },
+    }
+
+
+def _age_phrase(dob) -> str:
+    """"41" from a date of birth, or "" — never a guess."""
+    if dob is None:
+        return ""
+    try:
+        today = utcnow().date()
+        years = today.year - dob.year - (
+            (today.month, today.day) < (dob.month, dob.day)
+        )
+        return f"{years}" if 0 < years < 130 else ""
+    except Exception:  # noqa: BLE001
+        return ""

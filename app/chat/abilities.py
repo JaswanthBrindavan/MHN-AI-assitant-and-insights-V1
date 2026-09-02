@@ -778,16 +778,53 @@ _PARAM_ASK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "my ferritin trend", "my ggt over time" — a bare "my <word>" is far too
+# greedy to be a parameter ask on its own ("my father", "my reports"), but a
+# CHART word after it is the reader saying which kind of thing they mean. The
+# chart word is stripped from the term by `parse_report_param_ask`.
+_PARAM_TREND_RE = re.compile(
+    r"^\s*(?:my|the)\s+([a-z][a-z0-9 /().%-]{2,40}?)\s+"
+    r"(?:graphs?|charts?|trends?|history|over time|progress(?:ion)?)\s*\??$",
+    re.IGNORECASE,
+)
+
+
+# Words that describe HOW the reader wants the parameter shown, not WHICH
+# parameter it is. Reported from the deployed app as "unable to pull the graphs
+# for individual THPs": "show my ferritin graph" parsed the term as "ferritin
+# graph", and the handler matches by requiring every token of the term to
+# appear in the test name — so the word "graph" made the parameter
+# unmatchable, and asking for a chart was the thing that broke the lookup.
+_CHART_WORDS = frozenset({
+    "graph", "graphs", "chart", "charts", "trend", "trends", "trending",
+    "history", "over", "time", "plot", "curve", "progress", "progression",
+})
+
 
 def parse_report_param_ask(message: str) -> str | None:
-    """The parameter name the user asked about, or None."""
-    m = _PARAM_ASK_RE.search(message.strip())
+    """The parameter name the user asked about, or None.
+
+    Chart words are stripped: they say how to draw it, not what it is.
+    """
+    m = _PARAM_ASK_RE.search(message.strip()) or _PARAM_TREND_RE.search(
+        message.strip()
+    )
     if not m:
         return None
-    term = m.group(1).strip()
+    term = " ".join(
+        w for w in m.group(1).strip().split()
+        if w.lower().strip(".,?") not in _CHART_WORDS
+    ).strip()
     if len(term) < 3:
         return None
     return term
+
+
+def wants_param_trend(message: str) -> bool:
+    """True when the reader asked to SEE it over time, not just its value."""
+    low = (message or "").lower()
+    return any(w in low for w in ("graph", "chart", "trend", "over time",
+                                  "history", "progress"))
 
 
 def param_tokens(text: str) -> set[str]:
@@ -1360,3 +1397,48 @@ def parse_medication_command(message: str) -> MedicationCommand | None:
     return MedicationCommand(
         action=action, name=name, strength=strength, is_prn=is_prn
     )
+
+
+# --------------------------------------------------------------------------- #
+# "Who am I" / "what health do I have" — about the READER, not the assistant
+# --------------------------------------------------------------------------- #
+# Reported from the deployed app: "who am i" was answered with a description of
+# the ASSISTANT. It never matched `_IDENTITY_TERMS` (those are "who are YOU"),
+# so no deterministic handler claimed it and the model filled the gap with the
+# nearest thing it knew about — itself.
+#
+# Both of these are questions about the reader's own record, and the record is
+# already read by `medical_records` and friends. They belong on the
+# deterministic path for the same reason every other records question does:
+# the answer is a fact we hold, not something to be composed.
+_ABOUT_ME_RE = re.compile(
+    r"\bwho am i\b|\bwhat do you know about me\b|\btell me about myself\b"
+    r"|\bmy (?:profile|details)\b|\bwhat(?:'s| is) my (?:profile|info)\b",
+    re.IGNORECASE,
+)
+
+_MY_CONDITIONS_RE = re.compile(
+    r"\bwhat health (?:issues?|problems?|conditions?)\b"
+    r"|\bwhat (?:health )?(?:do i have|have i got)\b"
+    # "what CONDITIONS do i have" — the noun sits between "what" and "do i
+    # have", so the branch above cannot see it. Deliberately a closed list of
+    # nouns: "what DOCUMENTS do i have" is the document handler's question,
+    # not this one.
+    r"|\bwhat (?:health |medical )?(?:conditions?|problems?|issues?|ailments?)"
+    r"\s+(?:do i have|have i got)\b"
+    r"|\bwhat(?: are)? my (?:health )?(?:conditions?|problems?|issues?|ailments?)\b"
+    r"|\bwhat am i diagnosed with\b|\bmy diagnos[ei]s\b"
+    r"|\bdo i have any (?:health )?(?:conditions?|problems?)\b"
+    r"|\bmy medical (?:history|conditions?)\b",
+    re.IGNORECASE,
+)
+
+
+def is_about_me_query(message: str) -> bool:
+    """"Who am I" — the READER, never the assistant."""
+    return bool(_ABOUT_ME_RE.search(message or ""))
+
+
+def is_my_conditions_query(message: str) -> bool:
+    """"What health do I have" — the conditions on their record."""
+    return bool(_MY_CONDITIONS_RE.search(message or ""))

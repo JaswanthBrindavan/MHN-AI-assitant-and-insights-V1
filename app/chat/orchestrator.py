@@ -48,6 +48,7 @@ from app.chat.conversation import (
 )
 from app.chat.correlation import READ_FAILED as CORRELATION_READ_FAILED
 from app.chat.data_handlers import (
+    handle_about_me_query,
     handle_ai_result_query,
     handle_correlation_query,
     handle_doctor_consult_query,
@@ -1188,6 +1189,33 @@ async def _dispatch(
     )
     if summary is not None:
         return summary
+
+    # 3.49) "Who am I" and "what health do I have". SHARED, for the reason
+    #       every deterministic handler is: reported from the deployed app,
+    #       "who am i" was answered with a description of the ASSISTANT. It
+    #       never matched the assistant-identity terms — those are "who are
+    #       YOU" — so nothing claimed it and the model filled the gap with the
+    #       nearest thing it knew about, itself. The answer is on file.
+    if tr.level == NONE:
+        try:
+            async with db.begin_nested():
+                about = await handle_about_me_query(db, user_id, message)
+        except Exception:  # noqa: BLE001 — a records read must not break a turn
+            logger.warning("about-me read failed", exc_info=True)
+            record_fail_open("about_me")
+            about = None
+        if about is not None:
+            t("Records", "looked up: your own record")
+            return ChatResult(
+                response_message=_lead(escalation, risk, about["reply"]),
+                risk_level=risk,
+                recommended_action=_led_action(
+                    risk, about["reply"], about["action"]
+                ),
+                provenance=about["provenance"],
+                language=lang,
+                trace=trace,
+            )
 
     # 3.5) Engine selection. Everything above — the triage floor, the scope
     #      guard, the emergency directive, the canned conversational replies
