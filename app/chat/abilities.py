@@ -1240,6 +1240,14 @@ _NOT_A_DRUG_NAME = frozenset({
     "badly", "worse", "better", "lower", "higher", "less", "more",
     "poor", "good", "bad", "well", "really", "very", "just", "still",
     "think", "feel", "feeling", "feels", "been", "being", "about",
+    # Measures and quantities. "hours" and "need" both reached the catalogue
+    # and one of them matched; a 250,000-row product list will match a
+    # surprising number of ordinary words, so the guard is this list, not the
+    # lookup.
+    "hour", "hours", "hrs", "minute", "minutes", "mins", "need", "needs",
+    "glass", "glasses", "cup", "cups", "litre", "litres", "liter", "liters",
+    "gram", "grams", "time", "times", "amount", "number",
+    "most", "least", "enough", "should", "would", "could",
 })
 
 
@@ -1262,6 +1270,15 @@ def medication_candidates(message: str) -> tuple[str, ...]:
     """
     low = message.lower()
     if not _CORRELATION_CUE_RE.search(low) or not _FIRST_PERSON_RE.search(low):
+        return ()
+    # A NORMATIVE question is not an effect question about their records, and
+    # the correlation parser already declines it for that reason. Running the
+    # catalogue check on it anyway is how "how many hours of sleep do i need
+    # when i drink coffee" came back with the MEDICATION decline: "hours" and
+    # "need" became candidates, one of them prefix-matched something in a
+    # 250,000-row catalogue, and a question about nothing of the sort was
+    # routed to the prescriber.
+    if _NORM_QUESTION_RE.search(low):
         return ()
     seen: list[str] = []
     for word in re.findall(r"[a-z][a-z-]{3,}", low):

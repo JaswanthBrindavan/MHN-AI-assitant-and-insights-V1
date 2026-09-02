@@ -21,7 +21,11 @@ from __future__ import annotations
 
 import uuid
 
-from app.chat.abilities import medication_candidates, parse_correlation_query
+from app.chat.abilities import (
+    _NOT_A_DRUG_NAME,
+    medication_candidates,
+    parse_correlation_query,
+)
 from app.chat.data_handlers import handle_correlation_query
 from app.models.coredata import MedicineTracking
 
@@ -126,3 +130,42 @@ def test_the_parser_itself_still_cannot_see_a_drug_name():
     """Pins WHY the check is in the handler. If this ever starts passing, the
     parser learned drug names and the handler check may be redundant."""
     assert parse_correlation_query("does my metformin affect my sleep") is None
+
+
+# --------------------------------------------------------------------------- #
+# The catalogue check must not claim questions that name no medicine
+# --------------------------------------------------------------------------- #
+def test_a_normative_question_is_not_routed_to_the_prescriber():
+    """Found on staging: "how many hours of sleep do i need when i drink
+    coffee" came back with the MEDICATION decline — "You asked about a
+    medicine there" — for a message naming no medicine at all.
+
+    Two causes, both here. The candidate extractor ran on a message the
+    correlation parser had already declined as NORMATIVE, and "hours" and
+    "need" became candidates; against a 250,000-row product catalogue one of
+    them matched. A catalogue that large will match a surprising number of
+    ordinary words, so the guard has to be the word list, not the lookup.
+    """
+    for m in (
+        "how many hours of sleep do i need when i drink coffee",
+        "how much sleep should i get when i drink coffee",
+        "is 8 hours of sleep normal when i drink coffee",
+        "how many cups of coffee is enough when i sleep badly",
+    ):
+        assert medication_candidates(m) == (), m
+
+
+def test_measure_words_are_never_drug_candidates():
+    """Each of these reached `find_drug` before the list was widened."""
+    for word in ("hours", "need", "cups", "glasses", "steps", "minutes"):
+        assert word in _NOT_A_DRUG_NAME, word
+
+
+def test_a_real_drug_name_is_still_found():
+    """The tightening must not silence the check it exists for."""
+    assert medication_candidates("does my metformin affect my sleep") == (
+        "metformin",
+    )
+    assert "amlodipine" in medication_candidates(
+        "is my amlodipine affecting my hrv"
+    )
