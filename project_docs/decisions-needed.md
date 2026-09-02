@@ -602,10 +602,12 @@ Not blocking, but you should know:
 
 1. ~~**HDL grades backwards, and `ThpAgeRange.sex` is unmapped**~~ — fixed in
    800f9cd, see D12.
-2. **"does my metformin affect my sleep"** is answered as a sleep lookup. The
-   correlation parser declines on medication *nouns*, but a bare drug name
-   needs a catalogue check, and inventing a drug-name heuristic was not worth
-   it at 3am. `medicine_master` is right there.
+2. ~~**"does my metformin affect my sleep"** is answered as a sleep lookup~~ —
+   fixed in fdd4647. The catalogue check runs in the handler (the parser is
+   pure and cannot query), gated behind `medication_candidates()` so it costs
+   nothing on an ordinary turn, and checks the reader's own medication list
+   before `medicine_master` — that list is populated by definition, whereas
+   the catalogue can be empty in an environment that never ran V19.
 3. **`pg`-marked coexistence tests** have still never been run on this machine.
 4. **The reference catalogue has junk**: `HDL/LDL Ratio` has
    `ideal = 499.7, high_warn = 999`.
