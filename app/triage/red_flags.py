@@ -416,3 +416,71 @@ def triage(message: str) -> TriageResult:
         matched_terms=sorted(set(matched)),
         self_harm=bool(self_harm_hits),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Ordinary symptoms — HISTORY ONLY. DRAFT, and NOT part of the floor.
+# --------------------------------------------------------------------------- #
+# Triage has three levels — NONE, HIGH, EMERGENCY — and every phrase table
+# above escalates. So `matched_terms` only ever holds RED FLAGS, and a reader
+# reporting a headache, a cough or three days of nausea matched nothing at all.
+# That was fine while the tables existed only to set a floor. It stopped being
+# fine when symptoms started being recorded: "record the symptoms reported by
+# the user, whether active or inactive" is not answerable from a table that by
+# construction only knows the frightening ones.
+#
+# So a second table, and the separation is the whole point:
+#
+#   * These terms NEVER reach `triage()`, never enter `matched_terms`, never
+#     open an episode and never raise the floor. Feeding them in would change
+#     escalation behaviour, and a headache is not a reason to tell someone to
+#     seek care.
+#   * They are written to `symptom_logs` ONLY — the history. The worst a wrong
+#     entry here can do is put a line in a summary that the reader did not
+#     mean, which is a bounded, visible, correctable failure. A miss costs a
+#     line of history, not a missed emergency.
+#
+# Conservative on purpose. Ambiguous everyday words are left out or qualified —
+# a bare "tired" is "tired of waiting", so `fatigue` and `feeling tired` are in
+# and `tired` is not. Cardiac and neurological terms are deliberately absent:
+# those belong to the tables above, which escalate.
+#
+# DRAFT clinical content, like everything else in this module. English only for
+# now; the Hinglish tables above are the model to follow when this is extended.
+ORDINARY_SYMPTOM_PHRASES: tuple[str, ...] = (
+    # head / ENT
+    "headache", "migraine", "sore throat", "runny nose", "blocked nose",
+    "stuffy nose", "sneezing", "toothache", "tooth ache", "ear pain",
+    "earache", "eye pain", "watery eyes", "mouth ulcer",
+    # respiratory (non-urgent; breathlessness belongs to the floor)
+    "cough", "dry cough", "wet cough", "cold and cough",
+    # gastrointestinal
+    "nausea", "feeling nauseous", "vomiting", "diarrhea", "diarrhoea",
+    "loose motion", "constipation", "stomach pain", "stomach ache",
+    "abdominal pain", "acidity", "heartburn", "bloating", "indigestion",
+    "gas problem", "loss of appetite",
+    # musculoskeletal
+    "back pain", "lower back pain", "neck pain", "joint pain", "knee pain",
+    "shoulder pain", "body ache", "body pain", "muscle pain", "cramps",
+    # general
+    "fever", "chills", "fatigue", "feeling tired", "tiredness", "weakness",
+    "dizziness", "feeling dizzy", "lightheaded", "night sweats",
+    # sleep and mood (non-crisis; self-harm belongs to the floor)
+    "insomnia", "trouble sleeping", "cannot sleep", "poor sleep",
+    "not sleeping well", "anxiety", "feeling anxious", "stress",
+    "feeling low", "low mood",
+    # skin and urinary
+    "itching", "rash", "skin rash", "dry skin", "hair fall", "hair loss",
+    "burning urination", "frequent urination",
+    # metabolic
+    "weight gain", "weight loss",
+)
+
+
+def symptom_mentions(message: str) -> list[str]:
+    """Ordinary symptom terms in a message. Carries NO severity, by design.
+
+    Deliberately separate from `triage()`: this exists so a symptom can be
+    REMEMBERED, and nothing here may change what the reader is told to do.
+    """
+    return _find(_norm(message), ORDINARY_SYMPTOM_PHRASES)

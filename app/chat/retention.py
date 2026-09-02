@@ -40,6 +40,7 @@ from app.models.chat import (
     ConversationMessage,
     ConversationSummary,
     RagTurnReceipt,
+    SymptomLog,
 )
 from app.models.common import utcnow
 
@@ -117,13 +118,15 @@ async def purge_expired(
     *,
     message_days: int,
     receipt_days: int,
+    symptom_days: int | None = None,
     batch_size: int = 5000,
     now: datetime | None = None,
 ) -> dict[str, int]:
     """Apply both retention windows. Returns per-table counts."""
     if batch_size <= 0:
         logger.info("retention disabled (batch size 0)")
-        return {"messages_purged": 0, "receipts_purged": 0, "skipped": 1}
+        return {"messages_purged": 0, "receipts_purged": 0,
+                "symptoms_purged": 0, "skipped": 1}
 
     now = now or utcnow()
     counts: dict[str, int] = {}
@@ -144,5 +147,15 @@ async def purge_expired(
     )
     counts["summaries_purged"] = await _purge_older_than(
         db, ConversationSummary, now - timedelta(days=message_days), batch_size
+    )
+    # Symptom history is APPEND-ONLY and one row per mention, so it grows with
+    # use and nothing else would ever bound it. It is not transcript (it holds
+    # no message text) and not audit (it is about the reader, not the system),
+    # so it gets its own window rather than borrowing one of theirs.
+    counts["symptoms_purged"] = await _purge_older_than(
+        db, SymptomLog,
+        now - timedelta(days=symptom_days if symptom_days is not None
+                        else receipt_days),
+        batch_size,
     )
     return counts

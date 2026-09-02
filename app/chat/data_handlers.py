@@ -53,6 +53,7 @@ from app.chat.correlation import (
     co_occurrence,
     render_co_occurrence,
 )
+from app.chat.episodes import history as symptom_history
 from app.coredata.service import (
     _MANUAL_UNIT,
     _RESOURCE_TYPE,
@@ -1128,6 +1129,15 @@ async def _lifestyle_week_chart(
     )
 
 
+def _symptom_phrase(sx) -> str:
+    """One reported symptom: what, how often, when last, still open or not."""
+    when = (sx.last_at.strftime("%d %b %Y") if sx.last_at
+            else "date unknown")
+    times = "once" if sx.times == 1 else f"{sx.times} times"
+    tail = ", still open" if sx.active else ""
+    return f"{sx.symptom} ({times}, most recently {when}{tail})"
+
+
 async def handle_summary_query(
     db: AsyncSession, user_id: uuid.UUID, message: str,
     *,
@@ -1191,6 +1201,10 @@ async def handle_summary_query(
         db, failed, "labs", lambda: recent_lab_values(db, user_id)
     )
     goals = await _section(db, failed, "goals", lambda: targets(db, user_id))
+    symptoms = await _section(
+        db, failed, "symptoms",
+        lambda: symptom_history(db, user_id, since=window_start("year")),
+    )
 
     lines: list[str] = []
     missing: list[str] = []
@@ -1268,6 +1282,18 @@ async def handle_summary_query(
     # Targets the reader set for themselves, in the app. Stated as what they
     # chose, never measured against what they did - this is a summary of the
     # record, and "you are over your coffee limit" is a verdict.
+    # What the reader has told us, active or not. Phrased as reports, not
+    # findings - "you mentioned" is what happened; "you have" would be a
+    # diagnosis made out of a chat log. Still-open ones are marked so the
+    # reader can see which we are still carrying, because that is the thing
+    # that changes how later answers behave.
+    _place(
+        "symptoms you reported", "symptoms",
+        "Symptoms you have mentioned: "
+        + _listed([_symptom_phrase(sx) for sx in symptoms]) + "."
+        if symptoms else None,
+        scoped=True,
+    )
     _place(
         "goals you set", "goals",
         "Targets you have set: "

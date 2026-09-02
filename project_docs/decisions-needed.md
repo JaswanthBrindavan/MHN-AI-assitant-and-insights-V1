@@ -687,14 +687,14 @@ and it is consulted through `file_access_exclusions` instead).
 
 **Still open, and deliberately not built:**
 
-* `symptom_logs` **has no producer.** It is declared in V6, mapped in
-  `app/models/chat.py`, and swept by `erasure.py` — and nothing has ever
-  written a row. Only `active_symptom_states` is written, and that is pruned on
-  resolution and filtered as stale on read. So "what symptoms have I reported
-  over the last month" is unanswerable because the history was never recorded.
-  Starting to write it is a **PHI retention decision**, not a bug fix: it would
-  persist symptom text plus matched triage terms per turn, and needs a
-  retention window agreed alongside the erasure sweep. Yours to call.
+* ~~`symptom_logs` has no producer.~~ **DECIDED — build it.** "we have to
+  record the symptoms reported by the user... whether its active or inactive as
+  well". Done: `open_or_touch` now writes BOTH tables, so no caller can record
+  the episode without the history. Retention is
+  `symptom_retention_days = 400`, matching the receipt window rather than the
+  180-day transcript one, because "have I had this before?" is a question about
+  months and seasons; the rows are small and coarse, so a longer window costs
+  little. No migration — the table has existed since V6.
 * `sahha_score` (wellbeing / sleep / activity scores), `sleep_sessions` (per-
   session detail and stages) — the daily rollups Davi already reads cover the
   headline numbers, so these are additive rather than missing. Worth doing if
