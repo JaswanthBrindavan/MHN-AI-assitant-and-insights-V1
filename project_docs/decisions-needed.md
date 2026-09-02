@@ -790,3 +790,48 @@ should be one answer, not two.
 on Windows — no IANA database without the `tzdata` package — which is why the
 helper uses a fixed offset. India has never observed DST, so the offset is
 exact rather than an approximation, but that is only true for this one zone.)
+
+
+### D28 — RESOLVED as a question, OPEN as a production action
+
+The parallel session can read mhn-spring's source and its live logs, and the
+decisive fact goes AGAINST the anchor they had just added. Holding the sweep
+was correct.
+
+**`app.tracking.zone` is not set.** `application.properties:88` is
+`app.tracking.zone=${TRACKING_ZONE:}` — empty default — and the deployed
+service warns about it on startup: *"app.tracking.zone is not set; falling back
+to the JVM default (Etc/UTC). The rollup tables record which calendar day each
+entry belongs to at write time, so a deployment whose zone differs from this
+one will disagree about day boundaries on rows already written."*
+
+So `calendar_window`'s docstring was right and its UTC anchor is right. Nothing
+of mine needed changing.
+
+**There is no single anchor. There are three classes:**
+
+| what | anchor |
+|---|---|
+| reader-supplied calendar dates (`period_day_log.log_date`, sent by the client as a `@PathVariable`) | the reader's own zone |
+| reader-facing timestamps (`symptom_logs.created_at`) | the reader's zone, bounded by instants |
+| server-resolved day buckets (`lifestyle_daily_total`, `sahha_daily_total`, everything `calendar_window` reads) | `app.tracking.zone`, which is UTC today |
+
+Our `ticked_between` use is on the first, so it stands. Their rollup reads go
+back to a UTC anchor.
+
+**The action, and it is one environment variable.** Setting
+`TRACKING_ZONE=Asia/Kolkata` on the Spring service collapses all three into one
+and makes the class disappear. Not ours to set.
+
+**Why it is not hypothetical.** V1's and V35's backfills hardcode
+`tracking_zone := 'Asia/Kolkata'` in their DO blocks, while everything written
+since is bucketed in UTC — the same column, two anchors, 5.5 hours apart. The
+disagreement the startup warning predicts is already in the data.
+
+**Proportionate impact on the correlations engine**, which reads
+`bucket_start` from both rollups: a correlation window is 28 days
+(`WINDOW_DAYS`), and every row written since the backfills is UTC-bucketed, so
+a window that does not straddle a backfill date is internally consistent and
+today's correlations are unaffected. The risk is a window spanning a backfill,
+and any comparison of pre- and post-backfill history. Not a reason to distrust
+current output; a reason to pin the variable before anyone reads further back.
