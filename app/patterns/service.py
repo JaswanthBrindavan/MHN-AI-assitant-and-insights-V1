@@ -391,47 +391,58 @@ SPRING_RED_FLAG_SYMPTOMS = frozenset({
     "bleeding_after_menopause",
 })
 
-#: The zone the app's calendar days are cut in.
+#: The zone the READER's own calendar days are cut in.
 #:
-#: mhn-spring pins this GLOBALLY — `tracking_zone text := 'Asia/Kolkata'` in the
-#: composed schema, with a comment saying the single default is deliberate — and
-#: it is the zone `period_day_log.log_date`, `lifestyle_daily_total.bucket_start`
-#: and `sahha_daily_total.bucket_start` were all written in.
+#: Named for the reader, not for `app.tracking.zone`, because they are not the
+#: same thing and calling this "the tracking zone" is what led an earlier draft
+#: to apply it to tables it does not govern.
 #:
-#: This card names ONE day, so it cannot use the trick a range summary can. A
-#: window may end a day late and over-collect harmlessly; "yesterday" cannot,
-#: because the extra day is today and attributing today's symptom to yesterday
-#: is the error the widening was meant to avoid. So the day is CUT in this zone
-#: instead, and each source is then queried in its own terms.
+#: **It governs exactly two things here.** `period_day_log.log_date` is a
+#: `@PathVariable` on `PUT /period/days/{date}` — the CLIENT sends the date, so
+#: it is the reader's own local calendar day and never passes through any server
+#: zone at all. And `symptom_logs.created_at`, which this service writes as a
+#: UTC instant, is bounded below by converting from this zone, because the
+#: reader's "yesterday" is theirs rather than the server's.
 #:
-#: A fixed offset rather than `ZoneInfo("Asia/Kolkata")` for two reasons. India
-#: has never observed daylight saving, so +05:30 IS the zone rather than an
-#: approximation of it; and a named zone needs the IANA database, which Windows
-#: does not ship — `ZoneInfoNotFoundError` on any developer machine without the
-#: `tzdata` package installed. If this ever stops being one global zone, this
-#: constant is the single place that has to become a lookup.
-TRACKING_ZONE = timezone(timedelta(hours=5, minutes=30), "IST")
+#: **It does NOT govern the day-bucketed rollups.** `lifestyle_daily_total` and
+#: `sahha_daily_total` carry a day mhn-spring resolved at write time in
+#: `app.tracking.zone`, and that property is **unset in the deployed service**
+#: (`application.properties`: `app.tracking.zone=${TRACKING_ZONE:}`), so it
+#: falls back to the JVM default and those buckets are UTC today. Its own
+#: startup warning says so. Those reads stay on the UTC day — the same anchor
+#: `coredata.service.calendar_window` documents and uses.
+#:
+#: Setting `TRACKING_ZONE=Asia/Kolkata` on the Spring service collapses all of
+#: this into one anchor and is the real fix; it would also stop new rows
+#: disagreeing with V1's and V35's backfills, which hardcode Asia/Kolkata and
+#: are therefore already inconsistent with everything written since.
+#:
+#: A fixed offset rather than `ZoneInfo("Asia/Kolkata")`: India has never
+#: observed daylight saving, so +05:30 IS the zone rather than an approximation
+#: of it, and a named zone needs the IANA database, which Windows does not ship
+#: — `ZoneInfoNotFoundError` on any machine without `tzdata`.
+READER_ZONE = timezone(timedelta(hours=5, minutes=30), "IST")
 
 
 def tracking_today() -> date:
-    """Today as the app's own calendar reckons it, not as UTC does.
+    """Today as the READER's calendar reckons it, not as UTC does.
 
-    UTC+5:30 is always AHEAD, so for the five and a half hours before midnight
-    UTC the two disagree — and every day-bucketed table in this schema was
-    written on the near side of that disagreement.
+    +05:30 is always ahead, so for the five and a half hours before midnight UTC
+    the two name different days — and a card about "yesterday" that picks the
+    wrong one is wrong for every reader who opens it in that window.
     """
-    return datetime.now(TRACKING_ZONE).date()
+    return datetime.now(READER_ZONE).date()
 
 
-def _tracking_day_bounds(day: date) -> tuple[datetime, datetime]:
-    """The UTC instants a tracking-zone calendar day starts and ends at.
+def _reader_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """The UTC instants a reader's calendar day starts and ends at.
 
-    For the one source that is a TIMESTAMP rather than a calendar date:
-    `symptom_logs.created_at` is UTC, so `date(created_at)` is the UTC day and
-    comparing it to a tracking-zone day is the same mistake in the other
-    direction. A half-open range converted from the zone is exact.
+    For the source that is a TIMESTAMP rather than a calendar date:
+    `symptom_logs.created_at` is UTC, so `date(created_at)` is the UTC day, and
+    comparing that to a reader's day is the same mistake pointing the other way.
+    A half-open range converted from the zone is exact.
     """
-    start = datetime.combine(day, time.min, tzinfo=TRACKING_ZONE)
+    start = datetime.combine(day, time.min, tzinfo=READER_ZONE)
     return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
 
 
@@ -582,8 +593,8 @@ async def symptoms_between(
             select(SymptomLog.symptom, SymptomLog.risk_level, SymptomLog.created_at)
             .where(
                 SymptomLog.user_id == user_id,
-                SymptomLog.created_at >= _tracking_day_bounds(since)[0],
-                SymptomLog.created_at < _tracking_day_bounds(until)[1],
+                SymptomLog.created_at >= _reader_day_bounds(since)[0],
+                SymptomLog.created_at < _reader_day_bounds(until)[1],
             )
         )
     ).all()
@@ -623,18 +634,26 @@ async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = No
     """
     from app.patterns.yesterday import YesterdayFacts
 
-    # The app's own calendar, not UTC's. Every day-bucketed table this reads was
-    # written in the tracking zone, and for five and a half hours every evening
-    # `utcnow().date()` names a different day than the rows do.
+    # The reader's calendar, because the card is about THEIR day.
     end = today or tracking_today()
     day = end - timedelta(days=1)
     span = YESTERDAY_BASELINE_DAYS
+
+    # ...but the rollups are bucketed on a day mhn-spring resolved in
+    # `app.tracking.zone`, which is unset in the deployed service and therefore
+    # UTC. Reading those on the reader's day would ask for a bucket that does
+    # not exist yet for the five and a half hours the two disagree. Until that
+    # property is pinned these are two different days and pretending otherwise
+    # is how the wrong figure ends up in a sentence about the right one.
+    server_day = (today or utcnow().date()) - timedelta(days=1)
 
     series: dict[str, dict[date, float]] = {}
     for metric in YESTERDAY_METRICS:
         try:
             async with db.begin_nested():
-                got = await daily_series(db, user_id, metric, days=span + 2, today=end)
+                got = await daily_series(
+                    db, user_id, metric, days=span + 2, today=server_day + timedelta(days=1),
+                )
             series[metric] = _by_day(got)
         except Exception:  # noqa: BLE001 — one metric must not blank the card
             logger.warning("yesterday metric failed: %s", metric, exc_info=True)
@@ -643,7 +662,9 @@ async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = No
 
     try:
         async with db.begin_nested():
-            habits = await _habit_totals(db, user_id, day - timedelta(days=span), day)
+            habits = await _habit_totals(
+                db, user_id, server_day - timedelta(days=span), server_day,
+            )
     except Exception:  # noqa: BLE001
         logger.warning("yesterday habits failed", exc_info=True)
         record_fail_open("patterns_yesterday")
@@ -659,12 +680,14 @@ async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = No
 
     def metric_signal(name: str):
         return _signal_for(
-            series.get(name, {}), day, min_change=YESTERDAY_METRICS[name], span=span,
+            series.get(name, {}), server_day,
+            min_change=YESTERDAY_METRICS[name], span=span,
         )
 
     def habit_signal(name: str):
         return _signal_for(
-            habits.get(name, {}), day, min_change=YESTERDAY_HABITS[name], span=span,
+            habits.get(name, {}), server_day,
+            min_change=YESTERDAY_HABITS[name], span=span,
         )
 
     return YesterdayFacts(

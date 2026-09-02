@@ -444,8 +444,8 @@ async def test_a_range_read_spans_its_whole_window(db_session):
 
 
 async def test_a_symptom_logged_late_evening_lands_on_the_right_day(db_session):
-    """The trap: `symptom_logs.created_at` is a UTC timestamp, while the app's
-    calendar days are cut in Asia/Kolkata (UTC+5:30, always AHEAD).
+    """The trap: `symptom_logs.created_at` is a UTC timestamp, while the reader's
+    calendar days are cut at +05:30, which is always AHEAD.
 
     23:00 IST on 2 Sep is 17:30 UTC on 2 Sep, so this one happens to agree. The
     one that does NOT is below: 00:30 IST on 3 Sep is 19:00 UTC on 2 Sep, which
@@ -453,7 +453,7 @@ async def test_a_symptom_logged_late_evening_lands_on_the_right_day(db_session):
     finished. Filtering on the UTC calendar date reads the wrong day for five
     and a half hours every evening.
     """
-    from app.patterns.service import _tracking_day_bounds
+    from app.patterns.service import _reader_day_bounds
 
     # 00:30 IST on the 3rd — belongs to the 3rd, carries a UTC date of the 2nd.
     db_session.add(SymptomLog(
@@ -468,6 +468,6 @@ async def test_a_symptom_logged_late_evening_lands_on_the_right_day(db_session):
     assert await _symptoms_on(db_session, USER, DAY + timedelta(days=1)) == ("cough",)
 
     # And the bounds themselves are the zone's, not UTC's midnight.
-    start, end = _tracking_day_bounds(DAY)
+    start, end = _reader_day_bounds(DAY)
     assert start == datetime(2026, 9, 1, 18, 30, tzinfo=UTC)
     assert end == datetime(2026, 9, 2, 18, 30, tzinfo=UTC)
