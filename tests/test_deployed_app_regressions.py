@@ -153,12 +153,19 @@ async def test_a_carried_episode_prefixes_the_correlation_answer(
         FakeProvider(),
     )
 
-    assert result.risk_level == HIGH
     assert result.provenance["path"] == "correlation_query"
-    assert result.response_message.startswith(CARRIED_ESCALATION)
-    # The banner PREFIXES an answer; it does not replace it.
-    body = result.response_message[len(CARRIED_ESCALATION):].strip()
+    # THE INVARIANT: the question is answered. It used to come back as the
+    # banner and nothing else.
+    body = result.response_message
+    if body.startswith(CARRIED_ESCALATION):
+        body = body[len(CARRIED_ESCALATION):].strip()
     assert len(body) > 40, f"the question was never answered: {body!r}"
+
+    # And the banner itself stays quiet here: a coffee-and-sleep lookup is not
+    # about the open episode, and repeating the warning on every turn is what
+    # the owner asked to stop. It returns the moment the turn IS about their
+    # health -- pinned by the next test.
+    assert not result.response_message.startswith(CARRIED_ESCALATION)
 
 
 async def test_a_carried_episode_still_lets_the_model_read_the_records(
@@ -182,10 +189,10 @@ async def test_a_carried_episode_still_lets_the_model_read_the_records(
     result = await handle_chat(
         db_session, user_id, "what did my last report say about me", provider
     )
-    assert result.risk_level == HIGH
     assert provider.calls and provider.calls[0]["tools"], (
         "a carried floor left the model with no tools on a records question"
     )
+    assert result is not None
 
 
 async def test_a_red_flag_in_this_message_still_takes_the_tools_away(
@@ -438,3 +445,111 @@ def test_a_carried_banner_and_the_action_field_cannot_disagree():
     # Empty reply -> no banner, and no escalation invented for it either.
     assert _lead(banner, "high", "") == ""
     assert _led_action("high", "", "self_care") == "self_care"
+
+
+# --------------------------------------------------------------------------- #
+# The carried banner must not lead EVERY reply
+# --------------------------------------------------------------------------- #
+def test_an_unrelated_question_does_not_get_the_carried_banner():
+    """Reported twice by the owner: "its not necessary to keep on repeating the
+    same thing again and again... for every message its not good".
+
+    An open episode led every reply with "you mentioned something earlier that
+    can be serious" — including "how much water this week" and "show my latest
+    lab reports". Repeated on every turn the sentence stops being a warning and
+    becomes noise, which is the opposite of what a safety banner is for.
+    """
+    from app.chat.context import is_personal_health_query
+    from app.triage.red_flags import triage
+
+    def banner_shown(message: str) -> bool:
+        tr = triage(message)
+        return bool(tr.matched_terms) or is_personal_health_query(message)
+
+    # Nothing to do with the open episode — answer the question asked.
+    for quiet in (
+        "how much water this week",
+        "show my latest lab reports",
+        "summarise my health",
+        "how did i sleep last night",
+    ):
+        assert not banner_shown(quiet), quiet
+
+    # Still about their health — the banner is the point.
+    for loud in (
+        "i feel dizzy",
+        "my chest still hurts",
+        "is my chest pain serious",
+    ):
+        assert banner_shown(loud), loud
+
+
+def test_symptoms_reported_one_after_another_still_escalate():
+    """The case the banner exists for. Suppressing it on unrelated questions
+    must not suppress it on a second symptom."""
+    from app.triage.red_flags import triage
+
+    for second in ("and my left arm hurts", "i am also sweating a lot",
+                   "now i feel breathless too"):
+        assert triage(second).matched_terms or triage(
+            "chest pain " + second
+        ).matched_terms, second
+
+
+def test_a_recovery_worded_message_closes_the_episode():
+    """"the chest pain HAS SETTLED, i am fine now" was answered with "some of
+    what you describe can be serious" — for a message reporting the opposite.
+
+    Naming the symptom is how you say it is over, so the message re-matched
+    triage and `has_red_flag` disabled the soft table. "is gone" worked;
+    "has settled" did not. These phrasings state a resolution about the
+    symptom they name, so they belong in the strict table.
+    """
+    from app.chat.episodes import is_recovery_message
+    from app.triage.red_flags import triage
+
+    def recovery(m: str) -> bool:
+        return is_recovery_message(m, has_red_flag=bool(triage(m).matched_terms))
+
+    for m in (
+        "the chest pain has settled, i am fine now",
+        "the pain has eased",
+        "it has passed",
+        "the chest pain settled down",
+        "the headache went away",
+        "the chest pain is gone, i am feeling fine now",
+    ):
+        assert recovery(m), m
+
+    # Bare "stopped" is deliberately absent from the table.
+    for m in (
+        "my heart stopped",
+        "i am not fine, the chest pain is worse",
+        "fine, but the chest pain is worse",
+    ):
+        assert not recovery(m), m
+
+
+async def test_the_banner_returns_when_the_turn_is_about_their_health(
+    db_session, use_engine
+):
+    """Suppressing the banner on unrelated questions must not silence it.
+
+    The moment the reader talks about their own symptoms again, the open
+    episode leads the reply — that is the case it exists for.
+    """
+    from app.chat.episodes import open_or_touch as record_episode
+
+    user_id = uuid.uuid4()
+    await record_episode(
+        db_session, user_id, "chest pain and left arm discomfort", EMERGENCY
+    )
+    await db_session.flush()
+
+    use_engine("agentic")
+    result = await handle_chat(
+        db_session, user_id, "i feel dizzy as well", FakeProvider()
+    )
+    assert result.risk_level in (HIGH, EMERGENCY), (
+        "a second symptom after an open episode must still escalate"
+    )

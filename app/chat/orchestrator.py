@@ -420,6 +420,7 @@ async def _interaction_refusal(
     lang: str,
     trace: list[dict],
     t,
+    escalation: str = HIGH_ESCALATION,
 ) -> ChatResult | None:
     """The deterministic reply to "can I take X with Y". None if not asked.
 
@@ -498,7 +499,7 @@ async def _interaction_refusal(
     )
     interaction_reply = build_interaction_reply(*names)
     if risk == HIGH:
-        interaction_reply = f"{HIGH_ESCALATION} {interaction_reply}"
+        interaction_reply = f"{escalation} {interaction_reply}"
     return ChatResult(
         response_message=interaction_reply,
         risk_level=risk,
@@ -524,6 +525,7 @@ async def _dosing_refusal(
     lang: str,
     trace: list[dict],
     t,
+    escalation: str = HIGH_ESCALATION,
 ) -> ChatResult | None:
     """The deterministic reply to a dose/dosage question. None if not asked.
 
@@ -554,7 +556,7 @@ async def _dosing_refusal(
     )
     dose_reply = build_dose_refusal(term)
     if risk == HIGH:
-        dose_reply = f"{HIGH_ESCALATION} {dose_reply}"
+        dose_reply = f"{escalation} {dose_reply}"
     return ChatResult(
         response_message=dose_reply,
         risk_level=risk,
@@ -950,11 +952,33 @@ async def _dispatch(
     # Observed in staging: the reader said "i am feeling better now" and was
     # escalated at in the same breath.
     _recovery = is_recovery_message(message, has_red_flag=bool(tr.matched_terms))
+    # Nor on a question that is not about their health at all.
+    #
+    # Reported twice by the owner: "its not necessary to keep on repeating the
+    # same thing again and again... for every message its not good". An open
+    # episode was leading EVERY reply with "you mentioned something earlier
+    # that can be serious" — including "how much water this week" and "show my
+    # latest lab reports", which have nothing to do with it. Repeated on every
+    # turn the sentence stops being a warning and becomes noise, which is the
+    # opposite of what a safety banner is for.
+    #
+    # It still leads whenever the turn IS about their health: a symptom named
+    # in this message (`tr.matched_terms`), or a question about their own
+    # wellbeing. So symptoms reported one after another still accumulate and
+    # still escalate — that is the case the banner exists for — while a
+    # tracker lookup in between is answered as the ordinary question it is.
+    #
+    # The episode itself is untouched: still open, still recorded, still
+    # raising the floor the moment the conversation returns to it.
+    _unrelated_ask = (
+        not tr.matched_terms and not is_personal_health_query(message)
+    )
     try:
         _open = await open_episodes(db, user_id)
         if (
             not _corpus_lookup
             and not _recovery
+            and not _unrelated_ask
             and LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]
         ):
             episode_floor = HIGH
@@ -1114,7 +1138,8 @@ async def _dispatch(
     #      answering interaction questions itself — a gap that retiring the
     #      legacy chain (Task 12) would have made permanent and invisible.
     combination = await _interaction_refusal(
-        db, user_id, message, provider, session_id, risk, lang, trace, t
+        db, user_id, message, provider, session_id, risk, lang, trace, t,
+        escalation,
     )
     if combination is not None:
         return combination
@@ -1124,7 +1149,8 @@ async def _dispatch(
     #       hallucinated pediatric dose is the worst sentence this product
     #       could produce.
     dosing = await _dosing_refusal(
-        db, user_id, message, provider, session_id, risk, lang, trace, t
+        db, user_id, message, provider, session_id, risk, lang, trace, t,
+        escalation,
     )
     if dosing is not None:
         return dosing
