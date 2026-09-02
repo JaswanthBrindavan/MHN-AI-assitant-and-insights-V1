@@ -197,3 +197,69 @@ async def test_reader_bands_costs_one_query(db_session):
     finally:
         event.remove(engine, "before_cursor_execute", _count)
     assert len(seen) == 1, seen
+
+
+# --------------------------------------------------------------------------- #
+# 3. Implausible reference data must not grade anyone
+# --------------------------------------------------------------------------- #
+async def test_a_nonsense_band_falls_back_to_the_reviewed_constants(db_session):
+    """The shape of the real junk row: `HDL/LDL Ratio` is seeded with
+    `ideal = 499.7, high_warn = 999`, which satisfies the table's own ordering
+    CHECK and is clinically meaningless.
+
+    No such row is reachable today — `_THP_NAMES` maps eleven metrics by exact
+    name and none is a ratio — but one alias added upstream is all it would
+    take, and reference data nobody checked is what made three answers wrong
+    when V18 landed.
+    """
+    thp = TraditionalHealthParameter(
+        name="HDL Cholesterol", units="mg/dL", aliases=["hdl"],
+    )
+    db_session.add(thp)
+    await db_session.flush()
+    db_session.add(ThpAgeRange(
+        thp_id=thp.id, age_min=18, age_max=120, sex="any",
+        min=0.4, low_warn=0.4, ideal=499.7, high_warn=999, max=999,
+    ))
+    await db_session.flush()
+
+    # DRAFT hdl is (40, None); a band of 0.4-999 overlaps it, so this one is
+    # NOT rejected — the guard only fires on total disagreement. Prove the
+    # guard fires where it should, with a band that cannot be HDL at all.
+    assert await evaluate_backend(db_session, "hdl", 45, 40) is not None
+
+    other = TraditionalHealthParameter(
+        name="Total Cholesterol", units="mg/dL", aliases=[],
+    )
+    db_session.add(other)
+    await db_session.flush()
+    db_session.add(ThpAgeRange(
+        thp_id=other.id, age_min=18, age_max=120, sex="any",
+        # DRAFT total_cholesterol is (None, 200): anything above 200 is out of
+        # range, so a band that STARTS at 400 shares no value with it.
+        min=400, low_warn=400, ideal=600, high_warn=800, max=999,
+    ))
+    await db_session.flush()
+    assert await evaluate_backend(
+        db_session, "total_cholesterol", 500, 40
+    ) is None
+
+
+async def test_an_ordinary_disagreement_is_still_used(db_session):
+    """Production haemoglobin runs 11.5-15.5 for a woman where the DRAFT is
+    12-17. That is a difference of opinion, not a broken row, and the backend
+    must still win — it is the age- and sex-specific one."""
+    thp = TraditionalHealthParameter(
+        name="Hemoglobin", units="g/dL", aliases=["hemoglobin"],
+    )
+    db_session.add(thp)
+    await db_session.flush()
+    db_session.add(ThpAgeRange(
+        thp_id=thp.id, age_min=18, age_max=120, sex="any",
+        min=0, low_warn=11.5, ideal=13, high_warn=15.5, max=25,
+    ))
+    await db_session.flush()
+
+    v = await evaluate_backend(db_session, "hemoglobin", 11.8, 40)
+    assert v is not None, "an ordinary disagreement was rejected"
+    assert v.ideal_low == 11.5

@@ -183,6 +183,43 @@ def _classify_bands(
     return "normal", ""
 
 
+def _plausible(r: ThpAgeRange, metric_key: str) -> bool:
+    """False when the backend band and Davi's DRAFT band do not overlap AT ALL.
+
+    Two independently curated sources for the same metric can disagree about
+    where a line sits — production's haemoglobin bands run 11.5-15.5 for a
+    woman where the DRAFT is 12-17, and that is ordinary. Disagreeing so
+    completely that the ranges do not intersect is not a difference of
+    opinion; one of them is wrong about what the number even measures.
+
+    The catalogue has rows like `HDL/LDL Ratio` with `ideal = 499.7` and
+    `high_warn = 999`, which satisfy the table's own ordering CHECK and are
+    clinically meaningless. None is reachable today, because `_THP_NAMES` maps
+    eleven metrics by exact name and none of them is a ratio — but that is
+    luck, not a guarantee: one alias added upstream, or one metric key added
+    here, and a reader gets graded against 999.
+
+    Reference data that had never been checked is exactly what made three
+    patient-facing answers wrong when V18 landed. So when the two disagree
+    completely, prefer OURS and say so — the caller falls back to the DRAFT
+    constants, which is the same safe direction every other failure here takes.
+    """
+    spec = RANGES.get(metric_key)
+    if spec is None:
+        return True
+    low = spec.low if spec.low is not None else float("-inf")
+    high = spec.high if spec.high is not None else float("inf")
+    if r.high_warn < low or r.low_warn > high:
+        logger.error(
+            "backend band for %s (%s-%s) does not overlap the reviewed range "
+            "(%s-%s); falling back to constants",
+            metric_key, r.low_warn, r.high_warn, spec.low, spec.high,
+        )
+        record_fail_open("implausible_reference_band")
+        return False
+    return True
+
+
 async def _match_thp(
     db: AsyncSession, metric_key: str
 ) -> TraditionalHealthParameter | None:
@@ -282,6 +319,8 @@ async def evaluate_backend(
             chosen = next(
                 (r for r in pool if r.age_min <= a <= r.age_max), pool[0]
             )
+            if not _plausible(chosen, metric_key):
+                return None
             severity, direction = _classify_bands(chosen, value, metric_key)
             return BackendVerdict(
                 severity=severity, direction=direction,
