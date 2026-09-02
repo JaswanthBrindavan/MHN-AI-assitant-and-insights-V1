@@ -729,7 +729,12 @@ class PeriodTracking(Base):
     )
     # A PREDICTED cycle is an estimate the app drew, not something that
     # happened. Davi must never report one as a fact.
-    is_predicted: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    # `is_predicted` and `symptoms` were mapped here and exist in NO
+    # environment: not in the Flyway chain, not in production. The
+    # parity guard exempted them as "ddl-auto", which was simply wrong,
+    # and the query that filtered on `is_predicted` therefore raised
+    # UndefinedColumn and fell into its own except -- so cycle history
+    # silently returned EMPTY in production. Third instance of the V28
+    # class, and the only one an exemption was hiding.
     cycle_length: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     flow_intensity: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
-    symptoms: Mapped[list | None] = mapped_column(JSONColumn, nullable=True)

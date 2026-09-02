@@ -4,12 +4,20 @@ No psql here, so this composes the file from the migrations themselves — which
 IS what Flyway applies, in the order it applies them. Reproducible, and it can
 be regenerated the moment the other team adds a migration.
 
-Davi's OWN adopted migrations are EXCLUDED — the coexistence check exists to
-prove Davi's Alembic-built tables do not collide with the tables Davi does NOT
-own, so including them would collide by construction. They are identified by
-name (V*__davi_*.sql), not by number: there were three by V34 (V6, V21, V23)
-and hardcoding numbers silently stopped being correct the moment the second
-one was adopted.
+Davi's own ADOPTED migrations are INCLUDED, and that is a change.
+
+They used to be excluded, on the reasoning that the coexistence check proves
+Davi's Alembic-built tables do not collide with tables Davi does not own, so
+including them would collide by construction. That reasoning expired the
+moment adoption went both ways: mhn-spring's V14 and V19 both REFERENCE
+`drug_reference`, which Davi's own V6 creates. With V6 held out, the composed
+file cannot load at all — the FK has no target — so the check it existed to
+serve had never once run.
+
+Production applies ONE ordered chain: V1..V6(davi)..V19..V21(davi)..V41. This
+file now mirrors that, because a schema file that cannot describe production is
+not a description of production. `EXCLUDE` is kept, empty, so the shape of the
+decision stays visible if a Davi migration ever does need holding back.
 """
 import os
 import pathlib
@@ -32,7 +40,40 @@ for path in SPRING.glob("V*__*.sql"):
 files.sort()
 
 # Davi's own adopted migrations, by name rather than by number.
-EXCLUDE = {n for n, name, _ in files if name.startswith("davi_")}
+# Nothing is held back: their chain depends on ours (V14/V19 -> V6's
+# drug_reference), so a file without Davi's adopted migrations is not
+# loadable and never was. See the module docstring.
+EXCLUDE: set[int] = set()
+
+# --------------------------------------------------------------------------- #
+# Hibernate ddl-auto columns
+# --------------------------------------------------------------------------- #
+# mhn-spring runs Hibernate with ddl-auto alongside Flyway, so a handful of
+# columns exist in production that NO migration creates. The chain is not
+# self-sufficient because of them: V25 builds an index on `insurance.to_date`,
+# and nothing in V1..V41 ever adds that column. Compose the chain without them
+# and the file cannot load -- which is why this check had never once run.
+#
+# Verified by diffing the live database against everything the chain creates;
+# these seven, across three tables, are the whole set. They are emitted right
+# after the migration that creates their tables, so a later migration can
+# index them.
+DDL_AUTO_AFTER = 19
+DDL_AUTO_SQL = """
+-- ---------------------------------------------------------------------------
+-- Hibernate ddl-auto columns (NOT from any migration; see the build script).
+-- ---------------------------------------------------------------------------
+ALTER TABLE public.family_connect
+    ADD COLUMN IF NOT EXISTS req_read  boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS req_write boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS acc_read  boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS acc_write boolean NOT NULL DEFAULT false;
+ALTER TABLE public.insurance
+    ADD COLUMN IF NOT EXISTS from_date timestamptz,
+    ADD COLUMN IF NOT EXISTS to_date   timestamptz;
+ALTER TABLE public.relations
+    ADD COLUMN IF NOT EXISTS sort integer;
+"""
 
 header = f"""-- db/existing_schema.sql
 --
@@ -81,6 +122,8 @@ for number, name, path in files:
         f"-- ============================================================\n"
         f"{body.rstrip()}\n\n"
     )
+    if number == DDL_AUTO_AFTER:
+        parts.append(DDL_AUTO_SQL.strip() + "\n\n")
 
 OUT.write_text("".join(parts), encoding="utf-8")
 lines = OUT.read_text(encoding="utf-8").count("\n")

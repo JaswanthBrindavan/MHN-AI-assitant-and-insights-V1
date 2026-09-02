@@ -1722,19 +1722,16 @@ async def cycle_snapshot(db: AsyncSession, user_id: uuid.UUID) -> CycleSnapshot:
         status = None
 
     try:
-        # RECORDED cycles only. A predicted row is an estimate the app drew,
-        # not something that happened, and reporting one as fact would be a
-        # claim the reader never made.
+        # RECORDED cycles only -- which is every row here. `period_tracking`
+        # has no `is_predicted` column in any environment, so the filter that
+        # used to sit here matched nothing, raised UndefinedColumn and left
+        # this read returning an empty list in production. A prediction the
+        # app draws is not stored in this table at all; if that ever changes,
+        # filter on the column they add rather than one we assumed.
         cycles = (
             await db.execute(
                 select(PeriodTracking)
-                .where(
-                    PeriodTracking.user_id == user_id,
-                    sa.or_(
-                        PeriodTracking.is_predicted.is_(False),
-                        PeriodTracking.is_predicted.is_(None),
-                    ),
-                )
+                .where(PeriodTracking.user_id == user_id)
                 .order_by(PeriodTracking.start_date.desc())
                 .limit(6)
             )
