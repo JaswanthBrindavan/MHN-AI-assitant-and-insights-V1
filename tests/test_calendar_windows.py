@@ -436,3 +436,81 @@ async def test_a_daily_gap_beside_a_live_weekly_bucket_is_not_a_lapsed_device(
 
     assert out is not None
     assert "has not synced" not in out["reply"]
+
+
+# --------------------------------------------------------------------------- #
+# A manual tracker gets the same daily chart the wearable does. It had none:
+# `handle_tracker_query` set `visual` only on its wearable branch, so "how did
+# I sleep this week" drew a graph and "how much water this week" drew nothing.
+# --------------------------------------------------------------------------- #
+async def test_a_manual_tracker_week_carries_its_daily_chart(db_session):
+    for offset, ml in ((0, 1200.0), (1, 900.0), (2, 1500.0)):
+        _daily(db_session, "water", THIS_WEEK + timedelta(days=offset), ml)
+    # A day in the NEXT week must not appear on this week's chart.
+    _daily(db_session, "water", THIS_WEEK + timedelta(days=7), 9999.0)
+    await db_session.flush()
+
+    out = await handle_tracker_query(
+        db_session, USER, "how much water did i drink this week"
+    )
+
+    assert out is not None
+    visual = out["visual"]
+    assert visual["source"] == "lifestyle"
+    # The client routes on this: without it the chart cannot open the tracker.
+    assert visual["metric"] == "water"
+    assert visual["labels"] == [
+        (THIS_WEEK + timedelta(days=i)).strftime("%d %b") for i in range(7)
+    ]
+    # An unlogged day is None, never a logged zero.
+    assert visual["values"] == [1200.0, 900.0, 1500.0, None, None, None, None]
+    assert 9999.0 not in [v for v in visual["values"] if v is not None]
+    assert visual["title"] == THIS_WEEK.strftime("water — week of %d %b %Y")
+
+
+async def test_the_manual_bars_add_up_to_the_sentence_above_them(db_session):
+    """Both read `lifestyle_daily_total`, so a reader who adds the bars up
+    gets the figure the reply printed. Reading either side from `lifestyle_log`
+    would put a late-evening glass on a different day and break that."""
+    for offset in range(3):
+        _daily(db_session, "water", THIS_WEEK + timedelta(days=offset), 500.0)
+    await db_session.flush()
+
+    out = await handle_tracker_query(
+        db_session, USER, "how much water did i drink this week"
+    )
+
+    assert out is not None
+    assert sum(v for v in out["visual"]["values"] if v is not None) == 1500.0
+    assert "1,500 ml" in out["reply"] or "1500 ml" in out["reply"]
+
+
+async def test_one_logged_day_is_not_charted(db_session):
+    """One bar is not a trend, and chart_payload pads a flat single-bar series
+    by +/-1, which renders as data the reader never logged."""
+    _daily(db_session, "water", THIS_WEEK, 1200.0)
+    await db_session.flush()
+
+    out = await handle_tracker_query(
+        db_session, USER, "how much water did i drink this week"
+    )
+
+    assert out is not None
+    assert "visual" not in out
+    # The answer itself still stands; only the chart is withheld.
+    assert "1,200 ml" in out["reply"] or "1200 ml" in out["reply"]
+
+
+async def test_a_single_day_ask_gets_no_week_chart(db_session):
+    """`yesterday` is one day. A chart titled as a week would not be the days
+    the number above it came from."""
+    _daily(db_session, "water", TODAY - timedelta(days=1), 1200.0)
+    _daily(db_session, "water", TODAY - timedelta(days=2), 800.0)
+    await db_session.flush()
+
+    out = await handle_tracker_query(
+        db_session, USER, "how much water did i drink yesterday"
+    )
+
+    assert out is not None
+    assert "visual" not in out
