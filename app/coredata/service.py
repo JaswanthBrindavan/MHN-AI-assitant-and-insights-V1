@@ -855,6 +855,37 @@ async def first_lifestyle_day(
     ).scalar_one_or_none()
 
 
+async def latest_lifestyle_day(
+    db: AsyncSession, user_id: uuid.UUID, log_type: str
+) -> tuple[date, LifestyleTotal] | None:
+    """The most recent day the reader logged one metric, at ANY age.
+
+    The lifestyle twin of the unbounded ``wearable_totals`` probe: when the
+    asked-about window is empty, naming the last day that was not -- and what
+    was on it -- is the difference between "you have not logged any water this
+    week" and a reader who thinks the app lost their data.
+    """
+    row = (
+        await db.execute(
+            select(LifestyleDailyTotal.bucket_start, LifestyleDailyTotal.total)
+            .where(
+                LifestyleDailyTotal.user_id == user_id,
+                LifestyleDailyTotal.metric == log_type,
+                LifestyleDailyTotal.entries >= 1,
+            )
+            .order_by(LifestyleDailyTotal.bucket_start.desc())
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        return None
+    return row[0], LifestyleTotal(
+        log_type=log_type,
+        total=float(row[1]),
+        unit=LIFESTYLE_UNITS.get(log_type, ("serving", "serving"))[1],
+    )
+
+
 async def lifestyle_calendar_total(
     db: AsyncSession,
     user_id: uuid.UUID,

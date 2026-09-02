@@ -401,7 +401,9 @@ async def test_a_lapsed_device_is_reported_as_lapsed_not_absent(db_session):
     assert out is not None
     assert "nothing here until one is linked" not in out["reply"]
     assert "I don't have any" not in out["reply"]
-    assert "most recent reading is from the week of" in out["reply"]
+    # The DATE and the FIGURE: an empty window still names the last reading
+    # there was, so the reader does not have to ask a second question.
+    assert "most recent is 6.43 ms from the week of" in out["reply"]
 
 
 async def test_a_lapsed_device_also_rescues_the_manual_fallthrough(db_session):
@@ -419,7 +421,7 @@ async def test_a_lapsed_device_also_rescues_the_manual_fallthrough(db_session):
 
     assert out is not None
     assert "no steps entries" not in out["reply"]
-    assert "most recent reading is from the week of" in out["reply"]
+    assert "most recent is 52,300 steps from the week of" in out["reply"]
 
 
 async def test_a_daily_gap_beside_a_live_weekly_bucket_is_not_a_lapsed_device(

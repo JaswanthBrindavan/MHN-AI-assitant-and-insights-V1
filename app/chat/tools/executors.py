@@ -62,19 +62,26 @@ from app.rag.retrieval import (
     target_sections,
 )
 
-# Keys a handler may return that the model can use directly.
+# Payload keys carrying data for the CALLER, never for the model.
 #
-# "visual" is NOT one of them. A rendered chart is ~3.3 KB of SVG — roughly
-# 900 prompt tokens on a high-traffic tool — that the model cannot read and
-# has no use for, and its numbers are a fidelity trap besides: the SVG stores
-# a bar as `58</text>` while the values list holds `58.0`, so a model quoting
-# its own chart trips the guard and has its whole reply replaced. It travels
-# OUT OF BAND instead, under `_visual`, which execute_tool lifts off the
-# payload before serialising and hands to the caller for the ChatResult.
-_PASSTHROUGH = ("documents",)
-
-#: Payload keys carrying data for the caller, never for the model.
+# "visual": a rendered chart is ~3.3 KB of SVG — roughly 900 prompt tokens on a
+# high-traffic tool — that the model cannot read and has no use for, and its
+# numbers are a fidelity trap besides: the SVG stores a bar as `58</text>`
+# while the values list holds `58.0`, so a model quoting its own chart trips
+# the guard and has its whole reply replaced.
+#
+# "documents": the same finding, one field over. A card is client plumbing
+# (`resource_type`, the row id the app opens) that the model cannot act on,
+# and the handler's own `deterministic_reply` already names every title and
+# date. It was a PASSTHROUGH — full cards into the prompt — while the agentic
+# terminal attached none of them to the ChatResult, so the reader saw their
+# reports listed with no button to open one. Paid for in tokens, dropped on
+# the way out.
+#
+# execute_tool lifts both off the payload before serialising and hands them to
+# the caller for the ChatResult.
 OUT_OF_BAND_VISUAL = "_visual"
+OUT_OF_BAND_DOCUMENTS = "_documents"
 #: Corpus chunks the handler RENDERED — the caller cites these. They used
 #: to travel as a "citations" passthrough, i.e. straight into the prompt,
 #: where the model spent tokens on them and the caller never saw them.
@@ -90,11 +97,10 @@ def _unwrap(ability: dict | None, **extra) -> dict | None:
         "provenance": ability.get("provenance", {}),
         **extra,
     }
-    for key in _PASSTHROUGH:
-        if ability.get(key):
-            payload[key] = ability[key]
     if ability.get("visual"):
         payload[OUT_OF_BAND_VISUAL] = ability["visual"]
+    if ability.get("documents"):
+        payload[OUT_OF_BAND_DOCUMENTS] = ability["documents"]
     if ability.get("used_chunks"):
         payload[OUT_OF_BAND_SOURCES] = ability["used_chunks"]
     return payload

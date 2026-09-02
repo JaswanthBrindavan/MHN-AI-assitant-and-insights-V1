@@ -81,6 +81,7 @@ async def execute_tool(
     session_id: uuid.UUID | None = None,
     visuals: list[dict] | None = None,
     sources: list | None = None,
+    documents: list[dict] | None = None,
 ) -> ToolResult:
     """Run one tool call. Always returns a ToolResult — never raises.
 
@@ -91,6 +92,10 @@ async def execute_tool(
     ``sources`` collects the corpus chunks a tool RENDERED, the same way —
     they are what the caller must cite, and the model has the rendered text
     already.
+
+    ``documents`` collects the document cards, for the same reason again: the
+    client needs them to render an open button, the model cannot use them, and
+    the reply already names the titles.
     """
     fn = EXECUTORS.get(call.name)
     if fn is None:
@@ -143,6 +148,9 @@ async def execute_tool(
         used = payload.pop(executors.OUT_OF_BAND_SOURCES, None)
         if used and sources is not None:
             sources.extend(used)
+        cards = payload.pop(executors.OUT_OF_BAND_DOCUMENTS, None)
+        if cards and documents is not None:
+            documents.extend(cards)
         # Serialization is INSIDE the boundary on purpose. default=str covers
         # dates and UUIDs but not, say, a non-str dict key, and a TypeError
         # escaping here would propagate out of asyncio.gather and orphan the

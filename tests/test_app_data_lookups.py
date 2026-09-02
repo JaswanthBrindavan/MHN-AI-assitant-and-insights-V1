@@ -490,7 +490,11 @@ async def test_a_year_old_bucket_is_not_presented_as_this_week(db_session):
         db_session, USER, "how much sleep did I get this week"
     )
     assert out is not None
-    assert "46.7 h" not in out["reply"]
+    # The figure IS shown now -- an empty window names the last reading there
+    # was -- but never AS this week's: it is dated, and the sentence in front
+    # of it says there is nothing for the week asked about.
+    assert "no sleep from your connected device so far this week" in out["reply"]
+    assert "most recent is 46.7 h from the week of" in out["reply"]
     assert out["provenance"]["source"] != "wearable"
 
 
