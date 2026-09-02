@@ -835,3 +835,42 @@ a window that does not straddle a backfill date is internally consistent and
 today's correlations are unaffected. The risk is a window spanning a backfill,
 and any comparison of pre- and post-backfill history. Not a reason to distrust
 current output; a reason to pin the variable before anyone reads further back.
+
+### D28 — two corrections to the entry above
+
+**1. `targets()` needs no change, and the schema settles it without reading
+mhn-spring.** `effective_from` is class THREE (server-resolved), not class one.
+V2 on `lifestyle_limit` and V38 on `body_measurement_goal` use the same wording:
+
+> `effective_from`  the first day the row applies to, in the tracking zone
+> (`app.tracking.zone`) — the same zone `lifestyle_daily_total` buckets on, so a
+> limit and the total it bounds always agree about where a day begins. **Only
+> ever written as "today": the application never accepts a date from the
+> client**, which is what makes a past limit unreachable rather than merely
+> discouraged.
+
+So `targets()` anchoring on `utcnow().date()` is CORRECT while the property is
+unset, because both sides of that guarantee are UTC today. It becomes wrong the
+moment `TRACKING_ZONE` is pinned, and it is on the sweep list for that moment —
+not before.
+
+Worth noting the design guarantee that comment states: a limit and the total it
+bounds must agree about where a day begins. Pinning the variable moves both
+together, so the guarantee survives the change. Reading one of them in a
+different zone from the other is what would break it — which is exactly the
+error the parallel session made and corrected in `dd622f0`.
+
+**2. Pinning the variable does NOT reconcile existing rows, and my earlier
+framing ("one environment variable fixes the class") was incomplete.** It fixes
+rows written from that moment on. Everything written between the backfills and
+the pin stays UTC-bucketed in a column that would then be documented and read as
+IST. So the action is two decisions, not one:
+
+* pin `TRACKING_ZONE=Asia/Kolkata` on the Spring service, and
+* decide what happens to the history in between — left as-is and knowingly 5.5
+  hours out for that span, or rewritten.
+
+Rewriting is not obviously right: `lifestyle_daily_total` is a rollup Spring
+owns and rebuilds, but `bucket_start` is also what `uq_` constraints and the
+correlation windows key on. Whoever pins the variable should decide this
+deliberately rather than discover it later.
