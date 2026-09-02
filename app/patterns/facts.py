@@ -20,6 +20,7 @@ sentence. A missing fact costs a line; a wrong one costs the reader's trust.
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,11 +46,51 @@ FACT_TERMS: dict[tuple[str, str], tuple[str, ...]] = {
 
 _MAX_CHARS = 220
 
+#: A field label at the head of a corpus segment - "Influence Study: ", "Note: ".
+#: Short, capitalised, no sentence punctuation. Bounded to 40 characters so it can
+#: never eat a real clause that happens to contain a colon.
+_FIELD_LABEL = re.compile(r"^[A-Z][A-Za-z /]{0,38}: ")
+
+#: Leading list decoration the corpus carries into a segment.
+_LEADING_MARKS = re.compile(r"^[\s/•\-]+")
+
+
+def _segments(text: str) -> list[str]:
+    """The corpus chunk, split into the units a sentence could live in.
+
+    Chunks are NOT prose. They are structured records whose fields are joined
+    with "; " and whose lists are joined with " / ":
+
+        LHP: Alcohol; Influence Level: Medium; Influence Study: Regular or
+        heavy alcohol adds empty calories, promotes central adiposity ...
+
+    Splitting on ". " alone finds no boundary in that at all, so the whole
+    record passed the length gate and reached the reader as one "sentence" -
+    which is how a card came to open with "In general: LHP: Alcohol; Influence
+    Level: Medium; ...". Splitting on the separators the corpus actually uses
+    is what isolates the one clause worth showing.
+    """
+    flat = text.replace("\n", " ")
+    # ".;" appears where a field's value already ended in a full stop.
+    for separator in (".;", "; ", ". "):
+        flat = flat.replace(separator, "\x00")
+    return flat.split("\x00")
+
 
 def _first_sentence(text: str, terms: tuple[str, ...]) -> str | None:
-    """The first sentence mentioning the first term, trimmed. Corpus words only."""
-    for raw in text.replace("\n", " ").split(". "):
-        line = raw.strip(" .•-\t")
+    """The first sentence mentioning the first term, trimmed. Corpus words only.
+
+    The trimming is strictly removal - a field label, list bullets, surrounding
+    punctuation. No word is rewritten, reordered or added, because the whole
+    licence for stating this causally is that a clinician signed off these
+    words and that they are marked as being about people rather than about the
+    reader.
+    """
+    for raw in _segments(text):
+        line = _LEADING_MARKS.sub("", raw).strip(" .•-\t")
+        # The label names the field, not the finding: "Influence Study: X" is
+        # read by a human as X, and printing the label reads as a database row.
+        line = _FIELD_LABEL.sub("", line).strip(" .•-\t")
         if len(line) < 40 or len(line) > _MAX_CHARS:
             continue
         low = line.lower()

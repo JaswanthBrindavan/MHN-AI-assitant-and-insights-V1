@@ -483,3 +483,70 @@ def test_without_a_fact_the_waiting_card_is_still_honest():
     card = to_card(_waiting())
     assert "not enough days" in card["headline"].lower()
     assert "cannot answer it yet" in card["detail"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# The corpus stores STRUCTURED RECORDS, not prose. Splitting them on ". " alone
+# found no boundary, so whole records reached the reader as "the general fact":
+# "In general: LHP: Alcohol; Influence Level: Medium; Influence Study: ..."
+# These are the exact strings that shipped that way.
+# --------------------------------------------------------------------------- #
+def test_a_field_record_yields_its_sentence_and_not_its_labels():
+    from app.patterns.facts import _first_sentence
+
+    found = _first_sentence(
+        "LHP: Alcohol; Influence Level: Medium; Influence Study: Regular or "
+        "heavy alcohol adds empty calories, promotes central adiposity and "
+        "raises blood pressure, worsening the insulin-resistant, dysglycaemic "
+        "state.",
+        ("alcohol", "blood pressure"),
+    )
+    assert found is not None
+    assert found.startswith("Regular or heavy alcohol adds empty calories")
+    # The labels name the field, not the finding, and read as a database row.
+    for label in ("LHP:", "Influence Level:", "Influence Study:"):
+        assert label not in found
+
+
+def test_list_decoration_is_stripped_from_the_front_of_a_segment():
+    from app.patterns.facts import _first_sentence
+
+    found = _first_sentence(
+        "/ •  Limit screen time and caffeine before bed to improve sleep "
+        "quality.; Profile: •  Adults with metabolic syndrome / •  "
+        "Obese individuals; Importance: Medium.",
+        ("caffeine", "sleep"),
+    )
+    assert found == "Limit screen time and caffeine before bed to improve sleep quality."
+    # The profile list and the importance grade are not the fact.
+    assert "Profile" not in found and "Importance" not in found
+
+
+def test_no_sentence_is_better_than_one_about_something_else():
+    """This record is about impaired glucose utilisation in diabetes. It matched
+    a hydration/mood pair only because "dehydration" contains "hydration", and
+    it used to be stapled onto that card whole. A missing fact costs a line; a
+    wrong one costs the reader's trust."""
+    from app.patterns.facts import _first_sentence
+
+    assert _first_sentence(
+        "Symptom: Fatigue and weakness; Type: Common; Note: Impaired cellular "
+        "glucose utilisation and dehydration cause tiredness and reduced "
+        "stamina.",
+        ("hydration", "fatigue"),
+    ) is None
+
+
+def test_ordinary_prose_still_reads_as_one_sentence():
+    """The split must not damage a corpus chunk that IS written as prose."""
+    from app.patterns.facts import _first_sentence
+
+    found = _first_sentence(
+        "Caffeine is a stimulant that blocks adenosine receptors and can delay "
+        "sleep onset when taken late in the day. Other factors also matter.",
+        ("caffeine", "sleep"),
+    )
+    assert found == (
+        "Caffeine is a stimulant that blocks adenosine receptors and can delay "
+        "sleep onset when taken late in the day."
+    )
