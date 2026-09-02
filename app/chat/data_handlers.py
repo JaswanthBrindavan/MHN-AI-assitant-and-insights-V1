@@ -2052,7 +2052,65 @@ async def handle_correlation_query(
     engines reach this from the message, so there is nothing for a tool to
     call and no English sentence for an executor to synthesise.
     """
+    from app.chat.abilities import CorrelationQuery
+    from app.chat.abilities import medication_candidates as _med_cands
+    from app.drugs.service import find_drug
+
+    async def _names_a_medication(
+        db: AsyncSession, user_id: uuid.UUID, message: str
+    ) -> bool:
+        """True when an effect question names one of the reader's medicines,
+        or anything in the catalogue.
+
+        The reader's own list is checked first and is the more reliable of the
+        two: `medicine_master` is populated by mhn-spring's V19 merge and can
+        be empty in an environment that has not run it, whereas a medicine
+        someone is actually taking is on their record by definition.
+
+        Fails open to False — this decides whether to DECLINE, so a lookup
+        failure must not turn an ordinary question into a refusal.
+        """
+        candidates = _med_cands(message)
+        if not candidates:
+            return False
+        try:
+            own = await active_medications(db, user_id)
+            names = {
+                part.lower()
+                for entry in own
+                for part in entry.split()
+                if len(part) > 3 and part.isalpha()
+            }
+            if names & set(candidates):
+                return True
+            for term in candidates:
+                if await find_drug(db, term) is not None:
+                    return True
+        except Exception:  # noqa: BLE001 — never turn a question into a refusal
+            logger.warning("medication check failed", exc_info=True)
+            return False
+        return False
     query = parse_correlation_query(message)
+    # The parser is pure, so it declines on medication NOUNS and cannot see a
+    # bare brand or generic name. Two things went wrong because of that, and
+    # both answered a question the reader did not ask:
+    #
+    #   "does my metformin affect my sleep"
+    #       -> parser None -> the TRACKER slot claimed it -> "you have no
+    #          sleep entries in the past 7 days"
+    #   "does my metformin affect my sleep when i drink coffee"
+    #       -> parsed as coffee-vs-sleep -> answered about COFFEE, with the
+    #          drug never mentioned
+    #
+    # So the catalogue check runs here, where there is a database, and it runs
+    # whether or not the parser claimed the turn. It costs nothing on an
+    # ordinary message: `medication_candidates` returns empty unless the
+    # message is a first-person effect question.
+    if query is None or not query.declined:
+        if await _names_a_medication(db, user_id, message):
+            query = CorrelationQuery(
+                input_key="", outcome_metric=None, declined="medication"
+            )
     if query is None:
         return None
     if query.declined == "medication":

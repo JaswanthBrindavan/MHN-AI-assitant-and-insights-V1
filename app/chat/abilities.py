@@ -1220,6 +1220,57 @@ _MED_CONTEXT_RE = re.compile(
     r"capsules|drug|dose|course|syrup|injection)\b",
     re.IGNORECASE,
 )
+
+# Words that are never a medicine, so a catalogue lookup on them is a wasted
+# query. Everything the correlation vocabulary already knows about, plus the
+# ordinary words an effect question is built from.
+_NOT_A_DRUG_NAME = frozenset({
+    "affect", "affects", "affecting", "affected", "effect", "effects",
+    "impact", "impacts", "cause", "causes", "causing", "make", "makes",
+    "making", "reason", "blame", "responsible", "sleep", "sleeping",
+    "sleeps", "slept", "steps", "step", "walking", "water", "coffee",
+    "tea", "alcohol", "drink", "drinks", "drinking", "smoke", "smoking",
+    "smoked", "heart", "rate", "pulse", "resting", "variability",
+    "night", "nights", "week", "weeks", "month", "months", "day", "days",
+    "yesterday", "today", "tonight", "morning", "evening", "when", "does",
+    "doing", "much", "many", "have", "having", "with", "from", "that",
+    "this", "these", "those", "what", "why", "how", "the", "and", "but",
+    "for", "you", "your", "my", "me", "i", "is", "are", "was", "were",
+    "quality", "level", "levels", "score", "count", "total", "average",
+    "badly", "worse", "better", "lower", "higher", "less", "more",
+    "poor", "good", "bad", "well", "really", "very", "just", "still",
+    "think", "feel", "feeling", "feels", "been", "being", "about",
+})
+
+
+def medication_candidates(message: str) -> tuple[str, ...]:
+    """Words in an EFFECT question that might be a medicine name.
+
+    `parse_correlation_query` is pure, so it recognises medication NOUNS
+    ("my bp tablet") and not a bare brand or generic name. That gap had two
+    live consequences: "does my metformin affect my sleep" fell through to the
+    tracker slot and came back as a sleep lookup, and "does my metformin
+    affect my sleep when i drink coffee" was answered about COFFEE with the
+    drug never mentioned. Both answer a question the reader did not ask.
+
+    Closing it needs the medicine catalogue, which needs the database, so this
+    returns the candidates and the handler does the lookup. Returns empty
+    unless the message actually looks like an effect question about the
+    reader, which keeps the cost off every other turn.
+
+    Capped at three: this decides how many catalogue queries a turn can spend.
+    """
+    low = message.lower()
+    if not _CORRELATION_CUE_RE.search(low) or not _FIRST_PERSON_RE.search(low):
+        return ()
+    seen: list[str] = []
+    for word in re.findall(r"[a-z][a-z-]{3,}", low):
+        if word in _NOT_A_DRUG_NAME or word in seen:
+            continue
+        seen.append(word)
+        if len(seen) == 3:
+            break
+    return tuple(seen)
 _DOSE_UNIT_RE = re.compile(
     r"\b\d+(?:\.\d+)?\s?(?:mg|mcg|ml|iu)\b", re.IGNORECASE
 )
