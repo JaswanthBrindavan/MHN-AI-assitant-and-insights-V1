@@ -264,3 +264,391 @@ A CI job that has never executed is a green checkmark for nothing.
 **Note:** installing it changes the *default* local test order to shuffled. Every
 command in CI and in the docs passes `-p no:randomly` where deterministic order
 is wanted. The suite is verified clean under seeds 1, 2 and 12345.
+
+---
+
+# Session of 2026-09-01/02 — wearables, health summary, correlations
+
+Everything below was decided autonomously overnight, as instructed. Each took
+the recommended option and kept going. Nothing here is blocking; if you
+disagree with any of it, say so and it will be changed.
+
+---
+
+## D11 — the reference-range `danger` tier was dropped, not re-wired
+
+**What changed.** mhn-spring's V28 dropped `thp_age_range.low_danger` and
+`high_danger`. Davi still mapped both `NOT NULL` and branched on them, so
+**every** backend range lookup raised `UndefinedColumn`, was swallowed by a
+bare `except`, and silently fell back to the DRAFT constants. Grading is now
+two-zone on `low_warn`/`high_warn`, per your instruction.
+
+**Why the tier was not re-pointed at the surviving out-of-range zone.** It read
+the two dropped columns, and V18 pinned `low_danger == min` and
+`high_danger == max` on every row, so on the high side it only ever fired past
+the end of the chart. Re-pointing `seek_care_promptly` at the surviving zone
+would have sent an LDL of 105 to urgent care. Over-escalation is its own harm,
+and it would have put this path out of step with every other one — an abnormal
+report flag already routes to `discuss_with_clinician`.
+
+**What it costs you.** No number on the value-check path can now produce
+anything above "consult your doctor". A reviewer argued the low side of the old
+tier was reachable (haemoglobin 4.4, glucose 40) and that triage does not catch
+those phrasings. **That is a real gap and it is still open** — see D12.
+
+**Verified against the live database**, not just the schema file: 277 rows, all
+five surviving bounds `NOT NULL`, `low_warn <= high_warn` on every row.
+
+---
+
+## D12 — HDL graded backwards and the sex band was arbitrary — NOW FIXED (800f9cd)
+
+**This is the one to read first.** The V28 fix switched the backend range path
+ON for the first time. That makes two latent bugs live.
+
+**HDL.** Davi's DRAFT constant is `RangeSpec("mg/dL", 40, None)` — a floor and
+**no ceiling**, with the note "Higher HDL is generally better". Production's
+catalogue gives HDL a `high_warn`: male 40–60, female 50–70. So a male HDL of
+65 — a good result — is now told it is *above the usual range, consult your
+doctor*. Confirmed against the live database.
+
+**`ThpAgeRange.sex` is unmapped.** 78 rows across 28 parameters are
+sex-specific, and the band is selected by age only, ordered by `age_min` with
+no tiebreak — so the choice between a male and female band is arbitrary. HDL is
+one of those parameters, so the two bugs compound: male 40–60 vs female 50–70.
+
+**Why it shipped in PR #46 anyway.** You said V28 was fine because staging was
+working. Staging was running the *old* code, where the lookup always threw and
+fell back to DRAFT — so it could not have shown you this. I flagged both in the
+PR body under "review these before merging" rather than blocking the merge you
+asked for.
+
+**Also found, and not ours to fix:** `HDL/LDL Ratio` in your reference
+catalogue has `ideal = 499.7, high_warn = 999`. That is not a plausible ratio.
+Someone should check the V18 import.
+
+### Fixed in 800f9cd
+
+**The direction** comes from Davi's own DRAFT spec, which already encodes it —
+`hdl` is `RangeSpec("mg/dL", 40, None)`, "no upper bound is flagged". The
+curated spec now decides which SIDES may warn; the backend still decides where
+the line sits. This also corrected SpO2 (100% no longer warns) and the bottom
+end of LDL and total cholesterol. A metric with no DRAFT spec keeps both sides.
+
+**The band** is now picked by the reader's own sex, then the unisex band, and
+never the other sex's. `reader_bands()` fetches age and sex in one query
+because this path has no budget headroom. `gender = other` is treated as
+unknown, since the catalogue seeds `any`/`female`/`male` only. Where a
+parameter has sex-specific bands and the reader's sex is unknown, the lookup
+returns None and the caller falls back to the DRAFT constants — grading
+someone against the other sex's range is worse than a general one.
+
+Nine tests in `tests/test_reference_sex_and_direction.py`, including the one
+that matters: an HDL of 45 warns for a woman and is normal for a man.
+
+---
+
+## D13 — the chat `visual` payload names the metric, never the screen
+
+**What changed.** `visual` now carries `source`, `metric`, `grain` and
+`window_days`. A client maps `sleep_duration` to its own sleep-trend screen.
+Davi will never send a route, screen name or deep link.
+
+**Why, when the obvious design is to send the destination.** Three clients,
+three navigation models: Android NavGraph routes, an iOS NavigationStack that
+**does not exist yet** (there is no chat screen in mhn-ios at all), and web
+URLs. Davi would own three route tables and break silently the first time any
+of them renamed a screen. And phones cannot be updated in lockstep with the
+server: a route the server knows and an older build does not is a dead tap,
+whereas an unrecognised *metric* degrades to "renders, but not tappable".
+
+`metric` is also already shared vocabulary — it is Sahha's own key, stored
+verbatim in `sahha_biomarker.type`, deliberately `varchar` and not an enum
+because Sahha keeps adding metrics, and it is what mhn-spring's
+`SahhaMetricCatalog` is keyed on.
+
+**What it costs you.** Each client writes a ~10-line metric-to-route map. The
+tap-through behaviour you asked for is unchanged.
+
+**Contract:** `project_docs/chat-visual-payload-contract.md`.
+
+---
+
+## D14 — every period gets a slot; `null` means absent and `0` means measured
+
+**What changed.** `chart_payload` values are `list[float | None]`. A seven-day
+window sends seven entries. An absent reading is `null`; a genuine zero is `0`.
+The SVG skips a null bar rather than drawing it at zero.
+
+**Why this overrode the spec.** The Sahha spec said to *omit* absent buckets.
+Both mobile clients independently say the opposite, in their own words:
+Android's `BarDatum.value: Double?` — *"Null for a period with no reading —
+drawn as a stub, never as a zero"* — and iOS `TrendChart.swift` Rule 2 — *"the
+run of slots is the axis, so every slot must be present"*. Omitting silently
+shortens the week. Two clients written separately outvote the spec.
+
+**One thing the iOS team needs to know.** Their `TrendPoint.value` is a
+non-optional `Double` with `isEmpty = value <= 0`, justified as *"A total of
+zero and a day that never synced are the same thing here."* That is true for
+manual trackers and **false for wearables** — 0 steps on a synced day is a real
+reading. Sending `null` is strictly more information; iOS can map it to a stub
+today and refine later with no server change.
+
+---
+
+## D15 — correlations ship as a co-occurrence readout, and the contract was amended to allow it
+
+**What changed.** You asked for correlations twice. I argued against them twice.
+Built as a deterministic co-occurrence readout over a 28-day window — no model
+call, no coefficient, no p-value — with a minimum-sample gate that refuses
+honestly below threshold, wording that is explicitly non-causal, and a hard ban
+on involving any medication.
+
+**Why the binding contract had to change.** My own
+`chat-visual-payload-contract.md` said Davi would never send "a causal or
+correlational claim", and a reviewer correctly called the feature forbidden by
+the document the task declared binding. I amended that clause rather than drop
+the feature: the harm is in the **inference**, not in showing someone two of
+their own records side by side. The amended section states the carve-out and
+its conditions explicitly.
+
+**Reverse it by** deleting the carve-out paragraph and the correlation handler
+together — they were written to stand or fall as one.
+
+---
+
+## D16 — `lifestyle_daily_total.log_type` was renamed by mhn-spring and Davi never noticed
+
+**What changed.** mhn-spring's V35 ran
+`ALTER TABLE ... RENAME COLUMN log_type TO metric` on **four** rollup tables
+and retyped the column. Davi still mapped `log_type`, so every read raised
+`UndefinedColumn` in production. Fixed, and verified against the live database.
+
+**The part worth your attention.** `tests/test_schema_parity.py` — the guard I
+added earlier this same session, specifically to catch the other team moving a
+column under us — replayed `ADD COLUMN` and `DROP COLUMN` and **not**
+`RENAME COLUMN`. So the guard reported parity while production was broken. A
+rename is the quietest way a column can move: nothing is added and nothing is
+removed on net. The guard now replays renames too.
+
+**This is the third instance of the same class** (V18 reference data, V28
+dropped columns, V35 rename). The lesson is not "add another check" — it is
+that `db/existing_schema.sql` must be regenerated whenever mhn-spring ships a
+migration, because every check in this repository is downstream of that file.
+
+**Also discovered:** the new `lifestyle_metric_enum` carries three metrics the
+old one did not — `caffeine_mg`, `ethanol_g`, `drink_volume_ml`. mhn-spring
+already pre-aggregates unit-safe totals as their own rollup rows, which is
+almost certainly what Davi should read instead of re-summing `lifestyle_log`.
+
+---
+
+## D17 — the water-intake bug was a comma, and the guard was right to fire
+
+**What you reported.** *"How's my water intake?"* answered with the careful
+non-answer, while *"How my hydration this week?"* returned real data.
+
+**What it actually was.** Not a parsing miss. The numeric-fidelity guard could
+not read a thousands separator: `_UNIT_VALUE_RE` had no comma branch, so
+`"14,000 ml"` tokenised to the fragment `"000 ml"`, which cannot be traced back
+to a source holding `14000ml`. The guard correctly refused to pass a figure it
+could not verify, the reply was replaced, **and the one corrective retry was
+handed the nonsense fragment `"000 ml"` as the detail**, so it could not fix it
+either.
+
+**Why only water and alcohol.** They are the only metrics stored in `ml`, `ml`
+is the only tracker unit the guard's vocabulary knows, and only their weekly
+totals exceed 999. Coffee, tea, smoking, steps, sleep and HRV could never trip
+it — which is also a quiet hole: a drifted cup count is invisible to the guard.
+
+**Fixed at the tokeniser, not the validator.** Loosening the guard would have
+been the wrong fix: it is the reason this class of bug is visible at all.
+
+---
+
+## D18 — the unit premise was inverted; the bug was in what Davi WRITES
+
+**What we thought.** `SUM(quantity) GROUP BY log_type` was summing mixed units,
+so a reader logging 2 glasses and 500 ml of water got 502.
+
+**What is actually true**, settled from mhn-spring source rather than inferred:
+`LifestyleMetric.java` defines one unit per metric; `resolveUnit` **rejects any
+non-canonical unit with HTTP 400** — *"Totals are plain sums, so accepting a
+second unit would silently add glasses to millilitres"*; and the reconciler
+sums `l.quantity`. So `quantity` **is** the canonical measure and the read was
+never wrong.
+
+**The real bug was Davi's own writes**: `add_lifestyle_log` was putting
+`quantity=2, unit='glass'` into a column mhn-spring reads as millilitres.
+Fixed at the write with the sanctioned sizes from V35's `drink_serving_size`
+seed, and Davi now refuses politely when a vessel has no sanctioned size rather
+than guessing — the same thing mhn-spring's 400 does.
+
+**A ~90-line read-side rewrite was deleted** once the premise was corrected.
+The read collapsed back to what it always was.
+
+**⚠️ Rows Davi already wrote before this fix** carry `unit='glass'` with
+`quantity` in glasses. Nothing here can retroactively repair them. Davi now
+reports the same number the app's own chart does, which is the best available,
+but those rows are wrong in the shared table and you may want them cleaned up.
+
+---
+
+## D19 — derived figures are allowed through the fidelity guard, narrowly
+
+**What changed.** "You logged 14,000 ml over the week — roughly 2,000 ml per
+day" had the whole reply replaced, because the per-day figure appears in no
+source. A value now traces if it equals a traced value divided by a *calendar*
+divisor within 1%.
+
+**Why not `range(2, 32)`.** Thirty divisors plus a tolerance is how a
+hallucinated number lands on `total/n` by accident.
+
+**A hole this opened, and how it was closed.** Divisors 2, 3 and 4 are also
+dose-splitting arithmetic. With derivation allowed on clinical units, a source
+holding "Metformin 500 mg" made **"Take 250 mg twice a day"** traceable, and a
+blood sugar of 240 made **"your blood sugar was 120 mg/dL"** traceable — an
+invented dose and an invented lab value, both passing the guard that exists to
+catch exactly those. Derivation is now refused for `mg`, `mg/dL`, `iu`, `%` and
+every other clinical unit: a per-day average is only ever asked of a period
+total, never of a dose.
+
+---
+
+## D20 — a month or year ask says it only has a week
+
+**What changed.** `yesterday`, `today`, `this week` and `last week` are real
+calendar windows now. `month` and `year` are accepted and answered **with the
+week, saying so**, rather than silently returning a week labelled "month".
+
+**Why not implement them.** The wearable rollups have monthly buckets, the
+lifestyle side does not, and the two would have disagreed about what a month
+is. Less feature, no lie. Say the word and month/year become real.
+
+**Not reconciled, deliberately.** "how much water" (rolling, reads the log) and
+"how much water this week" (calendar, reads the rollup) can disagree for
+today's entries, because Spring's reconciler rewrites a trailing window and
+adding Davi's own same-day rows would **double count**. The reply discloses it
+("today's logs are added when the daily totals compile overnight"), and the new
+`today` window answers from the log directly.
+
+---
+
+## D21 — citations now say what the answer used, not what retrieval returned
+
+**What changed.** `chunks` was the retrieval result sitting in scope at every
+`return`, so a deterministic answer inherited whatever the retriever happened
+to fetch — which is why your water answer cited MC369, MC131, MC044 and MC568
+having consulted none of them. Replaced by `ChatResult.used`, threaded out of
+each path *with* the answer. Default is "nothing from the corpus".
+
+**Why structural rather than passing `None` at each site.** A rule enforced at
+five call sites gets broken at the sixth — and the review found the sixth
+before it shipped: the suggestions handler built its citation list from the DB
+rows rather than from what the renderer emitted, and a test **pinned that wrong
+behaviour**. Both fixed.
+
+---
+
+## D22 — three safety rules are enforced in the validator, with stated residual gaps
+
+**What changed.** `wearable-grading`, `absence-as-finding` and
+`personal-clearance` are rules in `find_banned`, which both engines pass
+through — not instructions in a prompt the model may ignore.
+
+**Why it needed two passes.** The first version blocked four of five ordinary
+descriptive sentences while letting nine of the phrasings it targets through —
+a guard that blocks safe prose and admits the unsafe sentence is worse than
+none, because it trains everyone to route around it. Rewritten as four
+conjuncts (the reader's own reading + a wearable metric + a figure + an
+evaluative predicate). Now **9 of 9 unsafe phrasings blocked, 0 false positives
+on 8 descriptive sentences**, including traffic lights and scores, which the
+contract bans by name.
+
+**Residual, and chosen:** a verdict with no figure at all ("that's a solid week
+of sleep for you") still passes. Closing it means dropping the figure conjunct,
+which blocks ordinary corpus prose like "sleep of 7–9 hours is healthy" — and
+that is a feature.
+
+---
+
+## D23 — the per-turn query budget was raised for summary turns only
+
+`MAX_QUERIES_PER_TURN` stays **28**; an ordinary turn still measures 28. A
+health-summary turn measures **32**, so `MAX_QUERIES_PER_SUMMARY_TURN = 34` was
+added with the measurement and the reasoning beside it.
+
+Batched before raising: the per-metric wearable lookups became one
+`wearable_latest()`, and the chart shares the wearable section's savepoint —
+36 down to 32. Over half the remaining cost is savepoints, which are what buy
+per-section fail-open, so a summary degrades one section rather than the reply.
+
+---
+
+## D24 — `heart_rate` was removed from the value-check tool's enum
+
+The executor calls the handler with an **empty message**, so the wearable
+refusal — which reads the reader's own words — cannot fire on the tool path.
+While `heart_rate` was a legal value, *"my watch says my resting heart rate is
+48"* refused on legacy and came back with a band on agentic: one deterministic
+guard, reachable on one engine only. A clinic pulse typed by the reader still
+reaches the handler through the legacy path, which can see "my watch".
+
+---
+
+## D25 — what was still open, and what happened to it
+
+All four are now closed or handed over. Recorded because three of them turned
+up something that was not in the original list.
+
+**1. HDL and `ThpAgeRange.sex`** — fixed in 800f9cd. See D12.
+
+**2. "does my metformin affect my sleep"** — fixed in fdd4647. The catalogue
+check runs in the handler (the parser is pure and cannot query), gated behind
+`medication_candidates()` so an ordinary turn spends no query, and it checks
+the reader's own medication list before `medicine_master` — that list is
+populated by definition, the catalogue can be empty in an environment that
+never ran V19.
+
+**3. The `pg` coexistence tests had never run** — fixed in 421c54f, and this
+one was worse than "not run on this machine".
+
+They **could not have passed anywhere**. `db/existing_schema.sql` was composed
+with Davi's own adopted migrations held out, while mhn-spring's V14 and V19
+both REFERENCE `drug_reference`, which Davi's V6 creates — so the file had no
+loadable form and the test threw before its first assertion. Every
+"coexistence is verified" line in CLAUDE.md and the README rested on that.
+
+The premise was wrong, not just the file: production applies ONE ordered chain,
+so "lay down their schema, then run Davi's chain on top" describes nothing that
+happens anywhere. The dump is now the whole chain and the tests check what is
+true of it.
+
+Two things fell out on the way:
+
+* **Seven columns come from Hibernate, not Flyway.** `insurance.from_date` and
+  `to_date`, `family_connect.req_read` and three more exist in production while
+  no migration creates them — and V25 builds an index on `insurance.to_date`,
+  so the chain alone cannot build a loadable schema. Found by diffing the live
+  database against everything the chain creates.
+* **A third phantom column, the V28/V35 class again.** `period_tracking`
+  `is_predicted` and `symptoms` were mapped and exist in NO environment. The
+  parity guard EXEMPTED them as "ddl-auto columns the dump cannot see", which
+  was false — and that exemption was the only reason it stayed green while
+  `cycle_snapshot` filtered on `is_predicted`, raised UndefinedColumn on every
+  call, and **returned an empty cycle history in production**. The test that
+  covered it passed only against the sqlite schema the ORM built from its own
+  wrong model. `DDL_AUTO_COLUMNS` is now empty: an exemption in a guard like
+  that is a claim about the world and needs checking against it.
+
+**4. The junk `HDL/LDL Ratio` row** (`ideal = 499.7, high_warn = 999`) — it is
+mhn-spring's data and still wants fixing at source, but Davi now defends
+itself. `_plausible` rejects a band that shares no values with Davi's own
+reviewed range and falls back to the constants. Verified against the live
+catalogue: all eleven reachable metrics overlap, so nothing real is rejected.
+
+**Still yours, deliberately:** `lifestyle_log` rows Davi wrote before the unit
+fix carry `quantity` in glasses. `scripts/audit_lifestyle_units.py` reports
+them and converts water only — alcohol records no drink, so a "glass" could be
+wine or beer and converting it would invent the reader's evening. It writes
+only with `--repair --yes`, because that table is mhn-spring's.

@@ -23,6 +23,7 @@ from app.coredata.service import (
     latest_body_metrics,
     latest_manual_metrics,
     latest_vitals,
+    lifestyle_phrase,
     lifestyle_totals,
     recent_lab_values,
     window_start,
@@ -226,7 +227,7 @@ async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
     totals = await lifestyle_totals(db, user_id, window_start("week"))
     if totals:
         order = ("coffee", "tea", "alcohol", "smoking", "water")
-        parts = [f"{_num(totals[k])} {k}" for k in order if k in totals]
+        parts = [lifestyle_phrase(totals[k]) for k in order if k in totals]
         if parts:
             lines.append("Lifestyle logged in the past 7 days: " + ", ".join(parts) + ".")
 

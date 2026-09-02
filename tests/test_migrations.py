@@ -14,7 +14,7 @@ import os
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 pytestmark = pytest.mark.pg
 
@@ -34,8 +34,16 @@ def test_migration_upgrade_downgrade_upgrade():
     cfg = _alembic_config(PG_URL)
     engine = create_engine(PG_URL)
 
-    # Clean slate.
-    command.downgrade(cfg, "base")
+    # Clean slate, and it has to be a real one. `downgrade base` was doing
+    # this job, which works only if the database was built by Alembic in the
+    # first place: `test_coexistence` leaves a database built by the FLYWAY
+    # chain, with no `alembic_version` to walk back, so the downgrade was a
+    # no-op and `upgrade head` then collided with tables Flyway had already
+    # created. The two pg tests could each pass alone and not together.
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
     command.upgrade(cfg, "head")
     tables_after_upgrade = set(inspect(engine).get_table_names())

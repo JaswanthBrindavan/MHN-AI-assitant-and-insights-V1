@@ -8,9 +8,14 @@ recorded. Everything here is deterministic — no LLM.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
-from datetime import timedelta
+from collections import Counter
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import UTC, date, datetime, time, timedelta
+from typing import TypeVar
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +29,10 @@ from app.chat.abilities import (
     StatedValue,
     SummaryQuery,
     TrackerAdd,
+    TrackerQuery,
     param_tokens,
     parse_ai_result_query,
+    parse_correlation_query,
     parse_doctor_consult_query,
     parse_document_query_fuzzy,
     parse_family_list_query,
@@ -39,22 +46,45 @@ from app.chat.abilities import (
     parse_tracker_add,
     parse_tracker_query,
 )
+from app.chat.correlation import (
+    WINDOW_DAYS,
+    co_occurrence,
+    render_co_occurrence,
+)
 from app.coredata.service import (
     _MANUAL_UNIT,
     _RESOURCE_TYPE,
     DOCUMENT_KINDS,
+    HRV_SIBLING,
+    WearablePoint,
     active_medications,
     add_lifestyle_log,
+    allergy_rank,
+    calendar_window,
+    canonical_amount,
+    first_lifestyle_day,
+    format_wearable,
     latest_body_measurement,
     latest_documents,
     latest_manual_metrics,
     latest_vital,
+    latest_vitals,
+    lifestyle_calendar_total,
+    lifestyle_days,
+    lifestyle_phrase,
     lifestyle_totals,
     list_family_connections,
+    medical_records,
+    plural_unit,
     recent_doctor_consults,
+    recent_lab_values,
     resolve_family_member,
     resolve_family_member_by_name,
+    sahha_meta,
     vital_series,
+    wearable_display,
+    wearable_latest,
+    wearable_totals,
     window_start,
 )
 
@@ -66,8 +96,13 @@ from app.health import reference as health_reference
 from app.knowledge.registry import load_condition_index
 from app.models.chat import ConversationMessage, McpChunk
 from app.models.common import utcnow
-from app.models.coredata import Report, UnclassifiedFile
-from app.rag.retrieval import resolve_scope
+from app.models.coredata import MedicalCondition, Report, UnclassifiedFile
+from app.rag.retrieval import RetrievedChunk, resolve_scope
+from app.telemetry import record_fail_open
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 _NOT_MEDICAL_ADVICE = (
     "This is your own recorded data, not medical advice — please discuss any "
@@ -254,13 +289,47 @@ def _reclassify_glucose(value: float, *, fasting: bool) -> dict:
     }
 
 
+# A wearable number is never graded. Davi has no reference ranges for sleep,
+# steps, HRV or a wrist-measured resting heart rate, and the client contract
+# forbids putting a band, grade or traffic light on one -- 48 bpm in a trained
+# reader is not a finding. It lives here, next to the handler both engines
+# reach, so the reader's own typed phrasing is covered too; the tool executor
+# checks its structured `metric` argument against the same pattern, because a
+# metric this parser cannot read ("hrv") would otherwise slip past.
+# A bare clinic pulse ("my heart rate is 72") is untouched.
+_WEARABLE_GRADE_RE = re.compile(
+    r"\bresting heart rate\b|\brhr\b|\bhrv\b|"
+    r"\bheart rate variability\b|\bsleep\b|\bsteps?\b",
+    re.IGNORECASE,
+)
+_NO_WEARABLE_RANGE: dict = {
+    "reply": (
+        "I don't have a reference range for wearable readings like resting "
+        "heart rate, heart rate variability, sleep or steps, so I can't tell "
+        "you whether that figure is high or low. What is normal there depends "
+        "on the device and on the person. I can show you what your device "
+        "recorded, and your doctor is the right person to say what it means "
+        "for you."
+    ),
+    "action": "discuss_with_clinician",
+    "provenance": {"path": "value_check", "declined": "wearable_no_range"},
+}
+
+
 async def handle_value_check(
     db: AsyncSession,
     user_id: uuid.UUID,
     message: str,
     session_id: uuid.UUID | None = None,
+    *,
+    stated: StatedValue | None = None,
 ) -> dict | None:
     """Deterministic reference-range check.
+
+    ``stated`` is the parsed reading; a TOOL CALL passes it directly rather
+    than synthesising an English sentence for `parse_stated_value` to re-read.
+    That round trip is what made "blood_sugar" answer "nothing on file" and
+    "random glucose" get judged against the FASTING band.
 
     1. A value stated in THIS message → classify it directly.
     2. A bare timing clarification ("fasting", "after a meal") that answers an
@@ -268,8 +337,12 @@ async def handle_value_check(
        fasting/post-meal range. This makes the follow-up deterministic rather
        than relying on the model to notice the recent conversation.
     """
-    stated = parse_stated_value(message)
+    stated = stated or parse_stated_value(message)
     if stated is not None:
+        # Gated on a PARSED value on purpose: an unqualified match would swallow
+        # "how much sleep did I get this week", which is a lookup, not a grade.
+        if _WEARABLE_GRADE_RE.search(message):
+            return _NO_WEARABLE_RANGE
         backend = await _try_backend(db, user_id, stated.metric, stated.value)
         if backend is not None:
             return backend
@@ -300,8 +373,13 @@ async def _try_backend(
     """
     if metric == "blood_pressure":
         return None
-    age = await health_reference.user_age(db, user_id)
-    verdict = await health_reference.evaluate_backend(db, metric, value, age)
+    # Age AND sex, in one query: 28 of the seeded parameters band by both, and
+    # grading a woman's HDL against the male range is a wrong answer about her
+    # own body.
+    age, sex = await health_reference.reader_bands(db, user_id)
+    verdict = await health_reference.evaluate_backend(
+        db, metric, value, age, sex
+    )
     if verdict is None:
         return None
     unit = verdict.unit or (
@@ -492,20 +570,42 @@ async def handle_tracker_add(
     add: TrackerAdd | None = parse_tracker_add(message)
     if add is None:
         return None
+    # mhn-spring stores water and alcohol in MILLILITRES and rejects any other
+    # unit with a 400; its rollups sum `quantity` whatever the unit says. A
+    # vessel with no sanctioned size in `drink_serving_size` is asked about,
+    # never guessed -- the row would land in the reader's own chart in the app.
+    # The DRINK, not the roll-up bucket: a bottle is 330 ml of beer and 750 of
+    # wine, and the reply has to name what the reader said or the substitution
+    # it exists to let them correct is invisible to them.
+    named = add.kind if add.kind not in ("", "drink", "drinks") else add.log_type
+    canonical = canonical_amount(add.log_type, add.quantity, add.unit, named)
+    if canonical is None:
+        vessel = f"{add.unit} of {named}" if add.unit != named else named
+        return {
+            "reply": (
+                f"I track {named} in millilitres, and I don't have a standard "
+                f"size for a {vessel}. Tell me roughly how much it was and "
+                "I'll log it — a glass of water is about 250 ml, a beer "
+                "bottle 330 ml, a glass of wine 150 ml."
+            ),
+            "action": "none",
+            "provenance": {
+                "path": "tracker_add",
+                "log_type": add.log_type,
+                "kind": named,
+                "declined": "no_sanctioned_size",
+                "unit": add.unit,
+            },
+        }
     logged_at = utcnow() - timedelta(days=add.day_offset)
     row = await add_lifestyle_log(
-        db, user_id, add.log_type, add.quantity, add.unit, logged_at
+        db, user_id, add.log_type, add.quantity, add.unit, logged_at, named
     )
     day = {0: "today", 1: "yesterday", 2: "the day before yesterday"}.get(
         add.day_offset, f"{add.day_offset} days ago"
     )
     qty = f"{add.quantity:g}"
-    if add.quantity == 1:
-        unit = add.unit
-    elif add.unit.endswith(("s", "sh", "ch", "x")):
-        unit = add.unit + "es"  # glass → glasses
-    else:
-        unit = add.unit + "s"
+    unit = plural_unit(add.unit, add.quantity)
     note = ""
     if add.log_type == "smoking":
         note = (
@@ -517,7 +617,14 @@ async def handle_tracker_add(
     # "2 cups of coffee" reads naturally; "5 cigarettes of smoking" does not —
     # skip the kind when the unit already names the thing being counted.
     unit_is_the_kind = add.unit in ("cigarette", "beedi", "drink")
-    what = f"{qty} {unit}" if unit_is_the_kind else f"{qty} {unit} of {add.log_type}"
+    what = f"{qty} {unit}" if unit_is_the_kind else f"{qty} {unit} of {named}"
+    # Echo the stored amount too when converting changed the NUMBER, so the
+    # reader can see what their tracker will show and correct it if the
+    # standard size is not what they drank. Not when only the noun changed
+    # ("2 cigarettes" is stored as 2 `count`, and "2 count" says nothing).
+    stored_qty, stored_unit = canonical
+    if stored_qty != add.quantity:
+        what += f" ({stored_qty:g} {stored_unit})"
     return {
         "reply": (
             f"Logged: {what} for {day}. "
@@ -527,6 +634,7 @@ async def handle_tracker_add(
         "provenance": {
             "path": "tracker_add",
             "log_type": add.log_type,
+            "kind": named,
             "quantity": add.quantity,
             "unit": add.unit,
             "day_offset": add.day_offset,
@@ -659,6 +767,9 @@ async def handle_metric_query(
                     [p.at.strftime("%d %b") for p in series],
                     [p.value for p in series],
                     unit=unit,
+                    source="vital",
+                    metric=query.metric,
+                    window_days=30,
                 )
     elif spec["source"] == "body":
         point = await latest_body_measurement(db, user_id, spec["body_type"])
@@ -709,43 +820,382 @@ def _metric_not_found(display: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Health summary
+# Health summary - every source the reader's own record actually holds
 # --------------------------------------------------------------------------- #
-async def handle_summary_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
-) -> dict | None:
-    query: SummaryQuery | None = parse_summary_query(message)
-    if query is None:
+#: Wearable metrics a summary reports, in reading order. HRV is ONE entry, not
+#: two: SDNN and RMSSD measure the same thing and a device reports whichever it
+#: reports, so the sibling is tried only when the first is empty.
+_SUMMARY_WEARABLES = (
+    "sleep_duration",
+    "steps",
+    "heart_rate_resting",
+    "heart_rate_variability_sdnn",
+)
+
+_PERIOD_LABEL = {"week": "past week", "month": "past month", "year": "past year"}
+_PERIOD_DAYS = {"week": 7, "month": 30, "year": 365}
+
+# Keep the reply readable on a phone. A reader with thirty rows gets the first
+# few and an honest count, never a wall.
+_MAX_LISTED = 6
+
+
+async def _section(
+    db: AsyncSession,
+    failed: list[str],
+    name: str,
+    factory: Callable[[], Awaitable[_T]],
+) -> _T | None:
+    """Run one summary read. A failure degrades THAT section, nothing else.
+
+    A failed read records its name in ``failed`` and returns None, so the
+    caller can tell "this could not be read" from "there is nothing here".
+    Printing the second for the first is the one failure this handler must
+    never have: a crashed allergy query must not read as "you have none".
+
+    The SAVEPOINT is not decoration. On PostgreSQL a failed statement aborts
+    the whole transaction, so a bare try/except would leave every LATER section
+    failing too, and one broken reader would cost the reader the entire
+    summary. The suite runs on aiosqlite, which tolerates the missing
+    savepoint, so that defect would be invisible locally.
+    """
+    try:
+        async with db.begin_nested():
+            return await factory()
+    except Exception:  # noqa: BLE001 - a section must never break the reply
+        logger.warning("health summary section %r failed", name, exc_info=True)
+        record_fail_open(f"summary_{name}")
+        failed.append(name)
         return None
-    since = window_start(query.period)
-    totals = await lifestyle_totals(db, user_id, since)
 
-    lines: list[str] = []
-    label = {"week": "past week", "month": "past month", "year": "past year"}[
-        query.period
-    ]
-    if totals:
-        parts = [f"{qty:g} {ltype}" for ltype, qty in sorted(totals.items())]
-        lines.append("Lifestyle entries: " + ", ".join(parts) + ".")
 
-    metrics_shown: list[str] = []
+def _listed(parts: list[str]) -> str:
+    """Join at most ``_MAX_LISTED`` entries, counting the rest honestly."""
+    shown = "; ".join(parts[:_MAX_LISTED])
+    extra = len(parts) - _MAX_LISTED
+    return shown if extra <= 0 else f"{shown}; and {extra} more"
+
+
+def _record_phrase(row: MedicalCondition) -> str:
+    """``name (status)`` - the status the ROW carries, never one inferred.
+
+    'Improving' and 'Stable' are in no column and are never emitted; a row with
+    no status is named without one rather than assumed active.
+    """
+    status = (row.status or "").strip().lower()
+    return f"{row.name} ({status})" if status else str(row.name)
+
+
+def _allergy_phrase(row: MedicalCondition) -> str:
+    detail = ", ".join(
+        p for p in ((row.reaction or "").strip(), (row.severity or "").strip()) if p
+    )
+    return f"{row.name} — {detail}" if detail else str(row.name)
+
+
+async def _wearable_headlines(
+    db: AsyncSession, user_id: uuid.UUID, window_open: date
+) -> tuple[list[tuple[str, WearablePoint]], bool]:
+    """The latest weekly rollup for each summary metric that has one.
+
+    ONE query for all of them (``wearable_latest``) rather than one per metric:
+    a summary is the turn that asks for everything, and five index lookups are
+    five network hops. Same headline formula as the tracker answer, so the two
+    cannot print different numbers for the same week.
+
+    ``window_open - 7 days`` is ``_fresh_buckets``' rule expressed in SQL: a
+    weekly bucket counts while any of its days fall in the asked-about window,
+    so a device that stopped syncing last year does not answer "this week".
+
+    Returns ``(rows, stale)``. When the window holds nothing, the UNBOUNDED
+    read runs and ``stale`` is True: a device that lapsed three weeks ago has
+    rows, and dropping them made the whole summary fall into the "I don't have
+    any logged data" branch — absence of a record, asserted out of a window
+    that simply did not reach them. ``_vitals_line`` already refuses to do
+    that for vitals; this is the same rule applied to the other window-scoped
+    section.
+    """
+    wanted: list[str] = list(_SUMMARY_WEARABLES)
+    for metric in _SUMMARY_WEARABLES:
+        if metric in HRV_SIBLING:
+            wanted.append(HRV_SIBLING[metric])
+
+    def _pick(latest: dict[str, WearablePoint]) -> list[tuple[str, WearablePoint]]:
+        found: list[tuple[str, WearablePoint]] = []
+        for metric in _SUMMARY_WEARABLES:
+            # SDNN and RMSSD are two measures of the same thing and a device
+            # reports whichever it reports. Prefer the asked-for key, fall back
+            # to the sibling, and NAME whichever answered -- never merge them.
+            for key in (metric, HRV_SIBLING.get(metric)):
+                if key and key in latest:
+                    found.append((key, latest[key]))
+                    break
+        return found
+
+    found = _pick(
+        await wearable_latest(
+            db, user_id, wanted, since=window_open - timedelta(days=7)
+        )
+    )
+    if found:
+        return found, False
+    # `since=date.min` is "at any age": the honest unbounded read, whose whole
+    # job here is to tell a lapsed device from an absent one.
+    return _pick(await wearable_latest(db, user_id, wanted, since=date.min)), True
+
+
+def _wearable_line(
+    found: list[tuple[str, WearablePoint]], *, stale: bool = False,
+    window: str = "past week",
+) -> str:
+    """The week's device readings — each one saying whether it is a sum.
+
+    Sleep and steps are WEEK TOTALS; resting heart rate and HRV are means over
+    the week. Printed in one undifferentiated list they read as the same kind
+    of figure, and a reader quoting "sleep 46.7 h" to a clinician cannot tell
+    whether that is a night, an average or a week. Same two words
+    ``handle_tracker_query`` uses for the identical numbers.
+    """
+    parts: list[str] = []
+    for key, point in found:
+        label, _unit, is_sum = sahha_meta(key)
+        text = format_wearable(key, point.value)
+        # "52,300 steps" already carries its noun, and the label IS that noun.
+        if text.endswith(label):
+            text = text[: -len(label)].strip()
+        # The same part-week signal `handle_tracker_query` prints, from the
+        # same column, so the two readers of this row cannot describe the same
+        # week differently. `entries` is readings and cannot say this.
+        span = "" if point.days_counted >= 7 else (
+            f" (a part week: {point.days_counted} of 7 days)"
+        )
+        parts.append(
+            f"{label} {'totalled' if is_sum else 'averaged'} {text}{span}"
+        )
+    weeks = {p.bucket_start for _, p in found}
+    when = (
+        f"week of {next(iter(weeks)).strftime('%d %b %Y')}"
+        if len(weeks) == 1
+        else "the most recent week on record for each"
+    )
+    if stale:
+        # Nothing in the asked-about window, but the rows exist. Name the date
+        # rather than letting the section read as "no device data".
+        return (
+            f"Wearable readings: nothing in the {window} — your most recent "
+            f"is the {when}: {'; '.join(parts)}. That is what your device "
+            "recorded, not a measurement I can verify, and I have no "
+            "reference range to say whether any of it is high or low."
+        )
+    return (
+        f"From your connected device ({when}): {'; '.join(parts)}. That is what "
+        "your device recorded, not a measurement I can verify, and I have no "
+        "reference range to say whether any of it is high or low."
+    )
+
+
+def _vitals_line(vitals: dict, since: datetime, window: str) -> str | None:
+    """The in-window vitals, or -- when every reading predates the window --
+    a line saying the record EXISTS but is older.
+
+    Returning None for a stale-but-present read put "vitals" in the summary's
+    "Not on record for you" list, which is the one wording rule 1 of
+    ``handle_summary_query`` forbids: the reader's blood pressure IS on
+    record, it is just not from this week.
+    """
+    shown: list[str] = []
+    stale: list[tuple[str, object]] = []
     for vital_type, display in (
         ("blood_pressure", "blood pressure"),
         ("blood_sugar", "blood sugar"),
         ("heart_rate", "heart rate"),
+        ("spo2", "SpO2"),
     ):
-        point = await latest_vital(db, user_id, vital_type)
-        if point and point.at >= since:
-            value = (
-                f"{point.value:g}/{point.secondary:g}"
-                if point.secondary is not None
-                else f"{point.value:g}"
-            )
-            metrics_shown.append(f"latest {display} {value} {point.unit or ''}".strip())
-    if metrics_shown:
-        lines.append("Vitals: " + "; ".join(metrics_shown) + ".")
+        point = vitals.get(vital_type)
+        if point is None:
+            continue
+        if point.at < since:
+            stale.append((display, point))
+            continue
+        value = (
+            f"{point.value:g}/{point.secondary:g}"
+            if point.secondary is not None
+            else f"{point.value:g}"
+        )
+        shown.append(f"latest {display} {value} {point.unit or ''}".strip())
+    if shown:
+        return "Vitals: " + "; ".join(shown) + "."
+    if stale:
+        display, point = max(stale, key=lambda s: s[1].at)  # type: ignore[attr-defined]
+        return (
+            f"Vitals: nothing logged in the {window} — your most recent is a "
+            f"{display} reading from {point.at.strftime('%d %b %Y')}."  # type: ignore[attr-defined]
+        )
+    return None
 
-    if not lines:
+
+def _lifestyle_chart(totals: dict, label: str, period: str) -> dict | None:
+    """The single-unit lifestyle bars - the headline chart when no device.
+
+    One chart, ONE unit. The payload contract carries a single ``unit`` for the
+    whole series, so cups drawn beside millilitres label one of them wrong, and
+    bars in different units were never comparable anyway. The most common unit
+    wins and the rest are reported in the text but not plotted.
+    """
+    charted = sorted(totals.items())
+    if not charted:
+        return None
+    unit = Counter(t.unit for _, t in charted).most_common(1)[0][0]
+    bars = [(k, t) for k, t in charted if t.unit == unit]
+    return chart_payload(
+        "bar",
+        f"Lifestyle totals ({unit}) - {label}",
+        [k for k, _ in bars],
+        [t.total for _, t in bars],
+        unit=unit,
+        source="lifestyle",
+        window_days=_PERIOD_DAYS.get(period, 7),
+    )
+
+
+async def handle_summary_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    query: SummaryQuery | None = None,
+) -> dict | None:
+    """Everything on the reader's record, in one deterministic answer.
+
+    Lifestyle logs, wearable rollups, conditions, medications, allergies,
+    vitals and lab values - each read independently and each fail-open, so one
+    broken source costs its own line and never the reply.
+
+    Three rules the wording is built on:
+
+    * **Absence is stated as absence of a RECORD.** "Not on record" for
+      allergies, never "no allergies" - the second is a clinical claim made out
+      of an empty table. And for a WINDOW-SCOPED section (lifestyle, wearable,
+      vitals) not even that: an empty week is not an empty record, so those say
+      "nothing logged in the past week" and `_vitals_line` names the date of
+      the most recent reading it did find.
+    * **A failed read is never an empty one.** ``_UNAVAILABLE`` gets its own
+      sentence, so a crashed query can never read as "you have none".
+    * **Nothing is graded.** Records framing throughout ("your records list"),
+      only the status the row carries, and no band on a wearable number - there
+      is no reference range for one and the client contract forbids it.
+
+    ``message`` is parsed unless ``query`` is given: a tool call already HAS the
+    period as structured data and passes it, rather than synthesising an English
+    sentence for this parser to re-read.
+    """
+    if query is None:
+        query = parse_summary_query(message)
+    if query is None:
+        return None
+    since = window_start(query.period)
+    label = _PERIOD_LABEL.get(query.period, "past week")
+
+    # Every read fires here and ONLY here, behind the summary parse. An
+    # ordinary turn never reaches this function, so its round-trip cost is zero
+    # unless the reader actually asked for a summary.
+    failed: list[str] = []
+    totals = await _section(
+        db, failed, "lifestyle", lambda: lifestyle_totals(db, user_id, since)
+    )
+    wearable, wearable_stale = await _section(
+        db, failed, "wearable",
+        lambda: _wearable_headlines(db, user_id, since.date()),
+    ) or ([], False)
+    records = await _section(
+        db, failed, "records", lambda: medical_records(db, user_id)
+    )
+    meds = await _section(
+        db, failed, "medications", lambda: active_medications(db, user_id)
+    )
+    vitals = await _section(
+        db, failed, "vitals",
+        lambda: latest_vitals(
+            db, user_id, ("blood_pressure", "blood_sugar", "heart_rate", "spo2")
+        ),
+    )
+    labs = await _section(
+        db, failed, "labs", lambda: recent_lab_values(db, user_id)
+    )
+
+    lines: list[str] = []
+    missing: list[str] = []
+    nothing_recent: list[str] = []
+    unavailable: list[str] = []
+    sections: list[str] = []
+
+    def _place(name: str, read: str, line: str | None, *, scoped: bool = False) -> None:
+        """One section -> exactly one of the four buckets.
+
+        ``read`` names the query it came from, so a section whose READ failed
+        is reported as unreadable even though its value is the same empty
+        list an account with no rows would give.
+
+        ``scoped`` marks a section whose query is WINDOW-limited. Its emptiness
+        means "nothing this week", not "nothing on record", and saying the
+        second breaks rule 1 for a reader whose last reading is a month old.
+        """
+        if read in failed:
+            unavailable.append(name)
+        elif line:
+            lines.append(line)
+            sections.append(name)
+        elif scoped:
+            nothing_recent.append(name)
+        else:
+            missing.append(name)
+
+    _place(
+        "lifestyle entries", "lifestyle",
+        "Lifestyle entries: "
+        + ", ".join(lifestyle_phrase(t) for _, t in sorted(totals.items()))
+        + "." if totals else None,
+        scoped=True,
+    )
+    _place(
+        "wearable readings", "wearable",
+        _wearable_line(wearable, stale=wearable_stale, window=label)
+        if wearable else None,
+        scoped=True,
+    )
+
+    # Allergies here are ALL categories (food, environmental, medication), not
+    # only the medication ones the drug path reads.
+    conditions = [r for r in records or [] if (r.type or "condition") == "condition"]
+    allergies = sorted(
+        (r for r in records or [] if r.type == "allergy"), key=allergy_rank
+    )
+    _place(
+        "conditions", "records",
+        "Your records list: " + _listed([_record_phrase(r) for r in conditions]) + "."
+        if conditions else None,
+    )
+    _place(
+        "allergy information", "records",
+        "Allergies on record: " + _listed([_allergy_phrase(r) for r in allergies]) + "."
+        if allergies else None,
+    )
+    _place(
+        "current medications", "medications",
+        "Current medications on record: " + _listed(list(meds)) + "."
+        if meds else None,
+    )
+    _place(
+        "vitals", "vitals",
+        _vitals_line(vitals, since, label) if vitals else None,
+        scoped=True,
+    )
+    _place(
+        "lab values", "labs",
+        "Recent lab values: "
+        + _listed([f"{v.name} {v.value} {v.unit or ''}".strip() for v in labs])
+        + "." if labs else None,
+    )
+
+    if not lines and not unavailable:
         return {
             "reply": (
                 f"I don't have any logged data for the {label} yet. Log vitals "
@@ -756,23 +1206,52 @@ async def handle_summary_query(
                            "empty": True},
         }
 
+    # The headline trend: the wearable's daily bars when a device is connected
+    # (a real series over time), the lifestyle totals otherwise. Chart text
+    # passes through no validator on either engine, so both titles are
+    # template-generated and never composed from model or corpus text.
     visual = None
-    if totals:
-        labels = sorted(totals)
-        visual = chart_payload(
-            "bar",
-            f"Lifestyle totals — {label}",
-            labels,
-            [totals[k] for k in labels],
+    if wearable:
+        key, point = wearable[0]
+        # Same table and same failure mode as the section above, so it reuses
+        # that section's name rather than paying for another savepoint.
+        visual = await _section(
+            db, failed, "wearable",
+            lambda: _wearable_chart(db, user_id, key, sahha_meta(key)[0], point),
         )
+    elif totals:
+        visual = _lifestyle_chart(totals, label, query.period)
+
+    body = [f"Here's your health summary for the {label}:"]
+    body += [f"\u2022 {ln}" for ln in lines]
+    if nothing_recent:
+        # Window-scoped: the rows may well exist, just not in this window.
+        # "Not on record" here would assert an absence the query never checked.
+        body.append(
+            f"Nothing logged in the {label} for: "
+            + ", ".join(nothing_recent) + "."
+        )
+    if missing:
+        # Never "you have no X": an empty table is not a clinical finding.
+        body.append("Not on record for you: " + ", ".join(missing) + ".")
+    if unavailable:
+        body.append(
+            "I couldn't read these just now, so they are missing rather than "
+            "empty: " + ", ".join(unavailable) + "."
+        )
+    body.append(_NOT_MEDICAL_ADVICE)
+
     return {
-        "reply": (
-            f"Here's your health summary for the {label}:\n"
-            + "\n".join(f"• {ln}" for ln in lines)
-            + f"\n{_NOT_MEDICAL_ADVICE}"
-        ),
+        "reply": "\n".join(body),
         "action": "review_with_clinician",
-        "provenance": {"path": "health_summary", "period": query.period},
+        "provenance": {
+            "path": "health_summary",
+            "period": query.period,
+            "sections": sections,
+            "missing": missing,
+            "nothing_recent": nothing_recent,
+            "unavailable": unavailable,
+        },
         "visual": visual,
     }
 
@@ -820,11 +1299,24 @@ def _parse_suggestion_line(line: str) -> tuple[str, list[str]] | None:
     return header, bullets
 
 
-def format_suggestions(rows_content: list[str], display_names: list[str]) -> str:
-    """Render suggestions chunks as clean, sectioned, readable text."""
+def format_suggestions(
+    rows_content: list[str], display_names: list[str]
+) -> tuple[str, list[int]]:
+    """Render suggestions chunks as clean, sectioned, readable text.
+
+    Returns ``(text, indices)`` — the indices of ``rows_content`` that
+    actually supplied a RENDERED bullet. ONE pass, one answer: the caller used
+    to build its citation list from a parallel slice of the query result, and
+    this renderer drops rows in three ways (`order[:4]`, `bullets[:4]`, and
+    anything `_parse_suggestion_line` cannot read), so a reply carrying one
+    chunk's bullets cited four chunks. That is the same drift the `Used`
+    threading closed one level up, re-opened by a handler computing its own
+    list from the wrong thing.
+    """
     sections: dict[str, list[str]] = {}
+    origin: dict[tuple[str, str], int] = {}
     order: list[str] = []
-    for content in rows_content:
+    for index, content in enumerate(rows_content):
         body = content.split("\n", 1)[1] if "\n" in content else content
         for line in body.split("\n"):
             parsed = _parse_suggestion_line(line)
@@ -837,16 +1329,19 @@ def format_suggestions(rows_content: list[str], display_names: list[str]) -> str
             for b in bullets:
                 if b not in sections[header]:
                     sections[header].append(b)
+                    origin[(header, b)] = index
 
     if not sections:
-        return ""
+        return "", []
     names = " and ".join(display_names[:2]) if display_names else "your conditions"
     parts = [
         f"Based on our clinically reviewed profiles for {names}, "
         "here's what generally helps:"
     ]
+    used: set[int] = set()
     for header in order[:_MAX_SECTIONS]:
         bullets = sections[header][:_MAX_BULLETS_PER_SECTION]
+        used.update(origin[(header, b)] for b in bullets)
         parts.append(
             f"**{header}**\n" + "\n".join(f"• {b}" for b in bullets)
         )
@@ -854,7 +1349,7 @@ def format_suggestions(rows_content: list[str], display_names: list[str]) -> str
         "These are general, educational pointers — not a personal "
         "prescription. Your doctor can tailor them to you."
     )
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), sorted(used)
 
 
 async def handle_suggestion_query(
@@ -903,27 +1398,35 @@ async def handle_suggestion_query(
             if r.condition_code in index.by_code
         }
     )
-    reply = format_suggestions([r.content for r in rows], display_names)
+    reply, rendered = format_suggestions([r.content for r in rows], display_names)
     if not reply:
         return None
+    # The rows the RENDERER emitted, not the rows the query returned. A long
+    # section is chunked as `suggestions`, `suggestions_2`, ... and the first
+    # chunk can supply all four headers on its own, leaving the other three
+    # contributing nothing to the text while the reply cited all four.
+    used_rows = [rows[i] for i in rendered]
     return {
         "reply": reply,
         "action": "discuss_with_clinician",
         "provenance": {
             "path": "mcp_suggestions",
-            "conditions": sorted({r.condition_code for r in rows}),
+            "conditions": sorted({r.condition_code for r in used_rows}),
             "chunks": [str(r.id) for r in rows],
         },
-        "citations": [
-            {
-                "source": "mcp_master_profile",
-                "condition_code": r.condition_code,
-                "section": r.chunk_type,
-                "display_name": index.by_code[r.condition_code].display_name
-                if r.condition_code in index.by_code
-                else r.condition_code,
-            }
-            for r in rows
+        # The corpus blocks this reply RENDERED, so the caller cites
+        # exactly them. Every other handler answers from the reader's own
+        # rows and returns nothing here, which is how a tracker total
+        # ends up citing nothing.
+        "used_chunks": [
+            RetrievedChunk(
+                id=str(r.id),
+                condition_code=r.condition_code,
+                chunk_type=r.chunk_type,
+                content=r.content,
+                score=1.0,
+            )
+            for r in used_rows
         ],
     }
 
@@ -1447,31 +1950,300 @@ async def handle_section_detail_query(
 # --------------------------------------------------------------------------- #
 # Manual tracker lookups
 # --------------------------------------------------------------------------- #
-_TRACKER_PHRASE = {
-    "water": ("glass", "glasses"),
-    "coffee": ("cup", "cups"),
-    "tea": ("cup", "cups"),
-    "alcohol": ("drink", "drinks"),
-    "smoking": ("cigarette", "cigarettes"),
+# The whole prepositional phrase, not a bare noun: a calendar window cannot be
+# said as "in the past X" without turning a Sunday-to-today total into a
+# rolling one in the reader's head.
+_PERIOD_PHRASE = {
+    "week": "in the past 7 days",
+    "month": "in the past 30 days",
+    "year": "in the past year",
+    "today": "today",
+    "yesterday": "yesterday",
+    "this_week": "so far this week",
+    "last_week": "last week",
 }
-_PERIOD_WORDS = {"week": "7 days", "month": "30 days", "year": "year"}
+# Wearable metric → the manual_tracking type that answers it when no device is
+# connected. heart_rate_resting has no manual twin but vital_reading does, so
+# it falls through to handle_metric_query instead (see below).
+_WEARABLE_MANUAL = {"steps": "steps", "sleep_duration": "sleep"}
+
+
+def _fresh_buckets(
+    points: list[WearablePoint], window_open: date
+) -> list[WearablePoint]:
+    """Drop WEEKLY rollups that ended before the asked-about window opened.
+
+    ``wearable_totals`` returns the last rows that EXIST, at any age. Without
+    this a device that stopped syncing a year ago answers "how did I sleep this
+    week" with last August's number, in the present tense — and one stale
+    weekly row permanently outranks a manual entry logged yesterday, because
+    the fall-through fires only on "no rows at all".
+    """
+    return [
+        p for p in points
+        if p.bucket_start + timedelta(days=7) >= window_open
+    ]
+
+
+async def _wearable_chart(
+    db: AsyncSession, user_id: uuid.UUID, metric: str, label: str,
+    headline: WearablePoint,
+) -> dict | None:
+    """The daily bars for exactly the week the sentence names.
+
+    Not "the last 7 daily rows": those straddle two weekly buckets on every day
+    but the week's last, so the bars did not add up to the total printed above
+    them, and for a sparse device they could span months under a "last 7 days"
+    title. Chart text passes through no validator on either engine, so a wrong
+    title is permanent.
+
+    Every day of the week gets a slot, ``None`` where the device recorded
+    nothing — the run of slots is the axis for both mobile clients, and a
+    measured 0 and an unmeasured day are different readings.
+    """
+    start = headline.bucket_start
+    days = [start + timedelta(days=i) for i in range(7)]
+    daily = await wearable_totals(
+        db, user_id, metric, grain="day", limit=7,
+        since=start, until=start + timedelta(days=7),
+    )
+    by_day = {d.bucket_start: d for d in daily}
+    values: list[float | None] = [
+        wearable_display(metric, by_day[d].value)[0] if d in by_day else None
+        for d in days
+    ]
+    if sum(v is not None for v in values) < 2:
+        # One bar is not a trend, and chart_payload pads a flat single-bar
+        # series by +/-1, which looks like data.
+        return None
+    return chart_payload(
+        "bar",
+        f"{label} — week of {start.strftime('%d %b %Y')}",
+        [d.strftime("%d %b") for d in days],
+        values,
+        unit=wearable_display(metric, 0.0)[1],
+        source="wearable",
+        metric=metric,
+        grain="day",
+        window_days=7,
+    )
+
+
+async def handle_correlation_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+) -> dict | None:
+    """Answer "does coffee affect my sleep" as a CO-OCCURRENCE, not a cause.
+
+    One logged habit against one wearable reading over the last
+    ``WINDOW_DAYS`` finished days: the arithmetic and the wording both live in
+    the pure ``app.chat.correlation`` module, and this function only fetches
+    the two series and names the metric.
+
+    Runs in the SHARED prologue above the tracker slot, because
+    ``parse_tracker_query`` claimed exactly these phrasings and answered them
+    as a coffee total. A handler placed in the legacy chain would be dead on
+    arrival for the questions it exists to serve, and invisible on the agentic
+    engine besides -- the bypass class this codebase keeps rediscovering.
+
+    Never a medication on either side: ``CORRELATION_INPUTS`` is four lifestyle
+    log types and nothing else, so no phrasing can reach a drug through here.
+
+    No ``query=`` override and no tool: the prologue placement means BOTH
+    engines reach this from the message, so there is nothing for a tool to
+    call and no English sentence for an executor to synthesise.
+    """
+    from app.chat.abilities import CorrelationQuery
+    from app.chat.abilities import medication_candidates as _med_cands
+    from app.drugs.service import find_drug
+
+    async def _names_a_medication(
+        db: AsyncSession, user_id: uuid.UUID, message: str
+    ) -> bool:
+        """True when an effect question names one of the reader's medicines,
+        or anything in the catalogue.
+
+        The reader's own list is checked first and is the more reliable of the
+        two: `medicine_master` is populated by mhn-spring's V19 merge and can
+        be empty in an environment that has not run it, whereas a medicine
+        someone is actually taking is on their record by definition.
+
+        Fails open to False — this decides whether to DECLINE, so a lookup
+        failure must not turn an ordinary question into a refusal.
+        """
+        candidates = _med_cands(message)
+        if not candidates:
+            return False
+        try:
+            own = await active_medications(db, user_id)
+            names = {
+                part.lower()
+                for entry in own
+                for part in entry.split()
+                if len(part) > 3 and part.isalpha()
+            }
+            if names & set(candidates):
+                return True
+            for term in candidates:
+                if await find_drug(db, term) is not None:
+                    return True
+        except Exception:  # noqa: BLE001 — never turn a question into a refusal
+            logger.warning("medication check failed", exc_info=True)
+            return False
+        return False
+    query = parse_correlation_query(message)
+    # The parser is pure, so it declines on medication NOUNS and cannot see a
+    # bare brand or generic name. Two things went wrong because of that, and
+    # both answered a question the reader did not ask:
+    #
+    #   "does my metformin affect my sleep"
+    #       -> parser None -> the TRACKER slot claimed it -> "you have no
+    #          sleep entries in the past 7 days"
+    #   "does my metformin affect my sleep when i drink coffee"
+    #       -> parsed as coffee-vs-sleep -> answered about COFFEE, with the
+    #          drug never mentioned
+    #
+    # So the catalogue check runs here, where there is a database, and it runs
+    # whether or not the parser claimed the turn. It costs nothing on an
+    # ordinary message: `medication_candidates` returns empty unless the
+    # message is a first-person effect question.
+    if query is None or not query.declined:
+        if await _names_a_medication(db, user_id, message):
+            query = CorrelationQuery(
+                input_key="", outcome_metric=None, declined="medication"
+            )
+    if query is None:
+        return None
+    if query.declined == "medication":
+        # The message names a medicine. Answering it about coffee instead --
+        # which is what happened, silently, whenever any habit term also
+        # matched -- is answering a different question and never saying so.
+        return {
+            "reply": (
+                "You asked about a medicine there, and I can't line a "
+                "medication up against a reading and tell you what it is "
+                "doing to you — that is a side-effect question, and it "
+                "belongs with the prescriber who knows your full history. "
+                "Don't change or stop anything on your own. I can show you "
+                "either reading on its own if that would help."
+            ),
+            "action": "discuss_with_prescriber",
+            "provenance": {
+                "path": "correlation_query",
+                "declined": "medication",
+            },
+        }
+    if query.outcome_metric is None:
+        # A pair I cannot read. SAYING so is the whole point: returning None
+        # here would drop the message into the tracker slot below, which
+        # answered "does coffee affect my blood pressure" with a coffee total.
+        return {
+            "reply": (
+                "I can only line up something you log — water, coffee, tea, "
+                "alcohol or smoking — against a daily reading from a connected "
+                "device: sleep, steps, resting heart rate or HRV. What you "
+                "asked about isn't one of those, so I can't put it beside "
+                f"your {query.input_key} log. I can show you either one on its "
+                "own if that helps."
+            ),
+            "action": "self_care",
+            "provenance": {
+                "path": "correlation_query",
+                "input": query.input_key,
+                "declined": "unpairable_outcome",
+            },
+        }
+
+    # Half-open [since, until) ending at TODAY, so today is excluded: a day in
+    # progress has partial steps and no sleep yet, and both rollups are rebuilt
+    # as late syncs land. Comparing finished days only.
+    until = utcnow().date()
+    since = until - timedelta(days=WINDOW_DAYS)
+    # Never reach back past the day the reader started tracking AT ALL. A day
+    # before their first lifestyle row is a day the feature did not exist for
+    # them, not a day without the habit -- and counting those in the "did not
+    # log" group manufactured a finding out of 21 days of nothing for the most
+    # likely reader this feature has: someone who started logging last week.
+    # Shortening the window makes `enough` fail on its own, and the refusal
+    # branch below already has the right words for that.
+    first_logged = await first_lifestyle_day(db, user_id)
+    if first_logged is not None and first_logged > since:
+        since = first_logged
+    window_days = (until - since).days
+    logged = set(
+        await lifestyle_days(db, user_id, query.input_key, since=since, until=until)
+    )
+
+    # SDNN and RMSSD measure the same thing differently and a device reports
+    # whichever it reports. Try the asked-for key, then its sibling, and keep
+    # whichever ANSWERED -- never merge them, and name the one that did.
+    metrics = [query.outcome_metric]
+    if query.outcome_metric in HRV_SIBLING:
+        metrics.append(HRV_SIBLING[query.outcome_metric])
+    finding = None
+    for metric in metrics:
+        points = await wearable_totals(
+            db, user_id, metric, grain="day",
+            limit=WINDOW_DAYS, since=since, until=until,
+        )
+        candidate = co_occurrence(
+            query.input_key, metric, logged,
+            {p.bucket_start: p.value for p in points},
+            window_days=window_days,
+        )
+        if candidate.enough:
+            finding = candidate
+            break
+        if finding is None or candidate.measured_days > finding.measured_days:
+            finding = candidate
+    assert finding is not None  # `metrics` is never empty
+
+    label, unit, _is_sum = sahha_meta(finding.outcome_metric)
+    return {
+        "reply": render_co_occurrence(finding, label=label, unit=unit),
+        "action": "self_care",
+        "provenance": {
+            "path": "correlation_query",
+            "input": finding.input_key,
+            "outcome": finding.outcome_metric,
+            "window_days": finding.window_days,
+            "days_with": finding.days_with,
+            "days_without": finding.days_without,
+            "enough": finding.enough,
+            # No chart. The payload contract is single-series (one `metric`,
+            # one `unit`), so a two-series comparison would be a second
+            # renderer -- and a chart is the fastest way to make a
+            # co-occurrence look like a finding.
+        },
+    }
 
 
 async def handle_tracker_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    query: TrackerQuery | None = None,
 ) -> dict | None:
     """Answer "how much water did I drink this week?" from the reader's logs.
 
     These reached the LLM before: 4-12s and a paraphrase, for a number the
     reader logged themselves and we already read for the [P] block. A lookup is
     exact and roughly 150ms.
+
+    ``message`` is parsed unless ``query`` is given. A TOOL CALL already has the
+    metric and the period as structured data and passes ``query`` directly --
+    it must NOT synthesise an English sentence for this parser to re-read. That
+    is the bug that made every document tool call return nothing.
     """
-    query = parse_tracker_query(message)
+    if query is None:
+        query = parse_tracker_query(message)
     if query is None:
         return None
 
+    # Exactly one of these two is in play: `span` is a half-open calendar
+    # [since, until) for yesterday/this_week/last_week, None for the rolling
+    # periods, which keep `since` and their existing meaning.
+    span = calendar_window(query.period)
     since = window_start(query.period)
-    window = _PERIOD_WORDS.get(query.period, "7 days")
+    window = _PERIOD_PHRASE.get(query.period, "in the past 7 days")
 
     if query.source == "medications":
         meds = await active_medications(db, user_id)
@@ -1498,29 +2270,211 @@ async def handle_tracker_query(
             },
         }
 
-    if query.source == "lifestyle":
-        totals = await lifestyle_totals(db, user_id, since)
-        amount = totals.get(query.key)
-        if not amount:
+    wearable_reply: str | None = None
+    stale_reply: str | None = None
+    visual: dict | None = None
+    if query.source == "wearable":
+        # SDNN and RMSSD are two different HRV measures and a device reports
+        # whichever it reports. Try the asked-for key, then its sibling, and
+        # name the one that answered -- never merge them, and never tell a
+        # reader with seven RMSSD readings that they have no HRV.
+        keys = [query.key]
+        if query.key in HRV_SIBLING:
+            keys.append(HRV_SIBLING[query.key])
+        points: list[WearablePoint] = []
+        # "yesterday" is the only period the DAILY rollup answers; the calendar
+        # weeks pick a weekly bucket by asking which one bucket_start falls in
+        # the span. `bucket_start` itself is never re-derived -- it is read as
+        # Spring wrote it, and only compared.
+        grain = "day" if query.period in ("today", "yesterday") else "week"
+        for key in keys:
+            if span is not None:
+                points = await wearable_totals(
+                    db, user_id, key, grain=grain, limit=1,
+                    since=span[0], until=span[1],
+                )
+            else:
+                points = _fresh_buckets(
+                    await wearable_totals(
+                        db, user_id, key, grain="week", limit=1
+                    ),
+                    since.date(),
+                )
+            if points:
+                query = replace(query, key=key)
+                break
+        label, _unit, is_sum = sahha_meta(query.key)
+        # A device that stopped syncing three weeks ago HAS rows; only the
+        # window excludes them. Reporting that as "there is nothing here until
+        # one is linked" is false twice over, and it is the exact wording rule
+        # 1 of `handle_summary_query` forbids -- `_vitals_line` names the date
+        # of the most recent reading instead, and this is that shape.
+        if not points:
+            for key in keys:
+                # The SAME grain the ask used. A "yesterday" question that
+                # finds no daily bucket beside a live weekly one is not a
+                # lapsed device, and saying so would be its own wrong answer.
+                older = await wearable_totals(
+                    db, user_id, key, grain=grain, limit=1
+                )
+                if older:
+                    when = f"{older[0].bucket_start:%d %b %Y}"
+                    if grain == "week":
+                        when = f"the week of {when}"
+                    stale_reply = (
+                        f"I have no {sahha_meta(key)[0]} from your connected "
+                        f"device {window}. Your most recent reading is from "
+                        f"{when}, so it looks like the device has not synced "
+                        "since."
+                    )
+                    break
+        if points:
+            p = points[0]
+            if span is not None:
+                # A calendar ask was served exactly, so no downgrade note and
+                # no period rewrite: the receipt names the window that answered.
+                note = ""
+                when = {
+                    "today": f"today ({p.bucket_start:%d %b %Y})",
+                    "yesterday": f"yesterday ({p.bucket_start:%d %b %Y})",
+                    "this_week":
+                        f"so far this week (the week of {p.bucket_start:%d %b %Y})",
+                    "last_week":
+                        f"last week (the week of {p.bucket_start:%d %b %Y})",
+                }[query.period]
+            else:
+                # The rollups are weekly and daily only. A month or year
+                # question gets a week's number, so it must SAY so and the
+                # provenance must report the week it actually read -- a receipt
+                # claiming "month" beside a week's total is a confident wrong
+                # answer.
+                note = "" if query.period == "week" else (
+                    "I only have weekly totals from your connected device. "
+                )
+                query = replace(query, period="week")
+                when = f"in the week of {p.bucket_start:%d %b %Y}"
+            # `entries` is READINGS, not days: a device syncing hourly makes it
+            # several times the day count, so it can never say whether a week
+            # is complete. `days_counted` is the rollup's own answer to that,
+            # and a week in progress reported as a week total is a wrong number.
+            partial = "" if grain == "day" or p.days_counted >= 7 else (
+                f" That covers {p.days_counted} of 7 days, so it is a "
+                "part-week figure rather than a full week."
+            )
+            wearable_reply = (
+                f"{note}Your {label} {'totalled' if is_sum else 'averaged'} "
+                f"{format_wearable(query.key, p.value)} {when}, across "
+                f"{p.entries} reading{'' if p.entries == 1 else 's'} from your "
+                f"connected device.{partial} That is what your device "
+                "recorded, not a measurement I can verify."
+            )
+            # A daily bucket is not a week: `_wearable_chart` lays out the seven
+            # days from `bucket_start`, which for "yesterday" would be a chart
+            # of the week AFTER the number above it.
+            if grain == "week":
+                visual = await _wearable_chart(db, user_id, query.key, label, p)
+        elif query.key in _WEARABLE_MANUAL:
+            # No device data — answer from what they logged by hand, as before.
+            query = replace(
+                query, source="manual", key=_WEARABLE_MANUAL[query.key]
+            )
+        elif query.key == "heart_rate_resting":
+            # No device data, but a logged pulse is still the honest answer.
+            # This USED to return None and let handle_metric_query answer six
+            # slots below -- which works only for a caller that HAS a chain
+            # underneath it. A tool call has none, and turned the same None
+            # into "Nothing on file" while a real reading sat one table away.
+            # Serving it here is the one answer both engines can give.
+            return await handle_metric_query(
+                db, user_id, "what is my latest heart rate"
+            )
+        else:
+            wearable_reply = stale_reply or (
+                f"I don't have any {label} readings on record for you. Those "
+                "come from a connected wearable, so there is nothing here "
+                "until one is linked."
+            )
+
+    if wearable_reply is not None:
+        reply = wearable_reply
+    elif query.source == "lifestyle":
+        logged_days = 0
+        if query.period == "today":
+            # The daily rollup is Spring's and compiles OVERNIGHT, so today's
+            # bucket is empty or partial all day. "How much water today" is
+            # the one window where the rollup is the wrong table: read the
+            # log rows Davi itself writes, since midnight.
+            total = (await lifestyle_totals(db, user_id, since)).get(query.key)
+        elif span is not None:
+            total, logged_days = await lifestyle_calendar_total(
+                db, user_id, query.key, since=span[0], until=span[1]
+            )
+        else:
+            total = (await lifestyle_totals(db, user_id, since)).get(query.key)
+        # The overnight excuse belongs ONLY to a window that still contains
+        # today. Applied to `yesterday` or `last_week` it is simply false --
+        # the rollup ran days ago, nothing in those windows was logged today,
+        # and a reader who genuinely drank no water last week was told their
+        # data might still be pending.
+        if (
+            total is None
+            and span is not None
+            and query.period != "today"
+            and span[1] > utcnow().date()
+        ):
+            # NOT "you logged nothing": the daily totals are Spring's, compiled
+            # overnight, so a row added here today is genuinely absent from
+            # them. Claiming the reader logged nothing would be a wrong answer.
+            # ponytail: rollup-only, which is what keeps the day boundary in
+            # Spring's tracking zone. Reconcile Davi's own same-day writes into
+            # the read if "logged it a minute ago" turns out to matter.
             reply = (
-                f"You have not logged any {query.key} in the past {window}. "
+                f"I have no {query.key} in your daily totals {window}. Those "
+                "are compiled overnight, so anything logged today may not be "
+                "counted yet."
+            )
+        elif total is None:
+            reply = (
+                f"You have not logged any {query.key} {window}. "
                 "If you have been tracking it elsewhere, adding it here lets me "
                 "include it next time."
             )
         else:
-            singular, plural = _TRACKER_PHRASE.get(query.key, ("entry", "entries"))
-            noun = singular if float(amount) == 1 else plural
+            # A week to date is not a week. Say how many days actually carry a
+            # log rather than presenting three days as a weekly total.
+            partial = "" if query.period != "this_week" else (
+                f" That covers {logged_days} day"
+                f"{'' if logged_days == 1 else 's'} so far -- the week is not "
+                "over, and today's logs are added when the daily totals "
+                "compile overnight."
+            )
+            # `lifestyle_phrase` carries the unit, and says "2 glasses and 500
+            # ml" rather than adding two units into one authoritative-looking
+            # number when they do not convert.
             reply = (
-                f"You have logged {_g(amount)} {noun} of {query.key} in the past "
-                f"{window}. That is what is on record here, not a complete "
+                f"You have logged {lifestyle_phrase(total)} {window}."
+                f"{partial} That is what is on record here, not a complete "
                 "picture of your intake."
             )
     else:
-        metrics = await latest_manual_metrics(db, user_id, since)
+        if span is not None:
+            # manual_tracking holds instants and no Spring-assigned day, so a
+            # UTC midnight is the only boundary there is. Unbounded above, an
+            # "entries yesterday" ask answers with today's reading.
+            metrics = await latest_manual_metrics(
+                db, user_id,
+                datetime.combine(span[0], time.min, tzinfo=UTC),
+                datetime.combine(span[1], time.min, tzinfo=UTC),
+            )
+        else:
+            metrics = await latest_manual_metrics(db, user_id, since)
         point = metrics.get(query.key)
         if point is None:
-            reply = (
-                f"You have no {query.key} entries in the past {window}. "
+            # `stale_reply` is set only when the device rows exist and the
+            # window excluded them. It outranks "you have no entries", which
+            # is the false-absence wording, and is empty on every other path.
+            reply = stale_reply or (
+                f"You have no {query.key} entries {window}. "
                 "Once some are logged I can pull them up here."
             )
         else:
@@ -1531,7 +2485,7 @@ async def handle_tracker_query(
                 f"{unit}, recorded {when}."
             )
 
-    return {
+    out: dict = {
         "reply": reply,
         "action": "self_care",
         "provenance": {
@@ -1541,6 +2495,9 @@ async def handle_tracker_query(
             "period": query.period,
         },
     }
+    if visual:
+        out["visual"] = visual
+    return out
 
 
 # --------------------------------------------------------------------------- #

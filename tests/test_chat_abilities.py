@@ -314,7 +314,18 @@ def test_chart_errors():
 
 def test_chart_payload_shape():
     p = chart_payload("line", "T", ["a", "b"], [1.0, 2.0], unit="mg/dL")
-    assert set(p) == {"type", "title", "unit", "labels", "values", "svg"}
+    assert set(p) == {
+        "type", "title", "unit", "labels", "values", "svg",
+        # The descriptors a client routes on. Davi names the SUBJECT, never
+        # the screen -- see project_docs/chat-visual-payload-contract.md.
+        "source", "metric", "grain", "window_days",
+    }
+
+
+def test_a_line_chart_does_not_bridge_a_gap_it_never_measured():
+    svg = line_chart("T", ["a", "b", "c", "d"], [1.0, None, 3.0, 4.0])
+    assert svg.count("<polyline") == 1     # only c->d, never a->c
+    assert svg.count("<circle") == 3
 
 
 # --------------------------------------------------------------------------- #
@@ -564,11 +575,20 @@ def test_real_metric_lookups_still_parse(message):
 @pytest.mark.parametrize(
     ("message", "source", "key", "period"),
     [
-        ("how much water did I drink this week?", "lifestyle", "water", "week"),
-        ("how many steps did I walk yesterday?", "manual", "steps", "week"),
-        ("how much coffee have I had this week?", "lifestyle", "coffee", "week"),
+        ("how much water did I drink this week?", "lifestyle", "water",
+         "this_week"),
+        ("how many steps did I walk yesterday?", "wearable", "steps",
+         "yesterday"),
+        ("how much coffee have I had this week?", "lifestyle", "coffee",
+         "this_week"),
         ("did I log any smoking this month?", "lifestyle", "smoking", "month"),
-        ("my sleep this month", "manual", "sleep", "month"),
+        ("my sleep this month", "wearable", "sleep_duration", "month"),
+        # A bare ask keeps the ROLLING week it has always had.
+        ("how much water have I had", "lifestyle", "water", "week"),
+        ("how much water last week", "lifestyle", "water", "last_week"),
+        # No framing keyword at all -- "yesterday" is the cue, and without it
+        # in _TRACKER_LOOKUP_RE this fell through to the model.
+        ("water intake yesterday", "lifestyle", "water", "yesterday"),
     ],
 )
 def test_tracker_lookups_parse(message, source, key, period):
@@ -622,8 +642,8 @@ def test_tracker_lookup_does_not_claim_norms_advice_or_writes(message):
     [
         ("am i smoking less these days", "lifestyle", "smoking"),
         ("how much water have i been drinking", "lifestyle", "water"),
-        ("whats my step count looking like", "manual", "steps"),
-        ("have i been sleeping ok", "manual", "sleep"),
+        ("whats my step count looking like", "wearable", "steps"),
+        ("have i been sleeping ok", "wearable", "sleep_duration"),
         ("how often do i drink alcohol", "lifestyle", "alcohol"),
         ("show me my meds", "medications", "medications"),
         ("what medications am i currently on", "medications", "medications"),
@@ -637,6 +657,51 @@ def test_real_user_phrasing_reaches_the_tracker(message, source, key):
     q = parse_tracker_query(message)
     assert q is not None, f"fell through to the model: {message!r}"
     assert (q.source, q.key) == (source, key)
+
+
+# --------------------------------------------------------------------------- #
+# Wearable metrics (Sahha rollups)
+#
+# The tracker slot runs six handlers ABOVE handle_metric_query, so a term that
+# is one word too broad silently steals a question from vital_reading.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("message", "key"),
+    [
+        ("how much sleep did I get this week", "sleep_duration"),
+        ("how many steps did I take this week", "steps"),
+        ("what is my resting heart rate", "heart_rate_resting"),
+        ("whats my rhr been lately", "heart_rate_resting"),
+        ("show my hrv", "heart_rate_variability_sdnn"),
+        ("my heart rate variability this month", "heart_rate_variability_sdnn"),
+    ],
+)
+def test_wearable_metrics_parse(message, key):
+    from app.chat.abilities import parse_tracker_query
+
+    q = parse_tracker_query(message)
+    assert q is not None, message
+    assert (q.source, q.key) == ("wearable", key)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # A bare heart-rate question belongs to handle_metric_query and
+        # vital_reading, not to the wearable rollups.
+        "what is my heart rate",
+        "show me my heart rate",
+        "whats my pulse",
+        # And a question about the NORM is not a reading of anything.
+        "how much sleep should I get",
+        "what is a normal resting heart rate",
+        "is my hrv normal",
+    ],
+)
+def test_wearable_terms_do_not_hijack_the_vital_or_the_norm(message):
+    from app.chat.abilities import parse_tracker_query
+
+    assert parse_tracker_query(message) is None
 
 
 @pytest.mark.parametrize(

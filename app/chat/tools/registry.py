@@ -33,6 +33,7 @@ EXECUTORS = {
     "check_value_against_range": executors.check_value_against_range,
     "log_lifestyle_entry": executors.log_lifestyle_entry,
     "get_health_summary": executors.get_health_summary,
+    "get_tracker_total": executors.get_tracker_total,
     "get_family_members": executors.get_family_members,
     "get_condition_guidance": executors.get_condition_guidance,
     "lookup_medicine": executors.lookup_medicine,
@@ -78,8 +79,19 @@ async def execute_tool(
     user_id: uuid.UUID,
     call: ToolCall,
     session_id: uuid.UUID | None = None,
+    visuals: list[dict] | None = None,
+    sources: list | None = None,
 ) -> ToolResult:
-    """Run one tool call. Always returns a ToolResult — never raises."""
+    """Run one tool call. Always returns a ToolResult — never raises.
+
+    ``visuals`` collects chart payloads OUT OF BAND: a rendered SVG is prompt
+    the model cannot use, but the client still needs it, so the caller passes a
+    list and puts what lands in it on the ChatResult.
+
+    ``sources`` collects the corpus chunks a tool RENDERED, the same way —
+    they are what the caller must cite, and the model has the rendered text
+    already.
+    """
     fn = EXECUTORS.get(call.name)
     if fn is None:
         # A hallucinated tool name. Tell the model plainly so it stops.
@@ -125,11 +137,22 @@ async def execute_tool(
                     }
                 ),
             )
+        visual = payload.pop(executors.OUT_OF_BAND_VISUAL, None)
+        if visual is not None and visuals is not None:
+            visuals.append(visual)
+        used = payload.pop(executors.OUT_OF_BAND_SOURCES, None)
+        if used and sources is not None:
+            sources.extend(used)
         # Serialization is INSIDE the boundary on purpose. default=str covers
         # dates and UUIDs but not, say, a non-str dict key, and a TypeError
         # escaping here would propagate out of asyncio.gather and orphan the
         # sibling tool calls mid-flight.
-        content = json.dumps(payload, default=str)
+        # ensure_ascii=False deliberately: the default escapes the en dash in a
+        # reference range to –, and the digits 2013 then sit immediately
+        # before the figure, so the fidelity guard's (?<!\d) lookbehind refused
+        # to trace a value that was verbatim correct. Three ordinary value-check
+        # questions degraded to the safe reply because of an escape sequence.
+        content = json.dumps(payload, default=str, ensure_ascii=False)
     except Exception:  # noqa: BLE001 — a tool must never break the loop
         # Deliberately no arguments in the log line: they can carry PHI.
         logger.warning("tool %s failed", call.name, exc_info=True)

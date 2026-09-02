@@ -322,12 +322,24 @@ async def chat_stream(
         try:
             # The answer is already fully guarded; stream it sentence by
             # sentence so the client can render progressively.
+            replaced = False
             async for event in validated_stream(
                 _sentences_of(result.response_message),
                 risk_level=result.risk_level,
                 safe_fallback=safe_reply(result.risk_level, result.session_id),
             ):
+                replaced = replaced or event.get("type") == "replace"
                 yield _sse(event)
+            if replaced:
+                # The text was retracted mid-stream; its provenance goes
+                # with it. Shipping the discarded answer's citations beside
+                # a canned safe reply is the same defect the engines had.
+                result.citations = None
+                result.provenance = {
+                    **result.provenance,
+                    "used_chunks": [],
+                    "degraded": "stream_replaced",
+                }
             yield _sse(
                 {
                     "type": "done",

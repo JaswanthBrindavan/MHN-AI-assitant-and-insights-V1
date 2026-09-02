@@ -42,7 +42,12 @@ RANGES: dict[str, RangeSpec] = {
         "%", None, 5.7, "HbA1c",
         note="HbA1c reflects average glucose over about three months.",
     ),
-    "heart_rate": RangeSpec("bpm", 60, 100, "resting heart rate"),
+    # Labelled "heart rate", not "resting heart rate". The band IS the resting
+    # one, but this label is READER-FACING copy, and calling a figure "a
+    # resting heart rate" is the one thing the wearable-grading guard exists to
+    # stop -- so the fallback path was emitting that exact sentence, with a
+    # threshold attached, whenever the model spelled the metric differently.
+    "heart_rate": RangeSpec("bpm", 60, 100, "heart rate"),
     "spo2": RangeSpec("%", 95, None, "oxygen saturation (SpO2)"),
     "total_cholesterol": RangeSpec("mg/dL", None, 200, "total cholesterol"),
     "ldl": RangeSpec("mg/dL", None, 100, "LDL cholesterol"),

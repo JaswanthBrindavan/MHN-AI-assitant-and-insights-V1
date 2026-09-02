@@ -11,6 +11,8 @@ not how it is implemented.
 
 from __future__ import annotations
 
+from app.chat.abilities import TRACKER_PERIODS
+from app.health.ranges import RANGES
 from app.llm.tools import ToolSpec
 
 
@@ -97,17 +99,45 @@ GET_DOCUMENTS = ToolSpec(
     ),
 )
 
+# Exactly what `app.health.ranges` covers, and nothing else. A free-text
+# `metric` meant the reader got a band or a refusal according to which synonym
+# the model happened to write: "resting heart rate" and "rhr" refused, while
+# "heart rate", "pulse" and "resting pulse" were all graded against 60-100
+# bpm, and any underscore spelling ("blood_sugar") answered "nothing on file"
+# because the free-text parser could not read its own tool's argument. An enum
+# forecloses all three in one line -- the same fix already applied to
+# `get_tracker_total`'s `period`.
+VALUE_CHECK_METRICS: tuple[str, ...] = tuple(
+    m for m in (*sorted(RANGES), "blood_pressure")
+    # `heart_rate` is excluded on purpose. The executor calls the handler with
+    # an EMPTY message, so the wearable refusal -- which reads the reader's own
+    # phrasing -- cannot fire on this path. With `heart_rate` on the enum,
+    # "my watch says my resting heart rate is 48" refused on legacy and came
+    # back with a band on agentic: the same deterministic guard, reachable on
+    # one engine only, which is this repo's recurring bug class.
+    #
+    # A clinic pulse typed by the reader still reaches `handle_value_check`
+    # through the legacy path, which CAN see the words "my watch" and refuse.
+    if m != "heart_rate"
+)
+
 CHECK_VALUE_AGAINST_RANGE = ToolSpec(
     name="check_value_against_range",
     description=(
         "Compare a reading the reader states right now ('my sugar is 117') "
         "against its reference range. Returns in-range / above / below with "
-        "the typical range and how urgently it should be looked at. This "
-        "NEVER returns a diagnosis and neither should you."
+        "the typical range and how urgently it should be looked at. There is "
+        "NO reference range for a wearable reading — sleep, steps, HRV or a "
+        "wrist-measured resting heart rate are not in the list and must not "
+        "be forced into one. This NEVER returns a diagnosis and neither "
+        "should you."
     ),
     input_schema=_obj(
         {
-            "metric": {"type": "string"},
+            "metric": {
+                "type": "string",
+                "enum": list(VALUE_CHECK_METRICS),
+            },
             "value": {"type": "number"},
             "secondary": {
                 "type": "number",
@@ -147,8 +177,13 @@ LOG_LIFESTYLE_ENTRY = ToolSpec(
 GET_HEALTH_SUMMARY = ToolSpec(
     name="get_health_summary",
     description=(
-        "Summarise the reader's recorded data over a week, month or year, "
-        "with a chart. Use for 'how have I been doing' style questions."
+        "The reader's whole record in one call, over a week, month or year, "
+        "with a chart: lifestyle logs, connected-wearable readings, "
+        "documented conditions, current medications, allergies, latest vitals "
+        "and recent lab values. Use for 'how have I been doing' and 'what do "
+        "you know about my health' style questions. It also reports what is "
+        "NOT on record - repeat that plainly rather than implying the reader "
+        "has none of something, and never grade a wearable number."
     ),
     input_schema=_obj(
         {"period": {"type": "string", "enum": ["week", "month", "year"]}},
@@ -390,6 +425,44 @@ GET_MEDICATION_ADHERENCE = ToolSpec(
 )
 
 
+GET_TRACKER_TOTAL = ToolSpec(
+    name="get_tracker_total",
+    description=(
+        "Look up what the reader has logged, or what their connected wearable "
+        "recorded, for one tracked thing -- water, coffee, tea, alcohol, "
+        "smoking, steps, sleep, resting heart rate, HRV or their current "
+        "medications. week/month/year are ROLLING windows ending now; "
+        "'yesterday', 'this_week' (the calendar week so far, a PARTIAL week) "
+        "and 'last_week' (the previous complete calendar week) are calendar "
+        "windows -- use those whenever the reader names one. Logged habits "
+        "honour the period; the wearable rollups are WEEKLY, so a month or "
+        "year ask comes back as one week and the "
+        "reply says so -- use the period the result reports, never the one "
+        "you asked for. Always prefer this over answering from memory: these "
+        "are the reader's own numbers and guessing at them is never "
+        "acceptable. Report the figure and do not grade it -- there is no "
+        "reference range for sleep, steps, HRV or a wearable resting heart "
+        "rate."
+    ),
+    input_schema=_obj(
+        {
+            "metric": {
+                "type": "string",
+                "enum": [
+                    "water", "coffee", "tea", "alcohol", "smoking",
+                    "steps", "sleep", "resting heart rate", "hrv",
+                    "medications",
+                ],
+            },
+            # Built from the parser's own vocabulary so the tool and the legacy
+            # chain cannot drift apart.
+            "period": {"type": "string", "enum": list(TRACKER_PERIODS)},
+        },
+        ["metric"],
+    ),
+)
+
+
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_LATEST_METRIC,
     GET_REPORT_PARAMETER,
@@ -397,6 +470,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     CHECK_VALUE_AGAINST_RANGE,
     LOG_LIFESTYLE_ENTRY,
     GET_HEALTH_SUMMARY,
+    GET_TRACKER_TOTAL,
     GET_FAMILY_MEMBERS,
     GET_CONDITION_GUIDANCE,
     LOOKUP_MEDICINE,

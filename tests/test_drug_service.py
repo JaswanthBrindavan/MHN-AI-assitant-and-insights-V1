@@ -622,7 +622,11 @@ async def test_orchestrator_drug_query_deterministic_no_llm(db_session):
         "path": "drug_query",
         "drug": "Augmentin 625 Duo Tablet",
         "source": "medicine_master",
+        # The catalogue row IS the source. A drug answer never cites a
+        # condition profile, on either engine.
+        "used_chunks": [],
     }
+    assert result.citations is None
     assert result.risk_level == "none"
     assert result.recommended_action == "discuss_with_prescriber"
     assert result.response_message == build_drug_reply(row)

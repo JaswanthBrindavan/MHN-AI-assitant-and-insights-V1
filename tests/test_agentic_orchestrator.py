@@ -344,3 +344,81 @@ async def test_the_trace_never_names_the_provider(db_session):
     blob = " ".join(f"{s['step']} {s['detail']}" for s in result.trace).lower()
     for name in ("anthropic", "openai", "claude", "gpt", "fake"):
         assert name not in blob
+
+
+async def test_a_thousands_separator_does_not_degrade_a_correct_figure(db_session):
+    """The reported bug: "How's my water intake?" answered with the safe reply.
+
+    The model quoted the tool's own weekly total back as "14,000 ml". The comma
+    is a word boundary, so the fidelity guard tokenised the FRAGMENT "000 ml",
+    found it in no source, threw the whole verbatim-correct reply away and fed
+    the corrective retry a token the model had never written.
+    """
+    from app.coredata.service import add_lifestyle_log
+
+    user_id = uuid.uuid4()
+    await add_lifestyle_log(db_session, user_id, "water", 14000, "ml")
+    await db_session.flush()
+
+    provider = _tool_then_say(
+        "get_tracker_total",
+        {"metric": "water", "period": "week"},
+        "You have logged 14,000 ml of water in the past 7 days. That is what "
+        "is on record here, not a complete picture of your intake.",
+    )
+    result = await handle_chat(
+        db_session, user_id, "How's my water intake?", provider
+    )
+
+    assert "14,000 ml" in result.response_message
+    assert result.provenance.get("degraded") is None
+
+
+async def test_a_per_day_average_of_the_readers_own_total_is_not_degraded(
+    db_session,
+):
+    """The other half of the same failure. The comma fix landed; a figure the
+    model DERIVED from the traced total was still untraceable, and dividing a
+    weekly total by seven is the single most likely thing a helpful model does
+    with a weekly total. Both halves here are verbatim-correct and the reader
+    got the safe reply."""
+    from app.coredata.service import add_lifestyle_log
+
+    user_id = uuid.uuid4()
+    await add_lifestyle_log(db_session, user_id, "water", 14000, "ml")
+    await db_session.flush()
+
+    provider = _tool_then_say(
+        "get_tracker_total",
+        {"metric": "water", "period": "week"},
+        "You logged 14,000 ml of water in the past 7 days - roughly 2,000 ml "
+        "per day.",
+    )
+    result = await handle_chat(
+        db_session, user_id, "how much water this week", provider
+    )
+
+    assert result.provenance.get("degraded") is None
+    assert "2,000 ml" in result.response_message
+
+
+async def test_a_drifted_figure_is_still_degraded(db_session):
+    """Non-vacuity for the test above: the tolerance is same-unit arithmetic
+    over a value that EXISTS, not a licence to state a number."""
+    from app.coredata.service import add_lifestyle_log
+
+    user_id = uuid.uuid4()
+    await add_lifestyle_log(db_session, user_id, "water", 14000, "ml")
+    await db_session.flush()
+
+    provider = _tool_then_say(
+        "get_tracker_total",
+        {"metric": "water", "period": "week"},
+        "You logged 14,000 ml of water in the past 7 days - roughly 1,950 ml "
+        "per day.",
+    )
+    result = await handle_chat(
+        db_session, user_id, "how much water this week", provider
+    )
+
+    assert "1,950 ml" not in result.response_message

@@ -201,10 +201,33 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 # many round trips against a slow or contended connection. Round trips are
 # therefore the thing to spend, and this is a budget, not a guideline.
 # --------------------------------------------------------------------------- #
-# 27 measured on a FIRST turn (which also creates the session); 24 on later
-# turns in an existing one. The ceiling sits just above the first-turn figure —
-# tight enough that adding a read trips it, loose enough not to be flaky.
+# 28 measured on a FIRST turn (which also creates the session); 24 on later
+# turns in an existing one. The ceiling sits ON the first-turn figure — tight
+# enough that adding a read trips it, loose enough not to be flaky. (It used to
+# say 27; the read that made it 28 was never accounted for. Re-measure and
+# re-comment when you change it, or the next person inherits the same lie.)
 MAX_QUERIES_PER_TURN = 28
+
+# A HEALTH SUMMARY is the one turn that deliberately asks for everything:
+# lifestyle logs, the wearable rollups, conditions, allergies, medications,
+# vitals and labs, each behind its OWN savepoint so a failing reader costs its
+# own line and never the reply. 32 measured — 20 of them inside the handler
+# (8 SELECTs and 12 savepoint statements; savepoints are more than half the
+# cost and are what buys the per-section fail-open).
+#
+# Above the ordinary ceiling ON PURPOSE, and the reasons are specific rather
+# than a shrug: the reads fire only behind the summary parse, so they cost an
+# ordinary turn nothing (that turn still measures 28); the turn makes ZERO
+# model calls; and it replaces an LLM answer that runs a median of 8.6s. It is
+# a budget to spend, not a law — but it is spent knowingly and it is guarded.
+# A CO-OCCURRENCE readout ("does coffee affect my sleep") answers in the shared
+# prologue from two rollup scans and never reaches the ability chain, retrieval
+# or the model. 14: 12 measured for a plain pair, 13 when the asked-for HRV
+# measure is missing and its sibling is probed, and one spare. It costs an
+# ORDINARY turn nothing -- both parsers run before any query and decline.
+MAX_QUERIES_PER_CORRELATION_TURN = 14
+
+MAX_QUERIES_PER_SUMMARY_TURN = 34
 
 
 async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):
@@ -222,6 +245,113 @@ async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):
     assert counter["n"] <= MAX_QUERIES_PER_TURN, (
         f"{counter['n']} queries in one turn, budget {MAX_QUERIES_PER_TURN}. "
         "Each one is a network round trip in production."
+    )
+
+
+async def test_a_correlation_turn_is_cheap_and_parse_gated(db_session, engine):
+    """A co-occurrence readout answers in the SHARED prologue and short-circuits.
+
+    14 measured: 12 for a plain pair, 13 when the asked-for HRV measure is
+    absent and the sibling is probed. Two or three of those are the handler's
+    (one `lifestyle_daily_total` scan, one or two `sahha_daily_total` scans,
+    plus its savepoint) -- the rest is the prologue every turn already pays.
+    It is far under the ordinary budget because the turn never reaches the
+    ability chain, retrieval, or the model at all.
+
+    The number that matters more is the OTHER assertion below: an ordinary turn
+    is unchanged, because both parsers run before any query and decline.
+    """
+    from datetime import timedelta
+
+    from app.models.common import utcnow
+    from app.models.coredata import LifestyleDailyTotal, SahhaDailyTotal
+
+    user_id = uuid.uuid4()
+    today = utcnow().date()
+    for i in range(1, 25):
+        db_session.add(SahhaDailyTotal(
+            user_id=user_id, metric="sleep_duration",
+            bucket_start=today - timedelta(days=i),
+            total=360.0 if i <= 9 else 402.0, entries=1, days_counted=1,
+        ))
+        if i <= 9:
+            db_session.add(LifestyleDailyTotal(
+                user_id=user_id, metric="coffee",
+                bucket_start=today - timedelta(days=i),
+                total=2.0, entries=2, days_counted=1,
+            ))
+    await db_session.flush()
+
+    counter = _count_queries(engine)
+    result = await handle_chat(
+        db_session, user_id, "does coffee affect my sleep", FakeProvider()
+    )
+    assert result.provenance["path"] == "correlation_query"
+    assert counter["n"] <= MAX_QUERIES_PER_CORRELATION_TURN, (
+        f"{counter['n']} queries for one co-occurrence readout, budget "
+        f"{MAX_QUERIES_PER_CORRELATION_TURN}."
+    )
+
+
+async def test_a_summary_turn_stays_within_its_own_budget(db_session, engine):
+    """And, just as important, does not raise the cost of an ordinary turn."""
+    import uuid as _uuid
+    from datetime import date, timedelta
+
+    from app.models.common import utcnow
+    from app.models.coredata import (
+        LifestyleLog,
+        MedicalCondition,
+        MedicineTracking,
+        SahhaDailyTotal,
+        SahhaWeeklyTotal,
+        VitalReading,
+    )
+
+    user_id = _uuid.uuid4()
+    today: date = utcnow().date()
+    week_open = today - timedelta(days=(today.weekday() + 1) % 7)
+    for metric, total in (
+        ("sleep_duration", 2800.0), ("steps", 52300.0),
+        ("heart_rate_resting", 434.0), ("heart_rate_variability_sdnn", 315.0),
+    ):
+        db_session.add(SahhaWeeklyTotal(
+            user_id=user_id, metric=metric, bucket_start=week_open,
+            total=total, entries=7, days_counted=7,
+        ))
+        for i in range(7):
+            db_session.add(SahhaDailyTotal(
+                user_id=user_id, metric=metric,
+                bucket_start=week_open + timedelta(days=i),
+                total=total / 7, entries=1, days_counted=1,
+            ))
+    db_session.add(LifestyleLog(
+        user_id=user_id, log_type="coffee", quantity=3, unit="cup", servings=3,
+        logged_at=utcnow() - timedelta(days=1),
+    ))
+    db_session.add(MedicalCondition(
+        user_id=user_id, name="Hypertension", type="condition", status="active",
+        started_on=utcnow(),
+    ))
+    db_session.add(MedicineTracking(
+        user_id=user_id, name="Metformin", strength="500mg", private=False,
+        is_prn=False,
+    ))
+    db_session.add(VitalReading(
+        user_id=user_id, vital_type="heart_rate", value_primary=72, unit="bpm",
+        recorded_at=utcnow() - timedelta(days=1),
+    ))
+    await db_session.flush()
+
+    counter = _count_queries(engine)
+    result = await handle_chat(
+        db_session, user_id, "health summary for the week", FakeProvider()
+    )
+    assert result.provenance["path"] == "health_summary"
+    assert counter["n"] <= MAX_QUERIES_PER_SUMMARY_TURN, (
+        f"{counter['n']} queries for one summary, budget "
+        f"{MAX_QUERIES_PER_SUMMARY_TURN}. Batch a read or raise the constant "
+        "deliberately, with a fresh measurement."
     )
 
 
@@ -263,3 +393,38 @@ async def test_requesting_an_erasure_invalidates_the_pending_memo(db_session):
     await db_session.flush()
 
     assert await erasure.is_pending(db_session, user_id) is True
+
+
+async def test_the_wearable_answer_still_costs_two_reads(db_session, engine):
+    """One weekly rollup for the sentence, one daily read for the chart.
+
+    The chart is scoped to the week the sentence names by the QUERY, not
+    fetched wide and filtered in Python, so bounding it to the right week did
+    not buy a third round trip. The HRV sibling retry and the resting-heart-rate
+    fall-through only run when the first read came back empty.
+    """
+    from datetime import date, timedelta
+
+    from app.chat.data_handlers import handle_tracker_query
+    from app.models.coredata import SahhaDailyTotal, SahhaWeeklyTotal
+
+    user_id = uuid.uuid4()
+    today = date.today()
+    week = today - timedelta(days=(today.weekday() + 1) % 7)
+    db_session.add(SahhaWeeklyTotal(
+        user_id=user_id, metric="steps", bucket_start=week,
+        total=21000, entries=3, days_counted=3,
+    ))
+    for offset in range(3):
+        db_session.add(SahhaDailyTotal(
+            user_id=user_id, metric="steps", bucket_start=week + timedelta(days=offset),
+            total=7000, entries=1, days_counted=1,
+        ))
+    await db_session.flush()
+
+    counter = _count_queries(engine)
+    out = await handle_tracker_query(
+        db_session, user_id, "how many steps did I take this week"
+    )
+    assert out is not None and out["visual"] is not None
+    assert counter["n"] == 2, f"{counter['n']} reads for one wearable answer"

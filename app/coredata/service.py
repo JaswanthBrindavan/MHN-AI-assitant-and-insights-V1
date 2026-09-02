@@ -12,14 +12,15 @@ import logging
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.models.common import utcnow
+from app.models.common import as_utc, utcnow
 from app.models.core import User
 from app.models.coredata import (
     Bill,
@@ -30,6 +31,7 @@ from app.models.coredata import (
     FamilyConnect,
     FileAccessExclusion,
     Insurance,
+    LifestyleDailyTotal,
     LifestyleLog,
     ManualTracking,
     MedicalCondition,
@@ -40,6 +42,8 @@ from app.models.coredata import (
     Prescription,
     Relation,
     Report,
+    SahhaDailyTotal,
+    SahhaWeeklyTotal,
     ScanImaging,
     Vaccination,
     VitalReading,
@@ -459,7 +463,11 @@ class MetricPoint:
 
 def _vital_point(row: VitalReading) -> MetricPoint:
     return MetricPoint(
-        at=row.recorded_at,
+        # UTC-aware, always: sqlite returns a NAIVE datetime for a
+        # timestamptz column and PostgreSQL an aware one, so a caller
+        # comparing `point.at` to a window boundary works on one and raises on
+        # the other. Normalised HERE, where every vital reader routes through.
+        at=as_utc(row.recorded_at),
         value=float(row.value_primary),
         secondary=float(row.value_secondary) if row.value_secondary is not None else None,
         unit=row.unit,
@@ -578,13 +586,146 @@ async def latest_body_measurement(
 # Lifestyle logs (tracker adds + aggregates)
 # --------------------------------------------------------------------------- #
 LIFESTYLE_TYPES = ("water", "alcohol", "coffee", "tea", "smoking")
-DEFAULT_UNITS = {
-    "water": "glass",
-    "coffee": "cup",
-    "tea": "cup",
-    "alcohol": "drink",
-    "smoking": "cigarette",
+
+# What mhn-spring stores each log type in, and the noun a reader reads it as.
+#
+# The authority is `LifestyleMetric` (mhn-spring), whose javadoc is explicit:
+# "The one unit this metric is stored in. Totals are plain sums, so a second
+# unit for the same metric would silently add glasses to millilitres; a write
+# in anything else is rejected and the client converts first." `resolveUnit`
+# (ManualTrackingServiceImpl:890-909) enforces that with a 400, and the
+# rollups sum `quantity` regardless -- `MetricFanout.of` adds
+# `new Measure(LifestyleMetric.primary(type), quantity)` and
+# `ManualTrackingReconciler.MEASURES` reads `l.quantity AS amount`.
+#
+# So `lifestyle_log.quantity` IS the canonical measure on every row the
+# platform accepted, and `SUM(quantity) GROUP BY log_type` is unit-safe by
+# construction. `volume_ml` feeds only the derived `drink_volume_ml` series
+# and `servings` feeds no rollup at all: neither is a total to read.
+#
+# log_type -> (unit stored in `lifestyle_log.unit`, the noun to print)
+LIFESTYLE_UNITS: dict[str, tuple[str, str]] = {
+    "water":        ("ml",      "ml"),
+    "alcohol":      ("ml",      "ml"),
+    "coffee":       ("cup",     "cup"),
+    "tea":          ("cup",     "cup"),
+    "smoking":      ("count",   "cigarette"),
+    "energy_drink": ("serving", "serving"),
+    "other_drink":  ("serving", "serving"),
 }
+
+# Millilitres per vessel, keyed on the DRINK -- not on the log type. Every
+# number is a row of mhn-spring V35's `drink_serving_size` seed, which is
+# keyed exactly this way and says why in its own comment: "Per category,
+# because 'Large' is 350 ml of coffee, 500 ml of beer and 90 ml of whisky."
+#
+# Keying on `log_type` collapsed beer, wine and spirits into one pseudo-
+# category "alcohol", so "a bottle of wine" was written as 330 ml -- BEER's
+# bottle -- and "a glass of whisky" as 150 ml, WINE's glass. Those rows go
+# into a shared table the app's charts and the reader's `lifestyle_limit`
+# status read, and a 750 ml bottle logged as 330 is a 56% under-report of
+# alcohol that outlives the conversation.
+#
+# A (drink, vessel) pair with no row here has no sanctioned size and is
+# REFUSED, not guessed -- wine in a bottle and beer in a glass included; the
+# seed has neither. An invented serving size on a shared health chart is
+# worse than asking, and the refusal copy already exists.
+_VESSEL_ML: dict[tuple[str, str], float] = {
+    ("water", "glass"): 250.0,
+    ("water", "bottle"): 500.0,
+    ("beer", "bottle"): 330.0,
+    ("beer", "can"): 500.0,
+    ("beer", "pint"): 568.0,
+    ("wine", "glass"): 150.0,
+    ("spirits", "peg"): 60.0,
+    # spirits/Small peg 30, which is also liqueur/Shot 30 -- the two rows the
+    # seed gives a 30 ml pour, so "a shot of vodka" is sized, not invented.
+    ("spirits", "shot"): 30.0,
+}
+# The drink a message named -> the V35 serving-size CATEGORY that sizes it.
+# A drink absent here ("2 drinks", "some alcohol") names no category and so
+# has no sanctioned size at all.
+_DRINK_CATEGORY: dict[str, str] = {
+    "water": "water",
+    "beer": "beer",
+    "wine": "wine",
+    "whisky": "spirits",
+    "whiskey": "spirits",
+    "rum": "spirits",
+    "vodka": "spirits",
+}
+_TO_ML = {"ml": 1.0, "millilitre": 1.0, "milliliter": 1.0,
+          "litre": 1000.0, "liter": 1000.0, "l": 1000.0}
+
+# Units that are a measure rather than a countable noun: never pluralised.
+_MASS_UNITS = frozenset({"ml", "l", "g", "mg", "count"})
+
+
+def plural_unit(unit: str, n: float) -> str:
+    """`cup` -> `cups` for anything but one; `ml` stays `ml`."""
+    if n == 1 or unit in _MASS_UNITS:
+        return unit
+    return unit + ("es" if unit.endswith(("s", "sh", "ch", "x")) else "s")
+
+
+def canonical_amount(
+    log_type: str, quantity: float, unit: str | None, kind: str | None = None
+) -> tuple[float, str] | None:
+    """``(quantity, unit)`` in the metric's own unit, or None when there is none.
+
+    The one place a spoken unit becomes a stored one. mhn-spring rejects any
+    other unit with a 400 and its rollups sum `quantity` whatever the unit
+    says, so a row written as `quantity=2, unit='glass'` does not merely look
+    wrong: it lands in the reader's own water-in-millilitres series in the app
+    as 2 ml, and in their `lifestyle_limit` status.
+
+    ``kind`` is the DRINK the reader named ("wine", "whisky"); the vessel is
+    sized against that, because a bottle is 330 ml of beer and 750 of wine.
+    It defaults to ``log_type`` so the water path and every existing caller
+    are unchanged.
+
+    None means "no sanctioned size for that (drink, vessel)" -- a bare "2
+    drinks", a cup of water, a BOTTLE of wine. The caller asks rather than
+    inventing one.
+    """
+    canonical = LIFESTYLE_UNITS.get(log_type, ("serving", "serving"))[0]
+    spoken = (unit or canonical).strip().lower()
+    if spoken == canonical:
+        return quantity, canonical
+    if canonical == "ml":
+        category = _DRINK_CATEGORY.get((kind or log_type).strip().lower())
+        factor = _TO_ML.get(spoken) or (
+            _VESSEL_ML.get((category, spoken)) if category else None
+        )
+        return (quantity * factor, canonical) if factor else None
+    # `cup`, `count` and `serving` all count servings, which is why V35's
+    # backfill set `servings := quantity` with no unit check at all: a mug, a
+    # can and a cigarette are each one. The vessel changes the noun, never the
+    # number.
+    return quantity, canonical
+
+
+@dataclass(frozen=True)
+class LifestyleTotal:
+    """A lifestyle total and the unit it is in. Callers show ``text()``."""
+
+    log_type: str
+    total: float
+    unit: str
+
+    def text(self) -> str:
+        """Reader-facing: "3 cups", "1250 ml", "5 cigarettes"."""
+        return f"{self.total:g} {plural_unit(self.unit, self.total)}"
+
+
+def lifestyle_phrase(total: LifestyleTotal) -> str:
+    """``text()`` with the kind appended, unless the unit already names it.
+
+    "3 cups of coffee", but "5 cigarettes" -- not "5 cigarettes of smoking".
+    """
+    if total.unit in ("cigarette", "beedi"):
+        return total.text()
+    return f"{total.text()} of {total.log_type}"
 
 
 async def add_lifestyle_log(
@@ -594,12 +735,35 @@ async def add_lifestyle_log(
     quantity: float,
     unit: str | None,
     logged_at: datetime | None = None,
+    kind: str | None = None,
 ) -> LifestyleLog:
+    """Write one row, in the unit mhn-spring guarantees the column is in.
+
+    Raises ``ValueError`` when the spoken unit has no sanctioned conversion --
+    the same answer mhn-spring's own API gives (`resolveUnit` -> 400). This is
+    a SHARED table read by the app's charts and by the reader's
+    `lifestyle_limit` status, and every writer routes through here, so the
+    guard lives in this function rather than in each caller.
+    """
+    canonical = canonical_amount(log_type, quantity, unit, kind)
+    if canonical is None:
+        stored = LIFESTYLE_UNITS.get(log_type, ("serving", "serving"))[0]
+        raise ValueError(
+            f"{log_type} is tracked in {stored}; no sanctioned size for "
+            f"'{unit}' of '{kind or log_type}' -- convert before writing."
+        )
+    quantity, unit = canonical
+    # The two derived columns, exactly as mhn-spring fills them for a log with
+    # no catalogue drink (ManualTrackingServiceImpl:208-212): the same number
+    # as `quantity`, in whichever column the type's own measure is.
+    volume = unit == "ml"
     row = LifestyleLog(
         user_id=user_id,
         log_type=log_type,
         quantity=quantity,
-        unit=unit or DEFAULT_UNITS.get(log_type, "unit"),
+        unit=unit,
+        volume_ml=quantity if volume else None,
+        servings=None if volume else quantity,
         metadata_json={"source": "davi_chat"},
         logged_at=logged_at or utcnow(),
     )
@@ -610,23 +774,181 @@ async def add_lifestyle_log(
 
 async def lifestyle_totals(
     db: AsyncSession, user_id: uuid.UUID, since: datetime
-) -> dict[str, float]:
+) -> dict[str, LifestyleTotal]:
+    """Per log type, how much was logged -- in the type's own unit.
+
+    A plain ``SUM(quantity)``, which is the same arithmetic
+    ``lifestyle_daily_total`` holds for the primary metrics (see
+    ``LIFESTYLE_UNITS`` for why that is unit-safe). Reading the log rather
+    than the rollup keeps a row Davi just wrote visible: the rollup only
+    catches up when Spring reconciles.
+    """
     rows = (
         await db.execute(
             select(LifestyleLog.log_type, func.sum(LifestyleLog.quantity))
-            .where(
-                LifestyleLog.user_id == user_id, LifestyleLog.logged_at >= since
-            )
+            .where(LifestyleLog.user_id == user_id, LifestyleLog.logged_at >= since)
             .group_by(LifestyleLog.log_type)
         )
     ).all()
-    return {log_type: float(total) for log_type, total in rows}
+    return {
+        log_type: LifestyleTotal(
+            log_type=log_type,
+            total=float(total),
+            unit=LIFESTYLE_UNITS.get(log_type, ("serving", "serving"))[1],
+        )
+        for log_type, total in rows
+    }
+
+
+async def lifestyle_days(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    log_type: str,
+    *,
+    since: date,
+    until: date,
+) -> dict[date, float]:
+    """Which CALENDAR DAYS in ``[since, until)`` hold a log of one type.
+
+    Reads ``lifestyle_daily_total`` rather than grouping ``lifestyle_log`` by
+    ``date(logged_at)``: Spring assigned both these buckets and
+    ``sahha_daily_total``'s in its own write-time zone, so the two sides of a
+    same-day comparison line up. Grouping in SQL would produce UTC days and
+    put a late-evening coffee on a different day from the night's sleep.
+
+    The value is the rollup's per-day ``SUM(quantity)``. Counting the DAYS is
+    what most callers want; the one sanctioned way to add the numbers up is
+    ``lifestyle_calendar_total``, which attaches the metric's unit.
+    """
+    rows = (
+        await db.execute(
+            select(LifestyleDailyTotal.bucket_start, LifestyleDailyTotal.total)
+            .where(
+                LifestyleDailyTotal.user_id == user_id,
+                LifestyleDailyTotal.metric == log_type,
+                LifestyleDailyTotal.entries >= 1,
+                LifestyleDailyTotal.bucket_start >= since,
+                LifestyleDailyTotal.bucket_start < until,
+            )
+        )
+    ).all()
+    return {bucket: float(total) for bucket, total in rows}
+
+
+async def first_lifestyle_day(
+    db: AsyncSession, user_id: uuid.UUID
+) -> date | None:
+    """The earliest day the reader holds ANY lifestyle daily total, or None.
+
+    A day before this one is a day the reader was not tracking at all -- not a
+    day they went without the habit. ``co_occurrence``'s "did not log" group
+    counted those as evidence, so a reader who started logging coffee a week
+    ago got a finding built out of 21 days of nothing, which is the most
+    likely first question this feature ever sees.
+    """
+    return (
+        await db.execute(
+            select(func.min(LifestyleDailyTotal.bucket_start)).where(
+                LifestyleDailyTotal.user_id == user_id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def lifestyle_calendar_total(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    log_type: str,
+    *,
+    since: date,
+    until: date,
+) -> tuple[LifestyleTotal | None, int]:
+    """An AMOUNT over a half-open calendar span, and how many days carried a log.
+
+    Reads ``lifestyle_daily_total`` rather than summing ``lifestyle_log``
+    between two instants. A calendar day is only a calendar day in the zone
+    that assigned it, and ``app.tracking.zone`` is not recoverable here --
+    ``logged_at >= <some midnight>`` is a UTC day and would put a late-evening
+    log on the wrong side of "yesterday". Summing the rollup is unit-safe: the
+    platform stores exactly one unit per metric (``LIFESTYLE_UNITS``) and
+    rejects any other.
+
+    The cost is freshness -- a row Davi has just written reaches this table
+    only when Spring reconciles (03:15 daily) -- which is exactly what the
+    returned day count exists to make visible to the reader.
+    """
+    days = await lifestyle_days(db, user_id, log_type, since=since, until=until)
+    if not days:
+        return None, 0
+    return (
+        LifestyleTotal(
+            log_type=log_type,
+            total=sum(days.values()),
+            unit=LIFESTYLE_UNITS.get(log_type, ("serving", "serving"))[1],
+        ),
+        len(days),
+    )
 
 
 def window_start(period: str, now: datetime | None = None) -> datetime:
+    """The ROLLING window an open-ended period opens at. ``None`` for calendar
+    periods -- those are ``calendar_window``'s, and are bounded at both ends."""
     now = now or utcnow()
+    if period == "today":
+        # Midnight, not "now minus nothing": "how much water today" is read off
+        # `lifestyle_log` rather than the overnight rollup, and the rolling
+        # readers take a datetime floor.
+        return datetime.combine(now.date(), time.min, tzinfo=UTC)
     days = {"week": 7, "month": 30, "year": 365}.get(period, 7)
     return now - timedelta(days=days)
+
+
+def week_start(day: date) -> date:
+    """The SUNDAY that opens the tracking week holding ``day``.
+
+    mhn-spring's convention, stated in two places and derived nowhere else:
+    ``TrackingGrain.bucketOf`` uses
+    ``TemporalAdjusters.previousOrSame(DayOfWeek.SUNDAY)``, and
+    ``SahhaRollupDao.bucketExpression(WEEK)`` spells the same thing in SQL as
+    ``date_trunc('week', d + 1 day) - 1 day`` -- deliberately NOT PostgreSQL's
+    Monday. Python's ``weekday()`` is Monday=0, so the Sunday is
+    ``(weekday() + 1) % 7`` days back.
+
+    This computes the CURRENT week from today's date. It never re-derives a
+    stored ``bucket_start``: those are read as given and only compared against
+    the span this produces.
+    """
+    return day - timedelta(days=(day.weekday() + 1) % 7)
+
+
+CALENDAR_PERIODS = ("today", "yesterday", "this_week", "last_week")
+
+
+def calendar_window(
+    period: str, today: date | None = None
+) -> tuple[date, date] | None:
+    """Half-open ``[since, until)`` in calendar days, or ``None`` if rolling.
+
+    ``this_week`` is the calendar week TO DATE and includes today, so it is
+    normally a PARTIAL week -- callers must say so rather than presenting three
+    days as a week's total. ``last_week`` is the previous complete week.
+
+    ``today`` defaults to the UTC date, not ``app.tracking.zone``: that zone is
+    empty by default in mhn-spring and unrecoverable from the data, so within a
+    few hours of midnight a window can be one day out. Same anchor
+    ``handle_correlation_query`` already uses.
+    """
+    today = today or utcnow().date()
+    if period == "today":
+        return today, today + timedelta(days=1)
+    if period == "yesterday":
+        return today - timedelta(days=1), today
+    if period == "this_week":
+        return week_start(today), today + timedelta(days=1)
+    if period == "last_week":
+        start = week_start(today) - timedelta(days=7)
+        return start, start + timedelta(days=7)
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -646,6 +968,9 @@ async def active_medications(
             .where(
                 MedicineTracking.user_id == user_id,
                 MedicineTracking.stopped_at.is_(None),
+                # Soft delete: a course removed in the app keeps
+                # `stopped_at IS NULL`, so without this it reads as current.
+                MedicineTracking.deleted_at.is_(None),
                 MedicineTracking.private.is_(False),
             )
             .order_by(MedicineTracking.name.asc(), MedicineTracking.id.asc())
@@ -671,18 +996,30 @@ _MANUAL_UNIT = {"sleep": "h", "steps": "steps", "calories": "kcal", "water": "gl
 
 
 async def latest_manual_metrics(
-    db: AsyncSession, user_id: uuid.UUID, since: datetime
+    db: AsyncSession, user_id: uuid.UUID, since: datetime,
+    until: datetime | None = None,
 ) -> dict[str, MetricPoint]:
-    """Latest value per manual-tracking type recorded since ``since``."""
+    """Latest value per manual-tracking type recorded in ``[since, until)``.
+
+    ``until`` is what a calendar period needs: without an upper bound
+    "how many steps yesterday" answers with today's entry. ``manual_tracking``
+    carries only instants -- no Spring-assigned day column -- so a calendar
+    caller has nothing but UTC midnights to bound it with, and is off by the
+    tracking zone's offset. The reply names the date it found, so a reader can
+    see which day answered.
+    """
+    where = [
+        ManualTracking.user_id == user_id,
+        ManualTracking.value.is_not(None),
+        ManualTracking.type.in_(MANUAL_METRIC_ORDER),
+        ManualTracking.effective_from >= since,
+    ]
+    if until is not None:
+        where.append(ManualTracking.effective_from < until)
     rows = (
         await db.execute(
             select(ManualTracking)
-            .where(
-                ManualTracking.user_id == user_id,
-                ManualTracking.value.is_not(None),
-                ManualTracking.type.in_(MANUAL_METRIC_ORDER),
-                ManualTracking.effective_from >= since,
-            )
+            .where(*where)
             .order_by(
                 ManualTracking.effective_from.desc().nulls_last(),
                 ManualTracking.id.desc(),
@@ -697,6 +1034,228 @@ async def latest_manual_metrics(
             at=r.effective_from or utcnow(),
             value=float(r.value),
             unit=r.unit or _MANUAL_UNIT.get(r.type),
+        )
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Wearable (Sahha) rollups — read only
+# --------------------------------------------------------------------------- #
+# Per-metric aggregation, ported from mhn-spring's SahhaMetricCatalog. The
+# rollups carry NO unit column and their `total` is a SUM regardless, so this
+# table is the only thing that stops a week of resting heart rate reading as
+# ~420 bpm.
+#
+# metric -> (display label, unit as stored, is_sum)
+SAHHA_METRICS: dict[str, tuple[str, str, bool]] = {
+    "steps":                        ("steps",              "count",  True),
+    "sleep_duration":               ("sleep",              "minute", True),
+    "heart_rate_resting":           ("resting heart rate", "bpm",    False),
+    "heart_rate_variability_sdnn":  ("HRV (SDNN)",         "ms",     False),
+    "heart_rate_variability_rmssd": ("HRV (RMSSD)",        "ms",     False),
+}
+
+# SDNN and RMSSD are DIFFERENT measures of the same thing, and which one a
+# device reports is the device's choice. Asking for one and finding nothing is
+# not an answer -- read the sibling before saying the reader has no HRV. They
+# are never merged: the label names whichever one answered.
+HRV_SIBLING = {
+    "heart_rate_variability_sdnn": "heart_rate_variability_rmssd",
+    "heart_rate_variability_rmssd": "heart_rate_variability_sdnn",
+}
+
+
+def sahha_meta(metric: str) -> tuple[str, str, bool]:
+    """Catalogue entry for a metric, or a bare-number default for an unknown one.
+
+    Sahha's vocabulary grows, so an unrecognised metric must degrade to a
+    number without a unit -- never a KeyError in a read path.
+    """
+    return SAHHA_METRICS.get(metric, (metric, "", False))
+
+
+@dataclass(frozen=True)
+class WearablePoint:
+    bucket_start: date
+    value: float   # the SUM for sum-metrics, total/entries for the rest
+    entries: int   # READINGS in the bucket -- a device syncing hourly makes
+                   # this many times the day count. Never a day count.
+    # Distinct days in the bucket that hold anything (V40: "what a weekly or
+    # monthly point is divided by to read 'per day'. Always 1 at day grain").
+    # `days_counted < 7` on a weekly point is how a PARTIAL week is known --
+    # the week in progress, or a device with gaps.
+    days_counted: int
+
+
+_SAHHA_GRAIN = {"day": SahhaDailyTotal, "week": SahhaWeeklyTotal}
+
+
+def _headline(metric: str, total: float | Decimal, entries: int) -> float:
+    """total for SUM metrics, the mean otherwise — mhn-spring's own formula
+    (SahhaHealthServiceImpl.headline: `total` when SUM or entries == 1, else
+    total/entries at 2dp HALF_UP). Copied so the two agree.
+
+    The division is done in Decimal with ROUND_HALF_UP, not with `round()`:
+    Python rounds a tie to even and Java's BigDecimal rounds it up, so 421/8
+    is 52.62 one side and 52.63 the other. Ties land whenever `entries` is a
+    power of two, which is ordinary, and chat and the app must not print
+    different numbers for the same week.
+
+    An unknown metric defaults to the MEAN, never the sum: a mean of a counter
+    reads low, while a sum of a rate reads like a medical emergency.
+    """
+    is_sum = sahha_meta(metric)[2]
+    if is_sum or entries == 1:
+        return float(total)
+    if entries < 1:
+        # No readings means no mean. `wearable_totals` drops these rows; this
+        # keeps a direct caller from dividing by zero -- and from the older
+        # `entries <= 1` behaviour, which showed a week's SUM of resting heart
+        # rate (420 bpm) as if it were the average.
+        return 0.0
+    mean = (Decimal(str(total)) / Decimal(entries)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    return float(mean)
+
+
+def wearable_display(metric: str, value: float) -> tuple[float, str]:
+    """One headline value in the units a PERSON is shown, and that unit.
+
+    Sleep is stored in MINUTES and shown in hours. This is the only place that
+    conversion happens, so the sentence and the chart cannot disagree about the
+    same week -- a chart of raw minutes beside a sentence in hours is two
+    different answers to one question.
+    """
+    unit = sahha_meta(metric)[1]
+    if unit == "minute":
+        return round(value / 60, 1), "h"
+    if unit == "count":
+        return round(value), "steps"
+    # Never more than the 2dp mhn-spring's own mean carries. A single-reading
+    # bucket passes numeric(16,4) straight through, and "59.995 bpm" reads as
+    # instrument-grade precision no wrist device has.
+    return round(value, 2), unit
+
+
+def format_wearable(metric: str, value: float) -> str:
+    """Reader-facing text for one headline value."""
+    shown, unit = wearable_display(metric, value)
+    if unit == "h":
+        return f"{shown:.1f} h"
+    if unit == "steps":
+        return f"{shown:,.0f} steps"
+    return f"{shown:g} {unit}".strip()
+
+
+async def wearable_totals(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    metric: str,
+    *,
+    grain: str = "day",
+    limit: int = 7,
+    since: date | None = None,
+    until: date | None = None,
+) -> list[WearablePoint]:
+    """The last `limit` buckets for one wearable metric, oldest first.
+
+    Reads the PRE-AGGREGATED rollup rather than recomputing from
+    sahha_biomarker: it is the number mhn-spring's own charts show; weekly
+    buckets open on SUNDAY, which Python's Monday-based weekday()/isocalendar()
+    would shift by a day; `day` was assigned in Spring's write-time zone, which
+    is not recoverable from the data; and the rollups were built
+    `WHERE value IS NOT NULL`, so non-numeric metrics (sleep_start_time and
+    friends) can never appear here.
+
+    A bucket with no readings is an ABSENT ROW, not a zero. Gaps stay gaps.
+
+    ``since``/``until`` bound ``bucket_start`` to a HALF-OPEN CALENDAR span,
+    never to a rolling `window_start()` offset: these are calendar buckets, and
+    slicing them by "now minus N days" includes or drops an edge bar depending
+    on the hour the question is asked. Bounded, because the last N buckets that
+    EXIST are not the last N days -- for a sparse or lapsed device they can span
+    months, and the chart's bars have to be the days the sentence's total
+    covers or a reader who adds them up gets a different figure with no way to
+    see why. Unbounded is still available and still means "the last N rows".
+
+    A row with ``entries < 1`` is dropped: a bucket holding no readings carries
+    no number, and for an AVERAGE metric there is nothing to divide by.
+    """
+    model = _SAHHA_GRAIN[grain]
+    where = [model.user_id == user_id, model.metric == metric, model.entries >= 1]
+    if since is not None:
+        where.append(model.bucket_start >= since)
+    if until is not None:
+        where.append(model.bucket_start < until)
+    rows = (
+        await db.execute(
+            select(model)
+            .where(*where)
+            .order_by(model.bucket_start.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    points = [
+        WearablePoint(
+            bucket_start=r.bucket_start,
+            # r.total NOT floated first: numeric(16,4) arrives as a Decimal on
+            # Postgres and the exact value is what the HALF_UP mean needs.
+            value=_headline(metric, r.total, r.entries),
+            entries=r.entries,
+            days_counted=r.days_counted,
+        )
+        for r in rows
+    ]
+    points.reverse()          # chronological, for charting
+    return points
+
+
+async def wearable_latest(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    metrics: Sequence[str],
+    *,
+    since: date,
+    grain: str = "week",
+) -> dict[str, WearablePoint]:
+    """Latest bucket per metric, no older than ``since``, in ONE round trip.
+
+    The batched sibling of ``wearable_totals``, for the caller that wants four
+    or five metrics at once: five index lookups are five network hops on the
+    one turn that asks for everything. Same table, same ``entries >= 1`` rule
+    and the same ``_headline`` formula, so the two readers cannot print
+    different numbers for the same week.
+
+    ``since`` is what keeps the scan bounded AND what keeps the answer honest:
+    ``wearable_totals`` returns the last rows that EXIST at any age, so a
+    device that stopped syncing a year ago would answer "this week" with last
+    August's number.
+    """
+    if not metrics:
+        return {}
+    model = _SAHHA_GRAIN[grain]
+    rows = (
+        await db.execute(
+            select(model)
+            .where(
+                model.user_id == user_id,
+                model.metric.in_(list(metrics)),
+                model.entries >= 1,
+                model.bucket_start >= since,
+            )
+            .order_by(model.bucket_start.desc())
+        )
+    ).scalars().all()
+    out: dict[str, WearablePoint] = {}
+    for r in rows:
+        if r.metric in out:          # ordered newest-first; the first wins
+            continue
+        out[r.metric] = WearablePoint(
+            bucket_start=r.bucket_start,
+            value=_headline(r.metric, r.total, r.entries),
+            entries=r.entries,
+            days_counted=r.days_counted,
         )
     return out
 
@@ -999,39 +1558,66 @@ async def document_owner(
 _WARNING_SEVERITIES = frozenset({"severe", "medium"})
 
 
+async def medical_records(
+    db: AsyncSession, user_id: uuid.UUID, *, type_: str | None = None
+) -> list[MedicalCondition]:
+    """The reader's own conditions / surgeries / allergies — one table, one read.
+
+    THE single place the two invisibility rules are applied, because both are
+    columns a reader can easily forget:
+
+    * ``private`` — the owning app hides these; NULL means not private (the
+      column's own default), so a pre-column row stays visible.
+    * ``deleted_at`` — a SOFT delete. A condition the reader deleted in the app
+      keeps ``status = 'active'`` forever, so a query that filters on status
+      alone reports a deleted condition as a current one.
+
+    Own data only; there is no family path into it. Callers split by ``type``
+    in Python rather than issuing one query per type.
+    """
+    return list(
+        (
+            await db.execute(
+                select(MedicalCondition)
+                .where(
+                    MedicalCondition.user_id == user_id,
+                    MedicalCondition.deleted_at.is_(None),
+                    sa.or_(
+                        MedicalCondition.private.is_(False),
+                        MedicalCondition.private.is_(None),
+                    ),
+                    *([MedicalCondition.type == type_] if type_ else []),
+                )
+                .order_by(MedicalCondition.id)
+            )
+        ).scalars().all()
+    )
+
+
 async def medication_allergies(
     db: AsyncSession, user_id: uuid.UUID
 ) -> list[MedicalCondition]:
     """The reader's own MEDICATION allergies, worst first.
 
-    Own data only — this is never called for a family member. Honours the
-    ``private`` flag the owning app honours: a row the reader marked private is
-    not something Davi should read back to them in a context they did not ask
-    for.
+    Own data only — this is never called for a family member.
     """
     try:
-        rows = (
-            await db.execute(
-                select(MedicalCondition)
-                .where(
-                    MedicalCondition.user_id == user_id,
-                    MedicalCondition.type == "allergy",
-                    MedicalCondition.category == "medication",
-                    # NULL means not private (the column's own default).
-                    sa.or_(
-                        MedicalCondition.private.is_(False),
-                        MedicalCondition.private.is_(None),
-                    ),
-                )
-                .order_by(MedicalCondition.id)
-            )
-        ).scalars().all()
+        rows = [
+            r for r in await medical_records(db, user_id, type_="allergy")
+            if r.category == "medication"
+        ]
     except Exception:  # noqa: BLE001 — a read must never break a reply
         logger.warning("medication allergy read failed", exc_info=True)
         return []
 
-    order = {"severe": 0, "medium": 1, "mild": 2}
-    return sorted(rows, key=lambda r: order.get((r.severity or "").lower(), 3))
+    return sorted(rows, key=allergy_rank)
+
+
+def allergy_rank(row: MedicalCondition) -> int:
+    """Worst first; an unrecorded severity sorts last, never as severe."""
+    return {"severe": 0, "medium": 1, "mild": 2}.get(
+        (row.severity or "").lower(), 3
+    )
 
 
 def allergy_warning(allergies: list[MedicalCondition]) -> str:
@@ -1136,19 +1722,16 @@ async def cycle_snapshot(db: AsyncSession, user_id: uuid.UUID) -> CycleSnapshot:
         status = None
 
     try:
-        # RECORDED cycles only. A predicted row is an estimate the app drew,
-        # not something that happened, and reporting one as fact would be a
-        # claim the reader never made.
+        # RECORDED cycles only -- which is every row here. `period_tracking`
+        # has no `is_predicted` column in any environment, so the filter that
+        # used to sit here matched nothing, raised UndefinedColumn and left
+        # this read returning an empty list in production. A prediction the
+        # app draws is not stored in this table at all; if that ever changes,
+        # filter on the column they add rather than one we assumed.
         cycles = (
             await db.execute(
                 select(PeriodTracking)
-                .where(
-                    PeriodTracking.user_id == user_id,
-                    sa.or_(
-                        PeriodTracking.is_predicted.is_(False),
-                        PeriodTracking.is_predicted.is_(None),
-                    ),
-                )
+                .where(PeriodTracking.user_id == user_id)
                 .order_by(PeriodTracking.start_date.desc())
                 .limit(6)
             )

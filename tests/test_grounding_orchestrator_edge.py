@@ -393,7 +393,12 @@ async def test_provider_error_degrades_to_safe_reply(db_session, set_grounding_m
     assert result.response_message in _SAFE_NONES
     assert result.risk_level == NONE
     assert result.recommended_action == "discuss_with_clinician"
-    assert result.provenance == {"path": "symptom_rag", "degraded": "provider_error"}
+    assert result.provenance == {
+        "path": "symptom_rag",
+        "degraded": "provider_error",
+        "used_chunks": [],
+    }
+    assert result.citations is None
     assert result.grounding is None
     assert result.session_id is not None
 

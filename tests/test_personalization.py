@@ -137,7 +137,9 @@ async def test_health_snapshot_includes_all_recorded_data(db_session):
     await _seed_rich(db_session)
     snap = await build_health_snapshot(db_session, USER)
     assert "own recorded data" in snap
-    assert "coffee" in snap and "smoking" in snap          # lifestyle
+    # Lifestyle, with the unit that makes the number mean something. "2
+    # cigarettes" rather than "2 smoking": the unit already names the kind.
+    assert "5 cups of coffee" in snap and "2 cigarettes" in snap
     assert "5.5 h of sleep" in snap and "4200 steps" in snap  # manual tracking
     assert "blood pressure 134/88" in snap                  # vitals
     assert "blood sugar 142" in snap and "heart rate 78" in snap

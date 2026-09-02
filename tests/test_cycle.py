@@ -51,13 +51,12 @@ async def _status(db, **fields):
     await db.flush()
 
 
-async def _cycle(db, days_ago: int, length: int | None = 28, predicted=False):
+async def _cycle(db, days_ago: int, length: int | None = 28):
     db.add(
         PeriodTracking(
             user_id=USER,
             start_date=utcnow() - timedelta(days=days_ago),
             cycle_length=length,
-            is_predicted=predicted,
         )
     )
     await db.flush()
@@ -109,14 +108,31 @@ async def test_the_read_takes_no_viewer_so_family_access_is_impossible():
     )
 
 
-async def test_a_predicted_cycle_is_not_reported_as_fact(db_session):
-    """A prediction is an estimate the app drew, not something that happened."""
+async def test_only_recorded_cycles_can_be_in_this_table(db_session):
+    """A prediction is an estimate the app drew, not something that happened.
+
+    This used to seed `PeriodTracking(is_predicted=True)` and assert the row
+    was filtered out. That column exists in NO environment — not in the Flyway
+    chain, not in production — so the test only ever passed against the sqlite
+    schema the ORM built from its own (wrong) model, while the filter it was
+    exercising raised UndefinedColumn in production and left the read empty.
+
+    What is actually true: predictions are a SETTINGS-level concept
+    (`period_settings.predict_enabled`, `period_status.predictions_suppressed`)
+    and are never written as rows here, so every row is something that
+    happened. The guarantee holds by construction rather than by a filter.
+    """
     await _enable(db_session)
-    await _cycle(db_session, days_ago=2, predicted=True)
+    await _cycle(db_session, days_ago=2)
 
     snapshot = await cycle_snapshot(db_session, USER)
-    assert snapshot.last_period_start is None
-    assert snapshot.recent_cycles == 0
+    assert snapshot.last_period_start is not None
+    assert snapshot.recent_cycles == 1
+
+    mapped = {c.name for c in PeriodTracking.__table__.columns}
+    assert "is_predicted" not in mapped, (
+        "production has no such column; mapping it broke the cycle read"
+    )
 
 
 async def test_the_fertile_window_stays_off_unless_turned_on(db_session):

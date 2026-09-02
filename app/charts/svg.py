@@ -64,28 +64,43 @@ def _y_axis(lo: float, hi: float) -> list[str]:
     return out
 
 
-def line_chart(title: str, labels: list[str], values: list[float]) -> str:
+def _present(values: list[float | None]) -> list[float]:
+    """The readings that exist. ``None`` is an UNMEASURED period, never a zero —
+    plotting it as one reports a day the device never saw as a measured zero,
+    which for steps is materially false."""
+    return [v for v in values if v is not None]
+
+
+def line_chart(title: str, labels: list[str], values: list[float | None]) -> str:
     """A single-series line chart. labels and values must be equal length ≥1."""
-    if not values or len(labels) != len(values):
+    if not values or len(labels) != len(values) or not _present(values):
         raise ValueError("labels and values must be non-empty and equal length")
-    lo, hi = _scale(values)
+    lo, hi = _scale(_present(values))
     body = _y_axis(lo, hi)
 
     n = len(values)
     step = _PLOT_W / max(n - 1, 1)
-    points: list[str] = []
+    # One polyline per unbroken run of readings, so a gap stays a gap instead
+    # of being bridged by a line nobody measured.
+    run: list[str] = []
     for i, v in enumerate(values):
+        if v is None:
+            if len(run) > 1:
+                body.append(
+                    f'<polyline fill="none" stroke="{_STROKE}" stroke-width="2" '
+                    f'points="{" ".join(run)}"/>'
+                )
+            run = []
+            continue
         x = _PAD_L + step * i
         y = _PAD_T + _PLOT_H * (1 - (v - lo) / (hi - lo))
-        points.append(f"{x:.1f},{y:.1f}")
-    body.append(
-        f'<polyline fill="none" stroke="{_STROKE}" stroke-width="2" '
-        f'points="{" ".join(points)}"/>'
-    )
-    for i, v in enumerate(values):
-        x = _PAD_L + step * i
-        y = _PAD_T + _PLOT_H * (1 - (v - lo) / (hi - lo))
+        run.append(f"{x:.1f},{y:.1f}")
         body.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{_STROKE}"/>')
+    if len(run) > 1:
+        body.append(
+            f'<polyline fill="none" stroke="{_STROKE}" stroke-width="2" '
+            f'points="{" ".join(run)}"/>'
+        )
 
     shown = _label_indices(n)
     for i in shown:
@@ -98,11 +113,16 @@ def line_chart(title: str, labels: list[str], values: list[float]) -> str:
     return _frame(title, body)
 
 
-def bar_chart(title: str, labels: list[str], values: list[float]) -> str:
-    """A single-series bar chart (bars from zero)."""
-    if not values or len(labels) != len(values):
+def bar_chart(title: str, labels: list[str], values: list[float | None]) -> str:
+    """A single-series bar chart (bars from zero).
+
+    A ``None`` value keeps its slot on the axis but draws no bar: the run of
+    slots IS the window, and a measured 0 (a real zero-height bar) and a period
+    the device never saw are different readings.
+    """
+    if not values or len(labels) != len(values) or not _present(values):
         raise ValueError("labels and values must be non-empty and equal length")
-    hi = max(max(values), 1.0) * 1.08
+    hi = max(max(_present(values)), 1.0) * 1.08
     lo = 0.0
     body = _y_axis(lo, hi)
 
@@ -110,6 +130,8 @@ def bar_chart(title: str, labels: list[str], values: list[float]) -> str:
     slot = _PLOT_W / n
     bar_w = min(slot * 0.6, 48.0)
     for i, v in enumerate(values):
+        if v is None:
+            continue
         x = _PAD_L + slot * i + (slot - bar_w) / 2
         h = _PLOT_H * (v - lo) / (hi - lo)
         y = _PAD_T + _PLOT_H - h
@@ -140,15 +162,41 @@ def _label_indices(n: int, max_labels: int = 8) -> list[int]:
 
 
 def chart_payload(
-    kind: str, title: str, labels: list[str], values: list[float], unit: str | None = None
+    kind: str,
+    title: str,
+    labels: list[str],
+    values: list[float | None],
+    unit: str | None = None,
+    *,
+    source: str | None = None,
+    metric: str | None = None,
+    grain: str | None = None,
+    window_days: int | None = None,
 ) -> dict:
-    """The ``visual`` payload: declarative spec + rendered SVG."""
+    """The ``visual`` payload: declarative spec + rendered SVG.
+
+    See ``project_docs/chat-visual-payload-contract.md``. ``labels`` and
+    ``values`` are index-aligned and carry ONE entry per period in the window,
+    ``None`` where there is no reading — both mobile clients draw an empty
+    period as a stub and derive their axis from the run of slots, so an omitted
+    period silently shortens the window (Android ``BarDatum.value: Double?``,
+    iOS ``TrendChart`` rule 2).
+
+    ``source``/``metric``/``grain``/``window_days`` are what a client routes
+    on. Davi names the SUBJECT and never the screen: no route, screen name or
+    deep link, because those are per-platform and per-version and an old build
+    would meet one it cannot follow.
+    """
     svg = line_chart(title, labels, values) if kind == "line" else bar_chart(
         title, labels, values
     )
     return {
         "type": kind,
         "title": title,
+        "source": source,
+        "metric": metric,
+        "grain": grain,
+        "window_days": window_days,
         "unit": unit,
         "labels": labels,
         "values": values,

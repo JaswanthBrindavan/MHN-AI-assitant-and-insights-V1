@@ -565,3 +565,105 @@ def test_find_banned_returns_none_for_benign_text():
 def test_has_escalation_true_and_false():
     assert has_escalation("Please go to the nearest clinic.")
     assert not has_escalation("Everything seems okay for now.")
+
+
+# --------------------------------------------------------------------------- #
+# Grading a wearable number: FOUR CONJUNCTS, not an adjective list.
+#
+# The first version failed in both directions at once. It blocked four of five
+# plainly descriptive sentences and replaced the WHOLE reply with the safe
+# reply on both engines, and it admitted nine rephrasings of the exact thing
+# it exists to stop. A guard that blocks safe prose and admits the unsafe
+# sentence is worse than no guard: it trains everyone to route around it.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        # Descriptive prose about how a MEASUREMENT works. All four were
+        # blocked, and the corrective retry did not save them.
+        "Your steps come from your phone, so the count is only as good as how "
+        "often you have it with you.",
+        "Your sleep is measured by the device, and a low battery overnight can "
+        "leave gaps in the record.",
+        "Your resting heart rate is taken while you are still, so it is not "
+        "the same as a normal daytime pulse.",
+        "Your steps are counted by the wrist sensor, which is fine for walking "
+        "but under-counts a bike ride.",
+        "Your sleep is tracked in 30-second epochs, which is fine for most "
+        "nights.",
+        # The validated corpus answering a GENERAL question. Scoping to the
+        # reader's own reading is what keeps these available at all.
+        "Most adults need 7 to 9 hours of sleep a night.",
+        "Sleep of 7-9 hours is healthy for most adults.",
+        "A common target is 10,000 steps a day, though you do not need to hit "
+        "it.",
+        # A plain count. "over 7 days" is not a comparison.
+        "You walked 52,300 steps over 7 days.",
+        # Davi's OWN deterministic wearable copy, which has to survive its own
+        # guard -- including the sentence that makes the refusal honest.
+        "From your connected device (week of 10 Aug 2026): steps totalled "
+        "52,300; sleep totalled 46.7 h. That is what your device recorded, not "
+        "a measurement I can verify, and I have no reference range to say "
+        "whether any of it is high or low.",
+        "Your sleep totalled 21.0 h in the week of 30 Aug 2026, across 3 "
+        "readings from your connected device. That covers 3 of 7 days, so it "
+        "is a part-week figure rather than a full week.",
+        "Your device recorded a resting heart rate of 62 bpm.",
+    ],
+)
+def test_descriptive_prose_about_a_wearable_is_not_a_grade(sentence):
+    assert find_banned(sentence) is None, sentence
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Your sleep of 46.7 h this week is good and well within the normal "
+        "range.",
+        # §7's own example -- a threshold on a wearable number -- which had no
+        # adjective from the old list and walked straight through.
+        "Your steps averaged 7,400 a day, which is below the recommended "
+        "10,000.",
+        # A full stop between the figure and the verdict used to defeat it.
+        "Your sleep averaged 5.1 hours a night. That is below what most adults "
+        "need.",
+        # "sits" was not in the old verb list.
+        "At 46.7 h, your sleep this week sits comfortably in the normal range.",
+        "Your resting heart rate of 58 bpm is normal.",
+        "You logged 4,100 steps yesterday, which is well below your target.",
+    ],
+)
+def test_a_verdict_on_the_readers_own_wearable_figure_is_blocked(sentence):
+    assert find_banned(sentence) == "wearable-grading", sentence
+
+
+@pytest.mark.parametrize(
+    ("sentence", "reason"),
+    [
+        # `_PERSONAL_CLEARANCE_RE` required the adjective to follow "you"
+        # immediately, so the two commonest phrasings reached the reader.
+        ("It is safe for you to take ibuprofen.", "personal-clearance"),
+        ("You should be fine to take it.", "personal-clearance"),
+        ("Since nothing is recorded, you can safely take ibuprofen.",
+         "personal-clearance"),
+        ("You have no allergies on record, so you are clear to take any "
+         "medication.", "personal-clearance"),
+        # `_ABSENCE_AS_FINDING_RE` required "you have no <noun>".
+        ("You are not allergic to anything.", "absence-as-finding"),
+        ("You have no medical conditions and no current medications.",
+         "absence-as-finding"),
+    ],
+)
+def test_a_personal_clearance_or_an_empty_table_as_a_finding_is_blocked(
+    sentence, reason
+):
+    assert find_banned(sentence) == reason, sentence
+
+
+def test_the_records_framing_stays_allowed():
+    """The whole difference: "no allergies ON RECORD" is a statement about the
+    record, which is all Davi ever has."""
+    assert find_banned("You have no allergies on record.") is None
+    assert find_banned(
+        "Not on record for you: allergy information, current medications."
+    ) is None

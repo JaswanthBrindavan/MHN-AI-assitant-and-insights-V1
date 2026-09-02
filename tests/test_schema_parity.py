@@ -51,15 +51,23 @@ pytestmark = pytest.mark.skipif(
 # them from the Java entities. The dump replays Flyway only, so it cannot see
 # them. Each entry needs a reason: this list is the one way a real break can
 # hide, so it stays short and hand-checked.
-DDL_AUTO_COLUMNS = {
-    # CLAUDE.md, project_docs/spring-integration-v19.md:292 — the owner-side
-    # read grants. Mapped nullable with a fallback for exactly this reason.
-    ("family_connect", "req_read"),
-    ("family_connect", "acc_read"),
-    # app/coredata/service.py:82 — same mechanism, predicted-cycle flags.
-    ("period_tracking", "is_predicted"),
-    ("period_tracking", "symptoms"),
-}
+# Empty, and worth keeping visible.
+#
+# This held four entries, and two of them were WRONG in a way that mattered:
+# `period_tracking.is_predicted` and `.symptoms` were exempted as "ddl-auto
+# columns the Flyway dump cannot see", and they exist in NO environment — not
+# in the chain, not in production. The exemption was the only reason this
+# guard stayed green while `app/coredata/service.py` filtered on
+# `is_predicted`, raised UndefinedColumn on every call, and returned an empty
+# cycle history in production.
+#
+# An exemption in a guard like this is a claim about the world, and it needs
+# checking against the world. These were verified by diffing the live database
+# against the composed chain; the genuinely ddl-auto columns
+# (`family_connect.req_read` and friends, `insurance.to_date`,
+# `relations.sort`) are now EMITTED by `scripts/build_existing_schema`, so
+# nothing needs exempting at all.
+DDL_AUTO_COLUMNS: set[tuple[str, str]] = set()
 
 # Whole tables ddl-auto created, so the Flyway dump has no CREATE TABLE at all.
 DDL_AUTO_TABLES = {"file_access_exclusions"}
@@ -105,6 +113,18 @@ def _effective_columns(sql: str, table: str) -> set[str] | None:
             r'(?i)DROP COLUMN (?:IF EXISTS )?"?(\w+)"?', body
         ):
             cols.discard(drop.group(1).lower())
+        # A RENAME is a DROP of the old name and an ADD of the new one, and
+        # skipping it is how `lifestyle_daily_total.log_type` stayed mapped
+        # after mhn-spring's V35 renamed it to `metric`: every read raised
+        # UndefinedColumn in production while this guard reported parity.
+        # The whole point of the guard is that the other team can move a
+        # column without us noticing, and a rename is the quietest way they
+        # can do it — nothing is added and nothing is removed on net.
+        for ren in re.finditer(
+            r'(?i)RENAME COLUMN "?(\w+)"?\s+TO\s+"?(\w+)"?', body
+        ):
+            cols.discard(ren.group(1).lower())
+            cols.add(ren.group(2).lower())
     return cols
 
 

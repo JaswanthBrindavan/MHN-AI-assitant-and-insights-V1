@@ -52,6 +52,21 @@ def test_spec_names_and_executors_match_exactly():
     assert {s.name for s in TOOL_SPECS} == set(EXECUTORS)
 
 
+def test_every_tracker_metric_enum_value_resolves():
+    """The "reachable shape, unreachable guard" class, pinned.
+
+    The tool offers ten metric words; each must resolve against the SAME
+    _TRACKER_TERMS table the legacy parser reads. A value the resolver does not
+    recognise is a tool the model can call and that always answers nothing --
+    which is exactly how get_documents shipped broken on the agentic engine.
+    """
+    from app.chat.abilities import tracker_query_for
+    from app.chat.tools.definitions import GET_TRACKER_TOTAL
+
+    for value in GET_TRACKER_TOTAL.input_schema["properties"]["metric"]["enum"]:
+        assert tracker_query_for(value, "week") is not None, value
+
+
 def test_tool_names_are_unique():
     names = [s.name for s in TOOL_SPECS]
     assert len(names) == len(set(names))
