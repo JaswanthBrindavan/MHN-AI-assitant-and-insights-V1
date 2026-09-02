@@ -181,7 +181,21 @@ tests/                 unit (aiosqlite) + pg-marked; tests/golden/artifacts.json
   no new row (idempotency test + committed golden snapshot).
 - **Triage is a floor** that runs before scope/route/LLM; downstream may raise
   the level, never lower it. Emergencies are answered deterministically (no LLM).
-- **One vocabulary**: compaction detects flags with the SAME triage tables.
+- **One vocabulary for SEVERITY**: compaction detects flags with the SAME
+  triage tables. There is now a second, non-escalating table —
+  `ORDINARY_SYMPTOM_PHRASES` / `symptom_mentions()` — and the separation is
+  load-bearing: those terms are written to `symptom_logs` (history) ONLY. They
+  never enter `matched_terms`, never open an episode and never raise the floor,
+  because a headache is not a reason to tell someone to seek care. Anything
+  that decides severity still comes from one place. A test asserts the two
+  tables share no phrase.
+- **Symptoms are recorded whether or not they are still active.**
+  `active_symptom_states` is what is open NOW (pruned on recovery, stale after
+  14 days, raises the floor); `symptom_logs` is the append-only history, one
+  row per mention, bounded by `symptom_retention_days` (400). Red flags go
+  through `open_or_touch` (both tables), ordinary symptoms through
+  `log_symptom` (history only). `symptom_logs` had NO producer at all until
+  this landed.
 - **Fail open**: grounding/validation/receipts/compaction/provider crashes →
   safe reply + WARNING, never an exception to the caller.
 - **No PHI in logs / receipts**: receipts store SHA-256 of the message only —

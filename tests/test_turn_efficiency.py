@@ -227,7 +227,22 @@ MAX_QUERIES_PER_TURN = 28
 # ORDINARY turn nothing -- both parsers run before any query and decline.
 MAX_QUERIES_PER_CORRELATION_TURN = 14
 
-MAX_QUERIES_PER_SUMMARY_TURN = 34
+# 38. Measured each time it moved, never guessed:
+#
+#   34 -> 35  "targets you set". Three tables (lifestyle_limit,
+#             body_measurement_goal, sahha_goal) share one shape and are read
+#             with a single UNION ALL. Read separately it was three queries,
+#             which is exactly what this budget exists to catch.
+#   35 -> 38  "symptoms you reported". One SELECT plus the SAVEPOINT/RELEASE
+#             pair every `_section` costs. It was 39: the first cut asked
+#             `open_episodes` for the active set, which is a SECOND read of
+#             `active_symptom_states` on a turn that has already read it, so
+#             it became a LEFT JOIN in the same aggregate.
+#
+# Still spent knowingly. These reads fire only behind the summary parse, so an
+# ordinary turn pays nothing; the turn makes ZERO model calls; and it replaces
+# an LLM answer that runs a median of 8.6s.
+MAX_QUERIES_PER_SUMMARY_TURN = 38
 
 
 async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):

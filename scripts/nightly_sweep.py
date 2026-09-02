@@ -136,6 +136,7 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
                 db,
                 message_days=settings.message_retention_days,
                 receipt_days=settings.receipt_retention_days,
+                symptom_days=settings.symptom_retention_days,
                 batch_size=settings.retention_batch_size,
             )
         )

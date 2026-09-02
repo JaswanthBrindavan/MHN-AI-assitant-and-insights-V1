@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.episodes import (
     is_recovery_message,
+    log_symptom,
     open_episodes,
     open_or_touch,
     resolve,
@@ -49,6 +50,7 @@ from app.chat.profile import render_for_prompt as render_profile
 from app.knowledge.registry import load_condition_index
 from app.memory import document as memory_document
 from app.telemetry import record_fail_open
+from app.triage.red_flags import symptom_mentions
 
 logger = logging.getLogger("davi.chat")
 
@@ -268,9 +270,35 @@ async def record(
     # (pattern)" is the name of the ACS co-occurrence rule, not something the
     # reader said. Opening an episode for it created a third row for one
     # incident, which is what pushed the count past the close-out guard below.
-    for term in _episode_terms(flags)[:MAX_EPISODES_PER_TURN]:
+    # The whole turn's matched terms ride along on each row, so the history
+    # keeps the CO-OCCURRENCE: "chest pain" logged beside "left arm" is a
+    # different report from "chest pain" alone, and the pair is the thing a
+    # clinician would want to see. Labels are kept here (unlike the episode
+    # terms) because a rule that fired is part of what happened.
+    turn_terms = list(flags or [])
+    episode_terms = _episode_terms(flags)[:MAX_EPISODES_PER_TURN]
+    for term in episode_terms:
         try:
-            await open_or_touch(db, user_id, term, risk)
+            await open_or_touch(db, user_id, term, risk, turn_terms)
         except Exception:  # noqa: BLE001
             logger.warning("episode recording failed; continuing", exc_info=True)
             record_fail_open("record_episode")
+
+    # Ordinary symptoms — history ONLY, no episode, no floor. Triage has three
+    # levels and every one of its tables escalates, so `flags` holds red flags
+    # and nothing else: a headache, a cough or three days of nausea matched
+    # nothing and went unrecorded. `symptom_mentions` is the non-escalating
+    # table that fixes that, and routing it here rather than into `flags` is
+    # what keeps a headache from raising anyone's floor.
+    #
+    # Deduped against the episode terms so one complaint is not recorded twice
+    # under two spellings of itself.
+    already = {t.lower() for t in episode_terms}
+    for term in symptom_mentions(message)[:MAX_EPISODES_PER_TURN]:
+        if term.lower() in already:
+            continue
+        try:
+            await log_symptom(db, user_id, term, turn_terms or None)
+        except Exception:  # noqa: BLE001
+            logger.warning("symptom logging failed; continuing", exc_info=True)
+            record_fail_open("log_symptom")

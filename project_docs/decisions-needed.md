@@ -652,3 +652,86 @@ fix carry `quantity` in glasses. `scripts/audit_lifestyle_units.py` reports
 them and converts water only — alcohol records no drink, so a "glass" could be
 wine or beer and converting it would invent the reader's evening. It writes
 only with `--repair --yes`, because that table is mhn-spring's.
+
+---
+
+## D26 — Reader-scoped data coverage: what the chat still cannot see
+
+Prompted by "chat should be able to pull anything from the db regarding that
+specific user". Rather than patch another phrasing, I enumerated every
+user-scoped table in production (60 of them) and checked three layers:
+does Davi map it, does anything read it, and can a chat turn reach that reader
+on BOTH engines.
+
+**Layer 3 (routing) is clean.** Every handler in `data_handlers.py` is reachable
+from both engines — either from a tool executor or from the shared prologue
+above the engine branch. The bypass class did not recur here. One dead symbol:
+`handle_medication_command` has no caller in `app/`, kept alive only by
+`tests/test_medications.py`; `handle_medication_turn` superseded it.
+
+**Layer 2 (readers) is clean for what is mapped.** Of 31 mapped external
+tables, 30 are read by chat-facing code (`family_file_access` is the exception,
+and it is consulted through `file_access_exclusions` instead).
+
+**Layer 1 (mapping) is where the gap was.** Fixed in this pass:
+
+* `user_thp_series` — mhn-spring's V31 materialised biomarker feed, the source
+  `GET /files/biomarkers` and therefore the mobile graphs use. Davi was
+  re-deriving lab history by walking the newest 20 `reports` and grouping on
+  the raw printed test name, so the chat's trend could disagree with the app's
+  graph twice over: truncated history, and "HbA1c"/"HBA1C" counted as two
+  parameters where upstream counts one. Now read first, per-document walk kept
+  as the fallback for when the scheduled ingester is behind.
+* `lifestyle_limit`, `body_measurement_goal`, `sahha_goal` — the targets the
+  reader set in the app. Nothing read any of them.
+
+**Still open, and deliberately not built:**
+
+* ~~`symptom_logs` has no producer.~~ **DECIDED — build it.** "we have to
+  record the symptoms reported by the user... whether its active or inactive as
+  well". Done: `open_or_touch` now writes BOTH tables, so no caller can record
+  the episode without the history. Retention is
+  `symptom_retention_days = 400`, matching the receipt window rather than the
+  180-day transcript one, because "have I had this before?" is a question about
+  months and seasons; the rows are small and coarse, so a longer window costs
+  little. No migration — the table has existed since V6.
+* `sahha_score` (wellbeing / sleep / activity scores), `sleep_sessions` (per-
+  session detail and stages) — the daily rollups Davi already reads cover the
+  headline numbers, so these are additive rather than missing. Worth doing if
+  readers ask about their scores by name.
+* `medicine_dose_log` is NOT a gap: `app/medicines/adherence.py` deliberately
+  asks mhn-spring for adherence instead of computing it, because their window
+  and timezone rules are not the obvious ones. Same principle the
+  `user_thp_series` change follows — agree with the app the reader is holding.
+
+
+---
+
+## D27 — A second symptom source the chat cannot see
+
+Found by the `mhn-android-4b` session, not by my audit, and it is the kind of
+miss that audit existed to catch: I listed `period_day_log` among the unmapped
+user-scoped tables but did not notice it carries `symptoms text[]`.
+
+So there are two places a reader's symptoms live:
+
+* `symptom_logs` — what they told the CHAT. Now written (D26).
+* `period_day_log.symptoms` — codes ticked in cycle tracking, written by
+  mhn-spring since their V5, never read here. Independent of bleeding: a day
+  with no flow and three symptoms is the ordinary mid-cycle entry.
+
+The health summary's symptom section is window-scoped, so an empty one says
+"Nothing logged in the <period> for: symptoms you reported" and never asserts
+an absence it did not check — the wording is not wrong. But a reader who logs
+symptoms only in cycle tracking sees nothing of them here.
+
+Not built, deliberately: the other session was mid-flight in
+`app/patterns/service.py` in the SAME working tree, and two sessions editing
+one file in one checkout is how work gets lost. Proposed to them that their
+`_symptoms_on(db, user_id, day)` grow a range-scoped sibling, which the summary
+can then call.
+
+One thing to solve once, wherever the merge lands: the codes are mhn-spring's
+`PeriodSymptom` enum (`lower_back_pain`) while `symptom_logs.symptom` holds the
+phrase the reader typed (`lower back pain`). Without a de-dup on normalised
+form the reader sees both spellings of one complaint side by side.

@@ -113,6 +113,15 @@ class Settings(BaseSettings):
     # content is the whole point of the split.
     receipt_retention_days: int = 400
 
+    # Symptom history. Kept longer than the transcript and alongside the
+    # receipts, because "have I had this before?" is a question about months
+    # and seasons, not about last week — a reader asking in March whether they
+    # had this last winter is asking something clinically ordinary. The rows
+    # are small and coarse (a symptom term, the floor's level, the terms that
+    # matched), so a longer window costs little and answers much. Shorten it
+    # here if a deployment's policy says otherwise.
+    symptom_retention_days: int = 400
+
     # 0 disables a sweep entirely, for an operator who wants to stage it.
     retention_batch_size: int = 5000
 

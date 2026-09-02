@@ -25,6 +25,7 @@ from app.models.core import User
 from app.models.coredata import (
     Bill,
     BodyMeasurement,
+    BodyMeasurementGoal,
     Doctor,
     DoctorConnect,
     DoctorSpecialization,
@@ -32,6 +33,7 @@ from app.models.coredata import (
     FileAccessExclusion,
     Insurance,
     LifestyleDailyTotal,
+    LifestyleLimit,
     LifestyleLog,
     ManualTracking,
     MedicalCondition,
@@ -43,8 +45,10 @@ from app.models.coredata import (
     Relation,
     Report,
     SahhaDailyTotal,
+    SahhaGoal,
     SahhaWeeklyTotal,
     ScanImaging,
+    UserThpSeries,
     Vaccination,
     VitalReading,
 )
@@ -1853,3 +1857,200 @@ def pregnancy_safety_flag(snapshot: CycleSnapshot) -> str:
     if snapshot.breastfeeding:
         return "The reader's record notes they are breastfeeding."
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# Biomarker trend series — mhn-spring's materialised feed (their V31)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class SeriesReading:
+    """One point on a biomarker's trend line."""
+
+    at: date | None
+    value: float
+    unit: str | None
+    status: str | None
+    report_id: int | None
+
+
+@dataclass(frozen=True)
+class ThpSeries:
+    """A biomarker's whole history, as the mobile graphs see it."""
+
+    thp_key: str
+    name: str
+    unit: str | None
+    reference_range: str | None
+    readings: tuple[SeriesReading, ...]
+
+
+def _reading_date(raw) -> date | None:
+    """Readings carry an ISO date string; tolerate a full timestamp."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
+
+
+async def thp_series_names(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[tuple[int, str, str]]:
+    """(id, thp_key, display name) for every biomarker the reader has on file.
+
+    Deliberately does NOT select ``readings``: a reader with a long lab history
+    has one JSON array per biomarker, and the caller only needs the names to
+    decide which single series to open.
+    """
+    rows = (
+        await db.execute(
+            select(
+                UserThpSeries.id, UserThpSeries.thp_key, UserThpSeries.name
+            ).where(UserThpSeries.user_id == user_id)
+        )
+    ).all()
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
+async def thp_series(
+    db: AsyncSession, user_id: uuid.UUID, series_id: int
+) -> ThpSeries | None:
+    """Open one series by id, oldest reading first.
+
+    Owner-scoped: ``user_id`` is in the WHERE clause, not assumed from the id.
+    Readings whose value is not numeric are dropped rather than guessed at —
+    a lab line like "not detected" is real, but it is not a point on a graph.
+    """
+    row = (
+        await db.execute(
+            select(UserThpSeries).where(
+                UserThpSeries.id == series_id,
+                UserThpSeries.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+
+    points: list[SeriesReading] = []
+    for item in row.readings or []:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("value")
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        report_id = item.get("reportId")
+        points.append(
+            SeriesReading(
+                at=_reading_date(item.get("date")),
+                value=value,
+                unit=item.get("unit") or row.unit,
+                status=(str(item.get("status")).strip().lower()
+                        if item.get("status") else None),
+                report_id=report_id if isinstance(report_id, int) else None,
+            )
+        )
+    # Upstream stores oldest-first; sort anyway so a rebuilt or merged row
+    # cannot hand the caller a graph that runs backwards. Undated points sort
+    # last so they never masquerade as the earliest reading.
+    points.sort(key=lambda p: (p.at is None, p.at or date.min))
+    return ThpSeries(
+        thp_key=row.thp_key,
+        name=row.name,
+        unit=row.unit,
+        reference_range=row.reference_range,
+        readings=tuple(points),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Targets the reader set for themselves
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Target:
+    """One self-set goal or limit, ready to state back plainly."""
+
+    kind: str            # "limit" (a ceiling) | "goal" (something aimed at)
+    metric: str
+    value: float
+    unit: str | None
+    direction: str | None   # body goals only: lose / gain / maintain
+    since: date | None
+
+
+
+async def targets(db: AsyncSession, user_id: uuid.UUID) -> list[Target]:
+    """Every target the reader has set: lifestyle limits, body goals, wearable
+    goals — currently in force, newest per metric.
+
+    Three tables with the same shape, and nothing in Davi read any of them: a
+    reader who had set a daily water target in the app and asked about it here
+    was told there was nothing on record.
+
+    ONE query, not three. The summary turn has a measured query budget
+    (`test_a_summary_turn_stays_within_its_own_budget`) and three round trips
+    for three small identical-shape tables is exactly the read that budget
+    exists to stop. Same shape, so UNION ALL and let the database do it.
+    """
+    def _leg(model, metric_col, value_col, kind: str, direction):
+        return select(
+            sa.literal(kind).label("kind"),
+            sa.cast(metric_col, sa.String).label("metric"),
+            sa.cast(value_col, sa.Float).label("value"),
+            model.unit.label("unit"),
+            direction.label("direction"),
+            model.effective_from.label("since"),
+        ).where(model.user_id == user_id, value_col.is_not(None))
+
+    rows = (await db.execute(
+        _leg(LifestyleLimit, LifestyleLimit.metric, LifestyleLimit.limit_value,
+             "limit", sa.cast(sa.literal(None), sa.String))
+        .union_all(
+            _leg(BodyMeasurementGoal, BodyMeasurementGoal.type,
+                 BodyMeasurementGoal.goal_value, "goal",
+                 sa.cast(BodyMeasurementGoal.direction, sa.String)),
+            _leg(SahhaGoal, SahhaGoal.metric, SahhaGoal.goal_value, "goal",
+                 sa.cast(sa.literal(None), sa.String)),
+        )
+    )).all()
+
+    # Newest row per metric whose `effective_from` has actually arrived. These
+    # tables are histories, so the newest row is not always the current one: a
+    # goal the reader dated for next Monday is a plan, not today's target.
+    # Undated rows are treated as always in force.
+    today = utcnow().date()
+    best: dict[str, Target] = {}
+    for kind, metric, value, unit, direction, since in rows:
+        # The WHERE already excludes NULL values; the type checker cannot see
+        # that through a UNION, and a target with no number is not one anyway.
+        if value is None:
+            continue
+        if since is not None and since > today:
+            continue
+        prev = best.get(metric)
+        if prev is not None and (prev.since or date.min) > (since or date.min):
+            continue
+        best[metric] = Target(kind, metric, float(value), unit, direction, since)
+
+    return sorted(best.values(), key=lambda t: (t.kind, t.metric))
+
+
+def target_phrase(t: Target) -> str:
+    """Plain words for one target. Descriptive only — never a verdict on
+    whether the reader is meeting it."""
+    metric = t.metric.replace("_", " ")
+    amount = f"{t.value:g}{' ' + t.unit if t.unit else ''}"
+    if t.kind == "limit":
+        return f"{metric} no more than {amount} a day"
+    if t.direction and t.direction != "maintain":
+        return f"{metric} {t.direction} to {amount}"
+    return f"{metric} {amount}"

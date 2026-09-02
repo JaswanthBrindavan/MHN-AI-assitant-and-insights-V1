@@ -22,10 +22,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.chat import ActiveSymptomState
+from app.models.chat import ActiveSymptomState, SymptomLog
 from app.models.common import as_utc as _aware
 from app.models.common import utcnow
 from app.triage.red_flags import LEVEL_ORDER, NONE, max_level
@@ -62,17 +62,43 @@ async def open_or_touch(
     user_id: uuid.UUID,
     symptom: str,
     risk_level: str,
+    matched_terms: list[str] | None = None,
 ) -> None:
     """Record that a symptom was mentioned. Never raises.
+
+    TWO tables, answering two different questions, and both are written here so
+    a caller cannot record one without the other:
+
+    * `active_symptom_states` — what is open NOW. One row per (user, symptom),
+      touched on re-mention, deleted on recovery, filtered as stale after
+      `STALE_AFTER`. This is what raises the risk floor.
+    * `symptom_logs` — the append-only HISTORY. One row per mention, kept
+      whether or not the symptom is still active. Nothing had ever written to
+      it: it was declared in V6, mapped, and swept by erasure, so
+      "what symptoms have I reported" was unanswerable because the history was
+      never recorded. A symptom that appears here but has no active row is one
+      the reader no longer has.
 
     An existing episode is TOUCHED (last_seen bumped, severity raised if the
     floor says worse). Severity only ever goes up within an episode, mirroring
     the triage floor's own rule: downstream may raise a level, never lower it.
+    The LOG is not touched, only appended to — an episode's severity is its
+    worst so far, but the history is what was said each time.
     """
     symptom = (symptom or "").strip().lower()[:128]
     if not symptom:
         return
     try:
+        # Appended before the upsert, so the history records the mention even
+        # if the episode bookkeeping below is the thing that fails.
+        db.add(
+            SymptomLog(
+                user_id=user_id,
+                symptom=symptom,
+                risk_level=risk_level,
+                matched_terms=list(matched_terms) if matched_terms else None,
+            )
+        )
         existing = (
             await db.execute(
                 select(ActiveSymptomState).where(
@@ -98,6 +124,40 @@ async def open_or_touch(
         await db.flush()
     except Exception:  # noqa: BLE001 — bookkeeping must never cost an answer
         logger.warning("episode open/touch failed", exc_info=True)
+
+
+async def log_symptom(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    symptom: str,
+    matched_terms: list[str] | None = None,
+) -> None:
+    """Record an ORDINARY symptom mention. History only. Never raises.
+
+    The counterpart to `open_or_touch`, and the difference is deliberate: this
+    writes `symptom_logs` and NOT `active_symptom_states`, so an everyday
+    complaint is remembered without opening an episode, raising the floor, or
+    putting a seek-care banner on the next fourteen turns.
+
+    Level is recorded as NONE because that is what the triage floor said. It is
+    the floor's verdict being written down, not a second opinion about severity
+    formed here.
+    """
+    symptom = (symptom or "").strip().lower()[:128]
+    if not symptom:
+        return
+    try:
+        db.add(
+            SymptomLog(
+                user_id=user_id,
+                symptom=symptom,
+                risk_level=NONE,
+                matched_terms=list(matched_terms) if matched_terms else None,
+            )
+        )
+        await db.flush()
+    except Exception:  # noqa: BLE001 — bookkeeping must never cost an answer
+        logger.warning("symptom log failed", exc_info=True)
 
 
 # Recovery phrasing (DRAFT) — deterministic, same one-vocabulary spirit as
@@ -262,3 +322,79 @@ def worst_level(episodes: list[Episode]) -> str:
         if ep.risk_level in LEVEL_ORDER:
             level = max_level(level, ep.risk_level)
     return level
+
+
+@dataclass(frozen=True)
+class ReportedSymptom:
+    """One symptom in the reader's history, with whether it is still open."""
+
+    symptom: str
+    times: int
+    last_at: object
+    active: bool
+
+
+async def history(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    since=None,
+    limit: int = 12,
+) -> list[ReportedSymptom]:
+    """What the reader has reported, active or not. Never raises.
+
+    Aggregated in SQL rather than by pulling rows and counting here: the log is
+    append-only with a row per mention, so a reader who has been using this for
+    a year would have the oldest half of their own history silently truncated
+    by any row cap. Grouping first means `limit` bounds the ANSWER (distinct
+    symptoms, most recent first), not the evidence it is computed from.
+
+    Severity is deliberately absent. This is a list of what was said and when;
+    attaching "high risk" to a line in a summary is a clinical claim, and the
+    triage floor — not a history readout — is where severity belongs.
+    """
+    stale_cutoff = utcnow() - STALE_AFTER
+    try:
+        rows = (
+            await db.execute(
+                select(
+                    SymptomLog.symptom,
+                    func.count().label("times"),
+                    func.max(SymptomLog.created_at).label("last_at"),
+                    func.max(ActiveSymptomState.last_seen_at).label("open_at"),
+                )
+                # LEFT JOIN, not a second query: the turn has already read
+                # `active_symptom_states` once for the risk floor, and asking
+                # again is exactly the read the summary's query budget exists
+                # to catch. Unique on (user_id, symptom) upstream, so the join
+                # cannot multiply a symptom's row count.
+                .outerjoin(
+                    ActiveSymptomState,
+                    (ActiveSymptomState.user_id == SymptomLog.user_id)
+                    & (ActiveSymptomState.symptom == SymptomLog.symptom)
+                    # Same staleness rule `open_episodes` applies on read. An
+                    # episode nobody has mentioned for STALE_AFTER is over, and
+                    # calling it "still open" here while the floor treats it as
+                    # closed would be two answers to one question.
+                    & (ActiveSymptomState.last_seen_at >= stale_cutoff),
+                )
+                .where(
+                    SymptomLog.user_id == user_id,
+                    *([SymptomLog.created_at >= since] if since else []),
+                )
+                .group_by(SymptomLog.symptom)
+                .order_by(func.max(SymptomLog.created_at).desc())
+                .limit(limit)
+            )
+        ).all()
+    except Exception:  # noqa: BLE001
+        logger.warning("symptom history read failed", exc_info=True)
+        return []
+
+    return [
+        ReportedSymptom(
+            symptom=r.symptom, times=int(r.times), last_at=r.last_at,
+            active=r.open_at is not None,
+        )
+        for r in rows
+    ]

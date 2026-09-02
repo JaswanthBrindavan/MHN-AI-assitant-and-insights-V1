@@ -30,6 +30,8 @@ from app.chat.abilities import (
     SummaryQuery,
     TrackerAdd,
     TrackerQuery,
+    is_about_me_query,
+    is_my_conditions_query,
     param_tokens,
     parse_ai_result_query,
     parse_correlation_query,
@@ -51,6 +53,7 @@ from app.chat.correlation import (
     co_occurrence,
     render_co_occurrence,
 )
+from app.chat.episodes import history as symptom_history
 from app.coredata.service import (
     _MANUAL_UNIT,
     _RESOURCE_TYPE,
@@ -82,6 +85,10 @@ from app.coredata.service import (
     resolve_family_member,
     resolve_family_member_by_name,
     sahha_meta,
+    target_phrase,
+    targets,
+    thp_series,
+    thp_series_names,
     vital_series,
     wearable_display,
     wearable_latest,
@@ -97,6 +104,7 @@ from app.health import reference as health_reference
 from app.knowledge.registry import load_condition_index
 from app.models.chat import ConversationMessage, McpChunk
 from app.models.common import utcnow
+from app.models.core import User
 from app.models.coredata import MedicalCondition, Report, UnclassifiedFile
 from app.rag.retrieval import RetrievedChunk, resolve_scope
 from app.telemetry import record_fail_open
@@ -1121,6 +1129,15 @@ async def _lifestyle_week_chart(
     )
 
 
+def _symptom_phrase(sx) -> str:
+    """One reported symptom: what, how often, when last, still open or not."""
+    when = (sx.last_at.strftime("%d %b %Y") if sx.last_at
+            else "date unknown")
+    times = "once" if sx.times == 1 else f"{sx.times} times"
+    tail = ", still open" if sx.active else ""
+    return f"{sx.symptom} ({times}, most recently {when}{tail})"
+
+
 async def handle_summary_query(
     db: AsyncSession, user_id: uuid.UUID, message: str,
     *,
@@ -1182,6 +1199,15 @@ async def handle_summary_query(
     )
     labs = await _section(
         db, failed, "labs", lambda: recent_lab_values(db, user_id)
+    )
+    goals = await _section(db, failed, "goals", lambda: targets(db, user_id))
+    # The summary's OWN window, not a hardcoded one. This read a fixed year
+    # while the empty-state sentence names `label` ("nothing logged in the past
+    # week for: symptoms you reported") — a window in the wording that was not
+    # the window queried. Every other scoped section uses `since`; so does this.
+    symptoms = await _section(
+        db, failed, "symptoms",
+        lambda: symptom_history(db, user_id, since=since),
     )
 
     lines: list[str] = []
@@ -1256,6 +1282,27 @@ async def handle_summary_query(
         "Recent lab values: "
         + _listed([f"{v.name} {v.value} {v.unit or ''}".strip() for v in labs])
         + "." if labs else None,
+    )
+    # Targets the reader set for themselves, in the app. Stated as what they
+    # chose, never measured against what they did - this is a summary of the
+    # record, and "you are over your coffee limit" is a verdict.
+    # What the reader has told us, active or not. Phrased as reports, not
+    # findings - "you mentioned" is what happened; "you have" would be a
+    # diagnosis made out of a chat log. Still-open ones are marked so the
+    # reader can see which we are still carrying, because that is the thing
+    # that changes how later answers behave.
+    _place(
+        "symptoms you reported", "symptoms",
+        "Symptoms you have mentioned: "
+        + _listed([_symptom_phrase(sx) for sx in symptoms]) + "."
+        if symptoms else None,
+        scoped=True,
+    )
+    _place(
+        "goals you set", "goals",
+        "Targets you have set: "
+        + _listed([target_phrase(t) for t in goals]) + "."
+        if goals else None,
     )
 
     if not lines and not unavailable:
@@ -1869,6 +1916,60 @@ def _is_abnormal_flag(flag: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Dynamic report-parameter asks ("what is my basophils")
 # --------------------------------------------------------------------------- #
+# The trends feed speaks mhn-spring's zone vocabulary, NOT the abnormal-flag
+# vocabulary a report carries. They overlap in nothing: `_is_abnormal_flag`
+# treats any string it does not recognise as abnormal, so an "ideal" reading —
+# a good result — would have been handed back as "flagged ideal against the
+# printed reference range". Translate deliberately, and say NOTHING for a zone
+# we do not recognise (including their explicit "unknown") rather than guess a
+# side. A wrong reassurance and a wrong alarm are both wrong.
+_SERIES_STATUS = {
+    "warning_low": "low",
+    "warning_high": "high",
+    "ideal": "normal",
+    "normal": "normal",
+}
+
+
+async def _series_history(
+    db: AsyncSession, user_id: uuid.UUID, want: set[str]
+) -> list[tuple] | None:
+    """The asked parameter's full history from mhn-spring's trends feed.
+
+    Preferred over walking ``reports`` because it is the SAME source the mobile
+    apps graph from: every reading rather than the newest 20 documents, and
+    grouped on their canonical ``thp_key`` instead of the raw printed spelling,
+    so "HbA1c" and "HBA1C" are one line here as they are there.
+
+    Returns None — not an empty list — when the feed has nothing for this
+    reader, so the caller falls back to the per-document path. The feed is
+    written by a scheduled ingester upstream; if it has not run, or has not yet
+    caught up with a new report, the older path still answers.
+    """
+    candidates = await thp_series_names(db, user_id)
+    if not candidates:
+        return None
+    matches = [c for c in candidates if want <= param_tokens(c[2])]
+    if not matches:
+        return None
+    # Shortest display name wins: "Vitamin D" over "Vitamin D 25-Hydroxy" for
+    # a bare "vitamin d", the same preference the per-document path gets for
+    # free by taking the first match in a newest-first walk.
+    series = await thp_series(db, user_id, min(matches, key=lambda c: len(c[2]))[0])
+    if series is None or not series.readings:
+        return None
+
+    history: list[tuple] = []
+    for r in reversed(series.readings):        # newest-first, as callers expect
+        flag = _SERIES_STATUS.get(r.status or "", "")
+        history.append((
+            r.at, r.value, r.unit or series.unit or "", series.name, flag,
+            _is_abnormal_flag(flag) if flag else False,
+            r.at.strftime("%d %b %Y") if r.at else "date unknown",
+        ))
+    return history
+
+
 async def handle_report_param_ask(
     db: AsyncSession, user_id: uuid.UUID, message: str
 ) -> dict | None:
@@ -1883,14 +1984,19 @@ async def handle_report_param_ask(
     if not want:
         return None
 
+    history = await _series_history(db, user_id, want) or []
+
     rows = (
-        await db.execute(
-            select(Report)
-            .where(Report.user_id == user_id, Report.content.is_not(None))
-            .order_by(Report.created_at.desc().nulls_last(), Report.id.desc())
-            .limit(20)
-        )
-    ).scalars().all()
+        [] if history else
+        (
+            await db.execute(
+                select(Report)
+                .where(Report.user_id == user_id, Report.content.is_not(None))
+                .order_by(Report.created_at.desc().nulls_last(), Report.id.desc())
+                .limit(20)
+            )
+        ).scalars().all()
+    )
     for r in rows:
         ai = (r.content or {}).get("ai") or {}
         results = ((ai.get("extraction") or {}).get("results")) or []
@@ -1923,21 +2029,65 @@ async def handle_report_param_ask(
                 flag_note = " It is within the printed reference range."
             else:
                 flag_note = ""
-            return {
-                "reply": (
-                    f"Your most recent {test_name} on record is "
-                    f"{value:g} {unit}".rstrip()
-                    + f" (from a report dated {when}).{flag_note} "
-                    f"{_NOT_MEDICAL_ADVICE}"
-                ),
-                "action": (
-                    "discuss_with_clinician" if abnormal
-                    else "review_with_clinician"
-                ),
-                "provenance": {"path": "report_param", "term": term,
-                               "matched": test_name},
-            }
-    return None
+            # Collect rather than return. This used to `return` on the first
+            # match, so "show my hba1c graph" got one number and no chart —
+            # the reader asked for a trend and was handed a reading. Every
+            # report on file carries the same parameter over time, and that
+            # series is what a graph is.
+            history.append((r.created_at, value, unit, test_name, flag,
+                            abnormal, when))
+            break        # one value per report: the newest entry in it
+
+    if not history:
+        return None
+
+    # `rows` is newest-first, so the head is the latest reading.
+    _, value, unit, test_name, flag, abnormal, when = history[0]
+    flag_note = (
+        f" It is flagged {flag} against the printed reference range."
+        if abnormal else (" It is within the printed reference range." if flag
+                          else "")
+    )
+
+    # Oldest-first for the chart; a trend read right to left is not a trend.
+    points = [h for h in reversed(history) if h[0] is not None]
+    visual = None
+    if len(points) >= 2:
+        visual = chart_payload(
+            "line",
+            f"{test_name} — last {len(points)} results",
+            [p[0].strftime("%d %b") for p in points],
+            [float(p[1]) for p in points],
+            unit=unit or None,
+        )
+
+    trend_note = ""
+    if len(points) >= 2:
+        # Stated as a change between two readings on file, never as a verdict
+        # about where it is heading or what it means.
+        first, last = float(points[0][1]), float(points[-1][1])
+        if first != last:
+            direction = "higher" if last > first else "lower"
+            trend_note = (
+                f" Across the {len(points)} results on file it has gone from "
+                f"{first:g} to {last:g} {unit}".rstrip() + f", {direction} "
+                f"than the earliest one here."
+            )
+
+    return {
+        "reply": (
+            f"Your most recent {test_name} on record is "
+            f"{value:g} {unit}".rstrip()
+            + f" (from a report dated {when}).{flag_note}{trend_note} "
+            f"{_NOT_MEDICAL_ADVICE}"
+        ),
+        "action": (
+            "discuss_with_clinician" if abnormal else "review_with_clinician"
+        ),
+        "provenance": {"path": "report_param", "term": term,
+                       "matched": test_name, "results": len(points)},
+        "visual": visual,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2749,3 +2899,103 @@ async def handle_medication_command(
         db, user_id, cmd.action, cmd.name,
         strength=cmd.strength, is_prn=cmd.is_prn,
     )
+
+
+# --------------------------------------------------------------------------- #
+# "Who am I" / "what health do I have" — about the READER
+# --------------------------------------------------------------------------- #
+async def handle_about_me_query(
+    db: AsyncSession, user_id: uuid.UUID, message: str
+) -> dict | None:
+    """The reader's own record, when they ask about themselves.
+
+    Reported from the deployed app: "who am i" was answered with a description
+    of the ASSISTANT. It never matched the assistant-identity terms — those are
+    "who are YOU" — so no deterministic handler claimed it and the model filled
+    the gap with the nearest thing it knew about, which was itself.
+
+    "What health do I have" had the same shape: nothing claimed it, so a
+    question with an exact answer on file was composed by a model instead.
+
+    Both are answered here from the record, with the records framing every
+    other data reply uses. Nothing is graded and nothing is diagnosed: a
+    condition is reported because it is written down, not because we agree
+    with it.
+    """
+    wants_profile = is_about_me_query(message)
+    wants_conditions = is_my_conditions_query(message)
+    if not (wants_profile or wants_conditions):
+        return None
+
+    lines: list[str] = []
+
+    if wants_profile:
+        try:
+            row = (
+                await db.execute(
+                    select(User.name, User.dob, User.gender).where(
+                        User.id == user_id
+                    )
+                )
+            ).first()
+        except Exception:  # noqa: BLE001 — a missing profile is not an error
+            row = None
+        if row is not None:
+            name, dob, gender = row
+            bits = [b for b in (name, _age_phrase(dob), gender) if b]
+            if bits:
+                lines.append("You are " + ", ".join(str(b) for b in bits) + ".")
+
+    # Conditions, for both questions: "who am I" without them is a name, and
+    # the reader asking it in a health app is not asking for their name.
+    try:
+        conditions = await medical_records(db, user_id, type_="condition")
+    except Exception:  # noqa: BLE001
+        logger.warning("condition read failed", exc_info=True)
+        conditions = []
+
+    if conditions:
+        named = "; ".join(
+            f"{c.name}" + (f" ({c.status})" if c.status else "")
+            for c in conditions[:8]
+        )
+        lines.append(f"Your records list: {named}.")
+    else:
+        # Absence of a RECORD, never absence of a condition.
+        lines.append(
+            "There are no conditions on your record. That is what is written "
+            "down here, not a statement that you have none."
+        )
+
+    if wants_profile:
+        try:
+            meds = await active_medications(db, user_id)
+        except Exception:  # noqa: BLE001
+            meds = []
+        if meds:
+            lines.append(f"Current medications on record: {'; '.join(meds)}.")
+
+    lines.append(_NOT_MEDICAL_ADVICE)
+    return {
+        "reply": " ".join(lines),
+        "action": "review_with_clinician",
+        "provenance": {
+            "path": "about_me",
+            "asked": "profile" if wants_profile else "conditions",
+            "conditions": len(conditions),
+        },
+    }
+
+
+def _age_phrase(dob) -> str:
+    """"41" from a date of birth, or "" — never a guess."""
+    if dob is None:
+        return ""
+    try:
+        today = utcnow().date()
+        years = today.year - dob.year - (
+            (today.month, today.day) < (dob.month, dob.day)
+        )
+        return f"{years}" if 0 < years < 130 else ""
+    except Exception:  # noqa: BLE001
+        return ""

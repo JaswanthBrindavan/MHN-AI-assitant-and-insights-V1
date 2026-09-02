@@ -140,6 +140,7 @@ async def test_nothing_recent_is_ever_touched(db_session):
     assert result == {
         "messages_purged": 0, "receipts_purged": 0,
         "summaries_superseded_purged": 0, "summaries_purged": 0,
+        "symptoms_purged": 0,
     }
     counts = await _counts(db_session)
     assert counts["messages"] == 3 and counts["receipts"] == 3
