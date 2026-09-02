@@ -301,7 +301,7 @@ five surviving bounds `NOT NULL`, `low_warn <= high_warn` on every row.
 
 ---
 
-## D12 — HDL now grades backwards, and I have flagged it rather than shipped it quietly
+## D12 — HDL graded backwards and the sex band was arbitrary — NOW FIXED (800f9cd)
 
 **This is the one to read first.** The V28 fix switched the backend range path
 ON for the first time. That makes two latent bugs live.
@@ -326,6 +326,25 @@ asked for.
 **Also found, and not ours to fix:** `HDL/LDL Ratio` in your reference
 catalogue has `ideal = 499.7, high_warn = 999`. That is not a plausible ratio.
 Someone should check the V18 import.
+
+### Fixed in 800f9cd
+
+**The direction** comes from Davi's own DRAFT spec, which already encodes it —
+`hdl` is `RangeSpec("mg/dL", 40, None)`, "no upper bound is flagged". The
+curated spec now decides which SIDES may warn; the backend still decides where
+the line sits. This also corrected SpO2 (100% no longer warns) and the bottom
+end of LDL and total cholesterol. A metric with no DRAFT spec keeps both sides.
+
+**The band** is now picked by the reader's own sex, then the unisex band, and
+never the other sex's. `reader_bands()` fetches age and sex in one query
+because this path has no budget headroom. `gender = other` is treated as
+unknown, since the catalogue seeds `any`/`female`/`male` only. Where a
+parameter has sex-specific bands and the reader's sex is unknown, the lookup
+returns None and the caller falls back to the DRAFT constants — grading
+someone against the other sex's range is worse than a general one.
+
+Nine tests in `tests/test_reference_sex_and_direction.py`, including the one
+that matters: an HDL of 45 warns for a woman and is normal for a man.
 
 ---
 
@@ -581,8 +600,8 @@ reaches the handler through the legacy path, which can see "my watch".
 
 Not blocking, but you should know:
 
-1. **HDL grades backwards, and `ThpAgeRange.sex` is unmapped** — see D12. These
-   are live in `main`. They are the highest-value thing to fix next.
+1. ~~**HDL grades backwards, and `ThpAgeRange.sex` is unmapped**~~ — fixed in
+   800f9cd, see D12.
 2. **"does my metformin affect my sleep"** is answered as a sleep lookup. The
    correlation parser declines on medication *nouns*, but a bare drug name
    needs a catalogue check, and inventing a drug-name heuristic was not worth
