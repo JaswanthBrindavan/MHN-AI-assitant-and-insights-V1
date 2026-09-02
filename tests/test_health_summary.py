@@ -570,4 +570,4 @@ async def test_a_stale_reading_is_nothing_recent_never_not_on_record(db_session)
     assert out is not None
     assert "vitals" not in out["provenance"]["missing"]
     assert "Vitals: nothing logged in the past week" in out["reply"]
-    assert "your most recent is a blood pressure reading from" in out["reply"]
+    assert "your most recent is a blood pressure of 128/84 mmHg from" in out["reply"]

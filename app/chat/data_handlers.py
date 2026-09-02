@@ -66,6 +66,7 @@ from app.coredata.service import (
     format_wearable,
     latest_body_measurement,
     latest_documents,
+    latest_lifestyle_day,
     latest_manual_metrics,
     latest_vital,
     latest_vitals,
@@ -994,6 +995,16 @@ def _wearable_line(
     )
 
 
+def _vital_value(point) -> str:
+    """One vital as the reader should see it: value, pair, unit."""
+    value = (
+        f"{point.value:g}/{point.secondary:g}"
+        if point.secondary is not None
+        else f"{point.value:g}"
+    )
+    return f"{value} {point.unit or ''}".strip()
+
+
 def _vitals_line(vitals: dict, since: datetime, window: str) -> str | None:
     """The in-window vitals, or -- when every reading predates the window --
     a line saying the record EXISTS but is older.
@@ -1017,19 +1028,17 @@ def _vitals_line(vitals: dict, since: datetime, window: str) -> str | None:
         if point.at < since:
             stale.append((display, point))
             continue
-        value = (
-            f"{point.value:g}/{point.secondary:g}"
-            if point.secondary is not None
-            else f"{point.value:g}"
+        shown.append(
+            f"latest {display} {_vital_value(point)}".strip()
         )
-        shown.append(f"latest {display} {value} {point.unit or ''}".strip())
     if shown:
         return "Vitals: " + "; ".join(shown) + "."
     if stale:
         display, point = max(stale, key=lambda s: s[1].at)  # type: ignore[attr-defined]
         return (
             f"Vitals: nothing logged in the {window} — your most recent is a "
-            f"{display} reading from {point.at.strftime('%d %b %Y')}."  # type: ignore[attr-defined]
+            f"{display} of {_vital_value(point)} from "  # type: ignore[arg-type]
+            f"{point.at.strftime('%d %b %Y')}."  # type: ignore[attr-defined]
         )
     return None
 
@@ -2321,11 +2330,15 @@ async def handle_tracker_query(
                     when = f"{older[0].bucket_start:%d %b %Y}"
                     if grain == "week":
                         when = f"the week of {when}"
+                    # The VALUE, not just the date. The reading was already
+                    # fetched, and "your most recent is from 31 Aug" answers
+                    # half a question the reader has to ask again to finish.
+                    # It is still framed as NOT the window they asked about.
                     stale_reply = (
                         f"I have no {sahha_meta(key)[0]} from your connected "
-                        f"device {window}. Your most recent reading is from "
-                        f"{when}, so it looks like the device has not synced "
-                        "since."
+                        f"device {window}. Your most recent is "
+                        f"{format_wearable(key, older[0].value)} from {when}, "
+                        "so it looks like the device has not synced since."
                     )
                     break
         if points:
@@ -2411,6 +2424,20 @@ async def handle_tracker_query(
             )
         else:
             total = (await lifestyle_totals(db, user_id, since)).get(query.key)
+        # An empty window is not an empty record. When the asked-about period
+        # holds nothing, name the last day that DID -- with its figure, which
+        # is the whole point (owner: "when yesterdays data is not available
+        # then its better to show the latest data"). Only ever OUTSIDE the
+        # window asked about, and never presented as the answer to it.
+        stale = ""
+        if total is None:
+            latest = await latest_lifestyle_day(db, user_id, query.key)
+            floor = span[0] if span is not None else since.date()
+            if latest is not None and latest[0] < floor:
+                stale = (
+                    f" Your most recent is {lifestyle_phrase(latest[1])} on "
+                    f"{latest[0]:%d %b %Y}."
+                )
         # The overnight excuse belongs ONLY to a window that still contains
         # today. Applied to `yesterday` or `last_week` it is simply false --
         # the rollup ran days ago, nothing in those windows was logged today,
@@ -2431,8 +2458,10 @@ async def handle_tracker_query(
             reply = (
                 f"I have no {query.key} in your daily totals {window}. Those "
                 "are compiled overnight, so anything logged today may not be "
-                "counted yet."
+                f"counted yet.{stale}"
             )
+        elif total is None and stale:
+            reply = f"You have not logged any {query.key} {window}.{stale}"
         elif total is None:
             reply = (
                 f"You have not logged any {query.key} {window}. "

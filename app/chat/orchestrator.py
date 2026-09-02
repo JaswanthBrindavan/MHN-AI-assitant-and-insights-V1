@@ -21,7 +21,17 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat import memory_assembly
-from app.chat.abilities import parse_correlation_query
+from app.chat.abilities import (
+    parse_correlation_query,
+    parse_document_query_fuzzy,
+    parse_metric_query,
+    parse_report_param_ask,
+    parse_section_detail_query,
+    parse_stated_value,
+    parse_summary_query,
+    parse_tracker_add,
+    parse_tracker_query,
+)
 from app.chat.agent import append_directive, recover, run_agent
 from app.chat.context import (
     build_health_snapshot,
@@ -250,6 +260,22 @@ class ChatResult:
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _lead(escalation: str, risk: str, reply: str) -> str:
+    """The escalation banner AND the answer, at HIGH risk.
+
+    Two rules in one line, both learned the hard way:
+
+    * the answer is ADDED to the banner, never replaced by it. A reader who
+      asked "is my coffee the reason I sleep badly" and got only "you
+      mentioned something earlier ..." was not answered at all.
+    * an EMPTY reply stays empty. Prefixing a banner to "" produced a
+      banner-only reply that PASSED ``validate_reply`` (non-empty, carries an
+      escalation), so the `empty` rule never fired and the safe reply never
+      took over.
+    """
+    return f"{escalation} {reply}" if risk == HIGH and reply else reply
 
 
 async def _stage(name: str, coro):
@@ -602,6 +628,8 @@ async def _correlation_reply(
     provider: LLMProvider,
     session_id: uuid.UUID | None,
     risk: str,
+    message_risk: str,
+    escalation: str,
     lang: str,
     trace: list[dict],
     t,
@@ -618,12 +646,19 @@ async def _correlation_reply(
     and BEFORE the engine branch so the legacy tracker slot -- which used to
     swallow these and answer with a coffee total -- never sees them.
 
-    NONE risk only: a red flag needs the symptom path, not four weeks of
-    averages, and a reassuring number beside chest pain is a reason to delay
-    care. Fail-open, in a SAVEPOINT: a rollup that is missing in a standalone
+    Gated on THIS MESSAGE's triage, not on the turn's risk. "A reassuring
+    number beside chest pain is a reason to delay care" is right for a red flag
+    in the message being answered; it is wrong for a HIGH level merely CARRIED
+    from an unresolved earlier episode, where it silently disabled the handler
+    and handed "is my coffee the reason I sleep badly" to the model, which
+    answered with the escalation banner and nothing else. Same call as "an
+    unrelated data question mid-flow is released, not re-asked" (11e17be).
+    The carried banner still leads the reply -- see `_lead`.
+
+    Fail-open, in a SAVEPOINT: a rollup that is missing in a standalone
     deployment must leave the session usable for the RAG fallback.
     """
-    if risk != NONE:
+    if message_risk != NONE:
         return None
     try:
         async with db.begin_nested():
@@ -666,10 +701,110 @@ async def _correlation_reply(
         model_name=provider.model_name,
     )
     return ChatResult(
-        response_message=ability["reply"],
+        response_message=_lead(escalation, risk, ability["reply"]),
         risk_level=risk,
         recommended_action=ability["action"],
         provenance=prov,
+        language=lang,
+        trace=trace,
+    )
+
+
+async def _summary_reply(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    provider: LLMProvider,
+    session_id: uuid.UUID | None,
+    risk: str,
+    message_risk: str,
+    escalation: str,
+    lang: str,
+    trace: list[dict],
+    t,
+) -> ChatResult | None:
+    """The deterministic health summary. SHARED across both engines.
+
+    It used to sit in the legacy ability chain only. On the agentic engine the
+    model called `get_health_summary` and RECOMPOSED the answer from the tool
+    payload -- and a summary is a dozen exact figures, so it is a dozen chances
+    to lose the whole reply. Measured: a course recorded as "Dolo 650 Tablet"
+    came back as "Dolo 650 mg", the model having invented a unit on a
+    medication dose, which is precisely what the numeric-fidelity guard exists
+    to catch. The guard fired, correctly, and threw away a summary that was
+    otherwise entirely right.
+
+    A handler whose whole value is being exact should not be recomposed at all.
+    This is the same call `serve_extractive` makes for the corpus: the
+    validated text IS the answer, so serve it verbatim and make no model call.
+
+    Gated on THIS MESSAGE's triage, like `_correlation_reply` -- a carried
+    episode floor leads the reply with its banner rather than suppressing it.
+
+    PRECEDENCE. Hoisting it out of the legacy chain moved it ABOVE every
+    handler that used to run first, and `_SUMMARY_RE` matches a bare
+    "summary" -- so "summary of my blood pressure" stopped reaching
+    `handle_metric_query`, "summary of my last blood test" stopped reaching
+    the document handler, and "log 2 glasses of water for my health summary"
+    stopped WRITING. Worst of all it outranked `handle_value_check`, the
+    deterministic reference-range check that is deliberately first in the
+    legacy chain, so a stated reading could be answered with a week of
+    averages instead of being graded.
+
+    A more specific parser therefore wins, exactly as it did before the
+    hoist. The whole-health summary is the fallback, not the front door.
+    """
+    if message_risk != NONE or parse_summary_query(message) is None:
+        return None
+    # `parse_ai_result_query` is deliberately NOT in this list. It claims the
+    # bare word "summary", so it matches "summarise my health" too, and its
+    # HANDLER is what actually gates -- it answers only when the message
+    # references a document. Consulting the parser here would hand every
+    # whole-health ask to a handler that then declines, which is how the
+    # summary stopped answering at all mid-fix.
+    if (
+        parse_stated_value(message) is not None
+        or parse_tracker_add(message) is not None
+        or parse_tracker_query(message) is not None
+        or parse_metric_query(message) is not None
+        or parse_document_query_fuzzy(message) is not None
+        or parse_report_param_ask(message) is not None
+        or parse_section_detail_query(message) is not None
+    ):
+        return None
+    try:
+        # SAVEPOINT: one missing core table must leave the session usable.
+        async with db.begin_nested():
+            ability = await handle_summary_query(db, user_id, message)
+    except Exception:  # noqa: BLE001 — a summary must never break a reply
+        logger.warning("health summary failed; continuing", exc_info=True)
+        record_fail_open("health_summary")
+        return None
+    if ability is None:
+        return None
+    t("Health summary",
+      "your own records, read and rendered deterministically (no LLM)")
+    reply = _lead(escalation, risk, ability["reply"])
+    verdict = validate_reply(reply, risk)
+    provenance = dict(ability["provenance"])
+    if not verdict.ok:
+        t("Output validation",
+          f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
+        reply = safe_reply(risk, session_id)
+        provenance["degraded"] = "validation"
+    else:
+        t("Output validation", "passed all safety checks")
+    await _write_receipt(
+        db, user_id=user_id, session_id=session_id, message=message,
+        model_name=provider.model_name,
+    )
+    return ChatResult(
+        response_message=reply,
+        risk_level=risk,
+        recommended_action=ability["action"],
+        provenance=provenance,
+        visual=None if provenance.get("degraded") else ability.get("visual"),
+        documents=ability.get("documents"),
         language=lang,
         trace=trace,
     )
@@ -997,10 +1132,24 @@ async def _dispatch(
     #       coffee total: a handler at or after the tracker slot would be dead
     #       on arrival for the exact phrasings it exists to serve.
     correlation = await _correlation_reply(
-        db, user_id, message, provider, session_id, risk, lang, trace, t
+        db, user_id, message, provider, session_id, risk, tr.level,
+        escalation, lang, trace, t
     )
     if correlation is not None:
         return correlation
+
+    # 3.48) The health summary — deterministic, SHARED, and served VERBATIM.
+    #       It lived in the legacy ability chain, so the agentic engine let the
+    #       model recompose it and one reformatted dose discarded the whole
+    #       answer. Hoisted rather than duplicated: no parser ahead of it in
+    #       that chain claims a summary phrasing, so legacy routing is
+    #       unchanged and both engines now emit identical text.
+    summary = await _summary_reply(
+        db, user_id, message, provider, session_id, risk, tr.level,
+        escalation, lang, trace, t
+    )
+    if summary is not None:
+        return summary
 
     # 3.5) Engine selection. Everything above — the triage floor, the scope
     #      guard, the emergency directive, the canned conversational replies
@@ -1072,8 +1221,8 @@ async def _dispatch(
                     ability = await handle_report_param_ask(
                         db, user_id, message
                     )
-                if ability is None:
-                    ability = await handle_summary_query(db, user_id, message)
+                # (handle_summary_query is NOT called here any more: the
+                # SHARED prologue owns it on both engines — see 3.48.)
                 if ability is None:
                     _ptext, user_codes = await build_patient_context(db, user_id)
                     ability = await handle_suggestion_query(
@@ -1830,18 +1979,35 @@ async def _dispatch_agentic(
     # never reach the numbered blocks, so the model cannot cite them
     # with [n] — but the reply quotes them, so they are what it used.
     tool_sources: list[RetrievedChunk] = []
+    # Document cards a tool built. Out of band for the SAME reason as the SVG:
+    # the card is client plumbing (`resource_type`, row id) the model cannot
+    # use, and the handler's own `deterministic_reply` already names every
+    # title and date. They used to be a `_PASSTHROUGH` — i.e. straight into the
+    # prompt — and the agentic terminal then attached NONE of them, so the
+    # reader got a list of reports with no button to open any of them.
+    tool_documents: list[dict] = []
 
     async def _executor(call):
         return await execute_tool(
             db, user_id, call, session_id,
             visuals=tool_visuals, sources=tool_sources,
+            documents=tool_documents,
         )
 
-    # Tools are offered only at NONE risk. A red flag stays on the safe path so
-    # nothing can delay or dilute an escalation.
-    offered = TOOL_SPECS if risk == NONE else ()
+    # Tools are offered when THIS MESSAGE raised no red flag. A red flag in the
+    # message being answered stays on the safe path so nothing can delay or
+    # dilute an escalation — but a HIGH merely CARRIED from an unresolved
+    # earlier episode left the model with no records access on an ordinary data
+    # question, and the reader got the banner and no answer. The banner still
+    # leads the reply (`_lead`).
+    offered = TOOL_SPECS if tr.level == NONE else ()
 
-    t("Generate", "asking the assistant, with access to your records")
+    # Say which of the two it actually is. The old line claimed records access
+    # unconditionally, including on the red-flag turns where `offered` is empty
+    # — the trace is what a reader (and an on-call engineer) diagnoses from.
+    t("Generate",
+      "asking the assistant, with access to your records" if offered
+      else "asking the assistant — no records access on a red-flag turn")
     try:
         outcome = await run_agent(
             provider, system, [UserMessage(message)], offered, _executor,
@@ -1915,8 +2081,7 @@ async def _dispatch_agentic(
         _menu = disclosure_menu(_shown)
         if _menu:
             display = display + "\n\n" + _menu
-    if risk == HIGH:
-        display = f"{escalation} {display}"
+    display = _lead(escalation, risk, display)
 
     degraded: str | None = None
 
@@ -1940,9 +2105,7 @@ async def _dispatch_agentic(
         )
         if not rewritten:
             return False
-        candidate = strip_markers(rewritten)
-        if risk == HIGH:
-            candidate = f"{escalation} {candidate}"
+        candidate = _lead(escalation, risk, strip_markers(rewritten))
         retry_ok, _ = values_traceable(candidate, sources)
         if not retry_ok:
             return False
@@ -2040,6 +2203,7 @@ async def _dispatch_agentic(
         provenance=provenance,
         used=used,
         visual=None if degraded else (tool_visuals[0] if tool_visuals else None),
+        documents=None if degraded else (tool_documents or None),
         language=lang,
         trace=trace,
     )

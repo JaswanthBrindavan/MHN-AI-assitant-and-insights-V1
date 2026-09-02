@@ -22,7 +22,7 @@ from app.chat.abilities import (
     normalize_document_kinds,
     parse_document_query,
 )
-from app.chat.tools.executors import get_documents
+from app.chat.tools.executors import OUT_OF_BAND_DOCUMENTS, get_documents
 from app.models.common import utcnow
 from app.models.coredata import Report, ScanImaging
 
@@ -46,7 +46,7 @@ async def test_tool_call_for_reports_returns_the_reader_s_reports(db_session):
     await _seed(db_session)
     out = await get_documents(db_session, READER, {"kinds": ["report"]}, None)
     assert out is not None, "the document tool returned nothing"
-    kinds = {d["kind"] for d in out["documents"]}
+    kinds = {d["kind"] for d in out[OUT_OF_BAND_DOCUMENTS]}
     assert kinds == {"report"}
     assert "lab.pdf" in out["deterministic_reply"]
 
@@ -55,7 +55,7 @@ async def test_tool_call_for_scans_returns_scans(db_session):
     await _seed(db_session)
     out = await get_documents(db_session, READER, {"kinds": ["scan"]}, None)
     assert out is not None
-    kinds = {d["kind"] for d in out["documents"]}
+    kinds = {d["kind"] for d in out[OUT_OF_BAND_DOCUMENTS]}
     assert kinds == {"scan"}, "a scan request must not answer with reports"
     assert "chest.jpg" in out["deterministic_reply"]
 
@@ -65,7 +65,7 @@ async def test_tool_call_with_no_kinds_returns_every_kind(db_session):
     await _seed(db_session)
     out = await get_documents(db_session, READER, {}, None)
     assert out is not None
-    assert {d["kind"] for d in out["documents"]} == {"report", "scan"}
+    assert {d["kind"] for d in out[OUT_OF_BAND_DOCUMENTS]} == {"report", "scan"}
 
 
 # --------------------------------------------------------------------------- #
