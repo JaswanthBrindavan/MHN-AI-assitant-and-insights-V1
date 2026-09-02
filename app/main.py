@@ -14,6 +14,7 @@ from app.api.v1 import (
     feedback,
     health,
     insights,
+    patterns,
     pedigree,
     profile,
     review,
@@ -35,6 +36,10 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix=API_V1)
     app.include_router(pedigree.router, prefix=API_V1)
     app.include_router(insights.router, prefix=API_V1)
+    # Behaviour patterns. Deliberately NOT under /insights: that route is
+    # the family-history engine, and the app labelling both screens
+    # "Insights" is presentation, not a reason to merge them.
+    app.include_router(patterns.router, prefix=API_V1)
     app.include_router(chat.router, prefix=API_V1)
     app.include_router(documents.router, prefix=API_V1)
     app.include_router(admin.router, prefix=API_V1)
