@@ -238,11 +238,23 @@ MAX_QUERIES_PER_CORRELATION_TURN = 14
 #             `open_episodes` for the active set, which is a SECOND read of
 #             `active_symptom_states` on a turn that has already read it, so
 #             it became a LEFT JOIN in the same aggregate.
+#   38 -> 41  "also ticked in cycle tracking". Symptoms live in two places and
+#             `period_day_log` is the one chat never sees. Same shape again:
+#             one SELECT plus a savepoint pair. It was 42 — the first cut
+#             called `symptoms_between`, which reads BOTH sources and so read
+#             `symptom_logs` a second time in a turn that had already read it;
+#             `ticked_between` is the tracker-only half.
+#
+#             It stays a SEPARATE section rather than folding into the one
+#             above, which would have saved the savepoint pair. Deliberate:
+#             `_section` exists so one broken read degrades its own line, and
+#             merging them would let a `period_day_log` failure hide the
+#             reader's chat-reported symptoms entirely.
 #
 # Still spent knowingly. These reads fire only behind the summary parse, so an
 # ordinary turn pays nothing; the turn makes ZERO model calls; and it replaces
 # an LLM answer that runs a median of 8.6s.
-MAX_QUERIES_PER_SUMMARY_TURN = 38
+MAX_QUERIES_PER_SUMMARY_TURN = 41
 
 
 async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):

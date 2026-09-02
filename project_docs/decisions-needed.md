@@ -735,3 +735,58 @@ One thing to solve once, wherever the merge lands: the codes are mhn-spring's
 `PeriodSymptom` enum (`lower_back_pain`) while `symptom_logs.symptom` holds the
 phrase the reader typed (`lower back pain`). Without a de-dup on normalised
 form the reader sees both spellings of one complaint side by side.
+
+---
+
+## D28 — Two opposite assumptions about the tracking zone, in one codebase
+
+Surfaced while wiring D27. Not a bug I could fix on my own judgement, because
+both sides are deliberate and documented, and they now disagree.
+
+**Side A — `app/coredata/service.py::calendar_window`** anchors on the UTC date
+and says why: *"that zone is empty by default in mhn-spring and unrecoverable
+from the data, so within a few hours of midnight a window can be one day out.
+Same anchor `handle_correlation_query` already uses."* A known one-day risk,
+accepted knowingly.
+
+**Side B — `app/patterns/service.py::tracking_today`** (added by the parallel
+session) anchors on a fixed UTC+5:30 and says why: `log_date` and the lifestyle
+rollups store the resolved calendar day *at write time*, so reading them
+against the UTC day is wrong for the five and a half hours before midnight UTC.
+Demonstrated, not theorised — it dropped a symptom ticked today, and their own
+test fixtures had the same bug (`_at(20)` built 20:00 UTC, which is 01:30 IST
+the next morning, so a test asserting "yesterday evening" wrote into the
+following day and passed for the wrong reason).
+
+**The schema supports side B for the day-bucketed tables.** `db/existing_schema.sql`
+sets `tracking_zone text := 'Asia/Kolkata'` in its backfills, and the V-block on
+per-user timezone is explicit: *`app.tracking.zone` is global BY DESIGN ... the
+lifestyle rollup tables store the resolved calendar day at write time. It
+cannot be made per-user without silently reinterpreting rows already written.*
+`user.timezone` exists but its own COMMENT says it is for notification
+scheduling and *"must not be used to bucket lifestyle rollups"*.
+
+**What I cannot verify from here** is side A's factual claim — whether the
+`app.tracking.zone` PROPERTY is actually set in the deployed mhn-spring. The
+migrations hardcode Asia/Kolkata in their own DO blocks, but that is the
+backfill's local variable, not the runtime property, and this checkout of
+mhn-spring has no `src/`. If the property is genuinely unset, side B's fixed
++05:30 is wrong in the other direction for every deployment that is not India.
+
+**What I did, and did not do.** `period_day_log.log_date` reads through
+`tracking_today()`, because that column is unambiguously a Spring-written
+calendar day and the bug was measured. I did NOT flip `calendar_window`,
+`handle_correlation_query`, or my own `targets()` (`effective_from`, same
+shape, same 5.5-hour window where a goal set today would not show). Flipping
+those silently would overturn a documented decision on a teammate's evidence
+about a different table.
+
+**The call needed:** confirm whether `app.tracking.zone` is set in production.
+If it is, one helper should anchor every day-bucketed read and side A's comment
+is stale. If it is not, side B needs to stop hardcoding +05:30. Either way it
+should be one answer, not two.
+
+(Also worth knowing, from the same session: `ZoneInfo("Asia/Kolkata")` RAISES
+on Windows — no IANA database without the `tzdata` package — which is why the
+helper uses a fixed offset. India has never observed DST, so the offset is
+exact rather than an approximation, but that is only true for this one zone.)

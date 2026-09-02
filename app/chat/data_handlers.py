@@ -106,6 +106,7 @@ from app.models.chat import ConversationMessage, McpChunk
 from app.models.common import utcnow
 from app.models.core import User
 from app.models.coredata import MedicalCondition, Report, UnclassifiedFile
+from app.patterns.service import ticked_between, tracking_today
 from app.rag.retrieval import RetrievedChunk, resolve_scope
 from app.telemetry import record_fail_open
 
@@ -1209,6 +1210,30 @@ async def handle_summary_query(
         db, failed, "symptoms",
         lambda: symptom_history(db, user_id, since=since),
     )
+    # A reader's symptoms live in TWO places and `symptom_logs` is only one of
+    # them: codes ticked in cycle tracking (`period_day_log.symptoms`) never
+    # reach chat, so a reader who logs them there and asks here saw nothing of
+    # them. `symptoms_between` owns the merge — the two sources spell things
+    # differently ("lower_back_pain" vs a typed "lower back pain") and it
+    # normalises both to one form, which is why it returns finished phrases
+    # rather than rows. Re-solving that here would be a second place to get it
+    # wrong.
+    tracked = await _section(
+        db, failed, "tracked_symptoms",
+        # `tracking_today()`, not `utcnow().date()`. `log_date` is a CALENDAR
+        # date written in the app's own zone, which mhn-spring pins globally to
+        # Asia/Kolkata (UTC+5:30) — always AHEAD, so for the five and a half
+        # hours before midnight UTC the two disagree and a window ending at the
+        # UTC date silently drops a symptom ticked today. Measured: that is
+        # exactly what happened here.
+        #
+        # This first ended a day LATE instead, which over-collects harmlessly
+        # for a rolling range. Cutting the day in the right zone is exact, and
+        # exact beats harmless. The window START stays UTC-derived on purpose:
+        # "the past week" is a rolling span, not a calendar boundary, so a few
+        # hours there changes nothing a reader could notice.
+        lambda: ticked_between(db, user_id, since.date(), tracking_today()),
+    )
 
     lines: list[str] = []
     missing: list[str] = []
@@ -1296,6 +1321,20 @@ async def handle_summary_query(
         "Symptoms you have mentioned: "
         + _listed([_symptom_phrase(sx) for sx in symptoms]) + "."
         if symptoms else None,
+        scoped=True,
+    )
+    # Only what the chat has NOT already named. The merge function returns both
+    # sources, so subtracting what was just listed leaves exactly the ones that
+    # exist only in cycle tracking — and they are named as ticked rather than
+    # mentioned, because that is what happened. No count and no "still open":
+    # a ticked code has no episode behind it, and inventing one would be the
+    # summary claiming more than the record holds.
+    said = {sx.symptom.strip().lower() for sx in (symptoms or [])}
+    only_ticked = [p for p, _rank in (tracked or []) if p not in said]
+    _place(
+        "symptoms you tracked", "tracked_symptoms",
+        "Also ticked in cycle tracking: " + _listed(only_ticked) + "."
+        if only_ticked else None,
         scoped=True,
     )
     _place(
