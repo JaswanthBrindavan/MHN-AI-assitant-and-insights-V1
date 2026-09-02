@@ -141,7 +141,7 @@ def test_the_not_enough_card_says_how_many_more_days():
     o = observe("tea", "mood", {d0, d0 + timedelta(days=1)},
                 _series(d0, 20, 5.0, 5.0, 20))
     body = detail(o)
-    assert "not have enough days" in body.lower()
+    assert "cannot answer it yet" in body.lower()
     assert "more would do it" in body.lower()
 
 
@@ -431,3 +431,55 @@ def test_a_short_history_has_no_trend():
 
     d0 = date(2026, 8, 1)
     assert trend([DayValue(d0 + timedelta(days=i), 400.0) for i in range(4)]) is None
+
+
+# --------------------------------------------------------------------------- #
+# While the personal data is still building, show the general fact
+# --------------------------------------------------------------------------- #
+def _waiting():
+    d0 = date(2026, 8, 1)
+    return observe("coffee", "sleep_duration", {d0, d0 + timedelta(days=1)},
+                   [DayValue(d0 + timedelta(days=i), 400.0) for i in range(20)])
+
+
+FACT = (
+    "Caffeine is a stimulant that blocks adenosine receptors and can delay "
+    "sleep onset when taken late in the day."
+)
+
+
+def test_a_waiting_card_leads_with_the_general_fact():
+    """"No patterns yet" is a dead screen. The reviewed corpus already has
+    something worth reading, and it is true whether or not this reader has
+    logged anything — so the card opens with it rather than with an apology."""
+    card = to_card(_waiting(), title="Late caffeine and your sleep", fact=FACT)
+    assert card["enough_data"] is False
+    assert card["headline"].startswith("In general:")
+    assert "adenosine" in card["headline"]
+    assert card["detail"].startswith("In general:")
+
+
+def test_a_waiting_card_never_implies_the_fact_is_about_this_reader():
+    """The whole reason the general half is allowed to be causal is that it is
+    marked as general. Losing that prefix would turn reviewed guidance into a
+    finding about someone who has logged two days."""
+    card = to_card(_waiting(), fact=FACT)
+    assert "in general:" in card["headline"].lower()
+    assert "cannot answer it yet" in card["detail"].lower()
+    # It must not claim anything about their own nights.
+    for claim in ("your sleep was", "your recorded sleep averaged",
+                  "on the 2 days you"):
+        assert claim not in card["detail"].lower()
+
+
+def test_a_waiting_card_still_says_how_many_days_are_left():
+    card = to_card(_waiting(), fact=FACT)
+    assert "more would do it" in card["detail"]
+    assert card["days_with"] == 2
+
+
+def test_without_a_fact_the_waiting_card_is_still_honest():
+    """No corpus sentence for a pair is an ordinary outcome, not an error."""
+    card = to_card(_waiting())
+    assert "not enough days" in card["headline"].lower()
+    assert "cannot answer it yet" in card["detail"].lower()

@@ -72,10 +72,19 @@ def _amount(outcome: str, value: float) -> str:
     return f"{size:.1f} {unit}".rstrip().replace(".0 ", " ")
 
 
-def headline(o: Observation) -> str:
-    """The one line the card shows. Observational, never causal."""
+def headline(o: Observation, fact: str | None = None) -> str:
+    """The one line the card shows. Observational, never causal.
+
+    With no personal data yet, the card leads with the GENERAL fact rather
+    than with an apology. "No patterns yet" is a dead screen; the reviewed
+    corpus already has something worth reading about coffee and sleep, and it
+    is true whether or not this reader has logged anything. It is prefixed
+    "In general" so it can never be mistaken for a finding about them.
+    """
     if not o.enough:
-        return "Not enough days yet to put these side by side."
+        return f"In general: {fact}" if fact else (
+            "Not enough days yet to put these side by side."
+        )
     direction = "lower" if (o.difference or 0) < 0 else "higher"
     if o.outcome == "sleep_duration":
         direction = "shorter" if (o.difference or 0) < 0 else "longer"
@@ -94,11 +103,16 @@ def detail(o: Observation, fact: str | None = None) -> str:
     """The full reading for the detail screen: observation, hedge, then fact."""
     if not o.enough:
         need = max(0, 7 - min(o.days_with, o.days_without))
+        # The general half first, because it is the half that is ready. Then
+        # the honest note about their own data. Never the other way round: a
+        # card that opens with what it cannot do is a card nobody reads.
+        opening = f"In general: {fact} " if fact else ""
         return (
-            f"I do not have enough days to put these side by side yet. In the "
-            f"last 28 days there were {o.days_with} with and {o.days_without} "
-            f"without a reading to compare. About {need} more would do it — "
-            f"fewer than that and a single unusual day sets the whole picture."
+            f"{opening}Whether that shows up in your own nights is a separate "
+            f"question, and I cannot answer it yet. Over the last 28 days "
+            f"there were {o.days_with} days with and {o.days_without} without "
+            f"a reading to compare — about {need} more would do it. Fewer than "
+            f"that and a single unusual day sets the whole picture."
         )
 
     when = "that night" if o.lag != LAG_NEXT_DAY else "the next day"
@@ -128,7 +142,7 @@ def to_card(o: Observation, *, title: str = "", fact: str | None = None) -> dict
     return {
         "key": o.key,
         "title": title or f"{o.exposure} and your {o.outcome}",
-        "headline": headline(o),
+        "headline": headline(o, fact),
         "detail": detail(o, fact),
         "enough_data": o.enough,
         "days_with": o.days_with,
