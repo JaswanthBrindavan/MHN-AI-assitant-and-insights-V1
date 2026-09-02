@@ -215,3 +215,91 @@ async def test_a_reader_with_no_data_gets_the_not_yet_state(db_session):
 
 def test_min_days_is_a_week_of_each():
     assert MIN_DAYS_PER_GROUP == 7
+
+
+# --------------------------------------------------------------------------- #
+# Reads never compute — the nightly sweep writes, the route reads
+# --------------------------------------------------------------------------- #
+async def test_recompute_writes_one_artifact_per_pair(db_session):
+    from app.patterns.engine import active_patterns, recompute_patterns
+
+    await _seed(db_session)
+    written = await recompute_patterns(db_session, USER, reason="test")
+    assert written > 0
+    rows = await active_patterns(db_session, USER)
+    assert len(rows) == written
+    assert all(r.card for r in rows), "the card is rendered at write time"
+
+
+async def test_an_unchanged_pattern_writes_nothing_the_second_night(db_session):
+    """`content_hash` covers the FINDING, not the moment it was taken.
+
+    This is what makes day-wise history affordable: a row appears the day a
+    pattern moves, not seven rows a night per reader.
+    """
+    from app.patterns.engine import active_patterns, recompute_patterns
+
+    await _seed(db_session)
+    first = await recompute_patterns(db_session, USER, reason="night-1")
+    second = await recompute_patterns(db_session, USER, reason="night-2")
+    assert first > 0
+    assert second == 0, "identical records must not produce new rows"
+    assert len(await active_patterns(db_session, USER)) == first
+
+
+async def test_a_changed_pattern_supersedes_rather_than_duplicates(db_session):
+    from sqlalchemy import select
+
+    from app.models.rules import PatternArtifact
+    from app.patterns.engine import active_patterns, recompute_patterns
+
+    await _seed(db_session)
+    await recompute_patterns(db_session, USER, reason="night-1")
+    before = {r.pattern_key: r.id for r in await active_patterns(db_session, USER)}
+
+    # A new night's sleep changes one finding.
+    start, end = window_bounds()
+    db_session.add(SahhaDailyTotal(
+        user_id=USER, metric="sleep_duration", bucket_start=end - timedelta(days=26),
+        total=120.0, entries=1, days_counted=1,
+    ))
+    await db_session.flush()
+    await recompute_patterns(db_session, USER, reason="night-2")
+
+    after = await active_patterns(db_session, USER)
+    # Still one ACTIVE row per pair — the old one was superseded, not stacked.
+    assert len({r.pattern_key for r in after}) == len(after)
+    superseded = (
+        await db_session.execute(
+            select(PatternArtifact).where(PatternArtifact.status == "superseded")
+        )
+    ).scalars().all()
+    assert superseded, "the previous finding should be superseded, not deleted"
+    assert all(s.superseded_by is not None for s in superseded)
+    assert before  # the first night really did write
+
+
+async def test_the_read_path_serves_stored_rows(db_session):
+    """If this ever starts computing, the invariant is broken again."""
+    from app.patterns.engine import active_patterns, recompute_patterns
+
+    await _seed(db_session)
+    await recompute_patterns(db_session, USER, reason="test")
+    rows = await active_patterns(db_session, USER)
+    assert rows and all(r.card is not None for r in rows)
+
+
+async def test_the_general_fact_is_stored_with_the_card(db_session):
+    from app.patterns.engine import active_patterns, recompute_patterns
+
+    await _seed(db_session)
+    await recompute_patterns(
+        db_session, USER, reason="test",
+        fact_for=lambda e, o: "caffeine is a stimulant." if e == "coffee" else None,
+    )
+    cards = [r.card or {} for r in await active_patterns(db_session, USER)]
+    coffee = [c for c in cards if str(c.get("key", "")).startswith("coffee__sleep")]
+    assert coffee
+    card = coffee[0]
+    if card.get("enough_data"):
+        assert "in general:" in str(card.get("detail", "")).lower()

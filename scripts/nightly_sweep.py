@@ -17,6 +17,7 @@ Run:  python -m scripts.nightly_sweep
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import delete, select
@@ -31,7 +32,11 @@ from app.insights.engine import recompute_insights
 from app.memory import document as memory_document
 from app.models.common import utcnow
 from app.models.core import PedigreeCondition
+from app.models.coredata import LifestyleLog, SahhaDailyTotal
 from app.models.jobs import JobRun
+from app.patterns.engine import recompute_patterns
+
+logger = logging.getLogger(__name__)
 
 PURGE_AFTER_DAYS = 30
 
@@ -77,10 +82,35 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
         # because a chat turn is the wrong place to run a cleanup.
         episodes_purged = await purge_stale(db)
 
+        # Behaviour patterns. A SEPARATE user list on purpose: the recompute
+        # above walks people with pedigree rows, and someone with a wearable
+        # and no family history is a different reader entirely. Driving
+        # patterns off that list would leave them permanently blank.
+        #
+        # Its own try/except for the same reason: a missing rollup in a
+        # standalone deployment must not fail the sweep and take erasure and
+        # retention down with it.
+        patterns_written = 0
+        try:
+            pattern_users = set(
+                (await db.execute(select(LifestyleLog.user_id).distinct()))
+                .scalars().all()
+            ) | set(
+                (await db.execute(select(SahhaDailyTotal.user_id).distinct()))
+                .scalars().all()
+            )
+            for uid in pattern_users:
+                patterns_written += await recompute_patterns(
+                    db, uid, reason="nightly_sweep"
+                )
+        except Exception:  # noqa: BLE001 — one feature must not fail the sweep
+            logger.warning("pattern recompute failed", exc_info=True)
+
         result = {
             "users_recomputed": recomputed,
             "conditions_purged": len(to_purge),
             "episodes_purged": episodes_purged,
+            "patterns_written": patterns_written,
         }
 
         # Erasure and retention COMMIT AS THEY GO, so they run after the
