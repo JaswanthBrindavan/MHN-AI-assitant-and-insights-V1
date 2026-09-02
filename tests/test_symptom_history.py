@@ -354,3 +354,101 @@ async def test_the_summary_window_is_the_one_it_names(db_session):
     year = await handle_summary_query(db_session, user, "health summary for the year")
     assert year is not None
     assert "headache" in year["reply"]
+
+
+# --------------------------------------------------------------------------- #
+# The second symptom source (D27)
+# --------------------------------------------------------------------------- #
+# Symptoms live in two places. `symptom_logs` is what the reader told the chat;
+# `period_day_log.symptoms` is codes they ticked in cycle tracking, written by
+# mhn-spring since their V5 and never read here. A reader who logs symptoms
+# only in the tracker saw nothing of them in a summary that claims to be their
+# whole record.
+async def test_a_tracked_symptom_reaches_the_summary(db_session):
+    from datetime import date
+
+    from app.chat.data_handlers import handle_summary_query
+    from app.models.coredata import PeriodDayLog
+
+    user = uuid.uuid4()
+    db_session.add(PeriodDayLog(
+        user_id=user, log_date=date.today(), symptoms=["lower_back_pain"],
+    ))
+    await db_session.flush()
+
+    out = await handle_summary_query(db_session, user, "health summary")
+    assert out is not None
+    assert "lower back pain" in out["reply"], "the tracker source was invisible"
+    assert "ticked in cycle tracking" in out["reply"]
+
+
+async def test_one_complaint_logged_both_ways_is_named_once(db_session):
+    """The sources spell things differently — Spring stores the code
+    `lower_back_pain`, chat stores the phrase somebody typed. Named twice, in
+    two spellings, a reader would reasonably think they were two things."""
+    from datetime import date
+
+    from app.chat.data_handlers import handle_summary_query
+    from app.models.coredata import PeriodDayLog
+
+    user = uuid.uuid4()
+    await open_or_touch(db_session, user, "lower back pain", "none", [])
+    db_session.add(PeriodDayLog(
+        user_id=user, log_date=date.today(), symptoms=["lower_back_pain"],
+    ))
+    await db_session.flush()
+
+    out = await handle_summary_query(db_session, user, "health summary")
+    assert out is not None
+    reply = out["reply"]
+    assert reply.lower().count("lower back pain") == 1
+
+
+async def test_a_tracked_symptom_is_not_claimed_to_be_open(db_session):
+    """A ticked code has no episode behind it. "Still open" is a claim about
+    an episode, and there is none to make it from."""
+    from datetime import date
+
+    from app.chat.data_handlers import handle_summary_query
+    from app.models.coredata import PeriodDayLog
+
+    user = uuid.uuid4()
+    db_session.add(PeriodDayLog(
+        user_id=user, log_date=date.today(), symptoms=["cramps"],
+    ))
+    await db_session.flush()
+
+    out = await handle_summary_query(db_session, user, "health summary")
+    assert out is not None
+    reply = out["reply"]
+    assert "cramps" in reply
+    assert "still open" not in reply
+
+
+async def test_a_symptom_ticked_today_is_not_lost_to_the_timezone(db_session):
+    """`log_date` is a calendar date in the app's own zone, which mhn-spring
+    pins globally to Asia/Kolkata (UTC+5:30). Always ahead, so for the five and
+    a half hours before midnight UTC a symptom ticked "today" carries
+    TOMORROW's UTC date — and a window ending at `utcnow().date()` drops it for
+    that whole span.
+
+    Written with `tracking_today()`, which is what Spring writes, so this is
+    deterministic rather than passing or failing depending on the hour the
+    suite runs at. That is the same trap the other session found in its own
+    fixtures: a test built on the wrong clock passes for the wrong reason.
+    """
+    from app.chat.data_handlers import handle_summary_query
+    from app.models.coredata import PeriodDayLog
+    from app.patterns.service import tracking_today
+
+    user = uuid.uuid4()
+    db_session.add(PeriodDayLog(
+        user_id=user, log_date=tracking_today(), symptoms=["cramps"],
+    ))
+    await db_session.flush()
+
+    out = await handle_summary_query(db_session, user, "health summary")
+    assert out is not None
+    assert "cramps" in out["reply"], (
+        "a symptom ticked today was lost to the UTC/IST day boundary"
+    )
