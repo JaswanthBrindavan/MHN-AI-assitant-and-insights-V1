@@ -108,6 +108,19 @@ _RECOVERY_RE = _re.compile(
     r"|\bbetter now\b|\ball better\b|\b(?:is|it'?s|its) gone\b"
     r"|\bresolved\b|\bsubsided\b|\bcleared up\b|\brecovered\b"
     r"|\bno (?:longer|more) (?:hurts?|paining|there)\b"
+    # "the chest pain HAS SETTLED, i am fine now" was answered with "some of
+    # what you describe can be serious" — for a message reporting the
+    # opposite. Naming the symptom is how you say it is over, so the message
+    # re-matched triage, `has_red_flag` disabled the soft table, and the
+    # episode could never be closed with that wording. "is gone" worked;
+    # "has settled" did not.
+    #
+    # These belong in the STRICT table precisely because they survive a red
+    # flag: each one states a resolution about the symptom it names. Bare
+    # "stopped" is deliberately absent — "my heart stopped" is the opposite
+    # of a recovery report.
+    r"|\b(?:has|have|had)\s+(?:settled|eased|passed|stopped)\b"
+    r"|\bsettled down\b|\beased off\b|\bwent away\b|\bhas not come back\b"
     r"|\btheek ho gay[ai]\b|\bthik ho gay[ai]\b|\baram (?:hai|aa gaya)\b",
     _re.IGNORECASE,
 )
