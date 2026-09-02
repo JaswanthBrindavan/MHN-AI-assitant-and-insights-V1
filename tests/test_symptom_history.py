@@ -332,3 +332,25 @@ async def test_a_red_flag_is_recorded_once_not_twice(db_session):
     assert len(rows) == len({r.symptom for r in rows}), (
         f"duplicate symptom rows: {[r.symptom for r in rows]}"
     )
+
+
+async def test_the_summary_window_is_the_one_it_names(db_session):
+    """The section read a fixed year while the empty-state sentence named the
+    summary's own period, so a reader asking for the week was told "nothing
+    logged in the past week" about a year-wide query — or shown a symptom from
+    ten months ago under a heading that said week."""
+    from app.chat.data_handlers import handle_summary_query
+
+    user = uuid.uuid4()
+    await open_or_touch(db_session, user, "headache", "low", ["headache"])
+    rows = await _logged(db_session, user)
+    rows[0].created_at = utcnow() - timedelta(days=200)
+    await db_session.flush()
+
+    week = await handle_summary_query(db_session, user, "health summary for the week")
+    assert week is not None
+    assert "headache" not in week["reply"], "200 days ago is not this week"
+
+    year = await handle_summary_query(db_session, user, "health summary for the year")
+    assert year is not None
+    assert "headache" in year["reply"]

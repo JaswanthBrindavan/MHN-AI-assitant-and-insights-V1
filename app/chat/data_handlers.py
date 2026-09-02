@@ -1201,9 +1201,13 @@ async def handle_summary_query(
         db, failed, "labs", lambda: recent_lab_values(db, user_id)
     )
     goals = await _section(db, failed, "goals", lambda: targets(db, user_id))
+    # The summary's OWN window, not a hardcoded one. This read a fixed year
+    # while the empty-state sentence names `label` ("nothing logged in the past
+    # week for: symptoms you reported") — a window in the wording that was not
+    # the window queried. Every other scoped section uses `since`; so does this.
     symptoms = await _section(
         db, failed, "symptoms",
-        lambda: symptom_history(db, user_id, since=window_start("year")),
+        lambda: symptom_history(db, user_id, since=since),
     )
 
     lines: list[str] = []
