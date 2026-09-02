@@ -373,8 +373,13 @@ async def _try_backend(
     """
     if metric == "blood_pressure":
         return None
-    age = await health_reference.user_age(db, user_id)
-    verdict = await health_reference.evaluate_backend(db, metric, value, age)
+    # Age AND sex, in one query: 28 of the seeded parameters band by both, and
+    # grading a woman's HDL against the male range is a wrong answer about her
+    # own body.
+    age, sex = await health_reference.reader_bands(db, user_id)
+    verdict = await health_reference.evaluate_backend(
+        db, metric, value, age, sex
+    )
     if verdict is None:
         return None
     unit = verdict.unit or (

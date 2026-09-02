@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.health.ranges import RANGES
 from app.models.common import utcnow
 from app.models.core import User
 from app.models.coredata import ThpAgeRange, TraditionalHealthParameter
@@ -86,25 +87,54 @@ class BackendVerdict:
     label: str
 
 
-async def user_age(db: AsyncSession, user_id: uuid.UUID) -> int | None:
-    """Age in whole years from the user's DOB, or None if unknown."""
+async def reader_bands(
+    db: AsyncSession, user_id: uuid.UUID
+) -> tuple[int | None, str | None]:
+    """``(age in whole years, sex)`` — the two facts that pick a band.
+
+    One query for both. `thp_age_range` is banded by age AND sex, so fetching
+    them separately would cost a second round trip on a path that already has
+    no budget headroom.
+
+    Sex is the reader's own `gender` (`female` | `male` | `other`). `other`
+    returns None: production seeds bands for `any`, `female` and `male` only,
+    so there is nothing for it to match and it must fall back to `any` like an
+    unknown does.
+    """
     try:
-        dob = (
-            await db.execute(select(User.dob).where(User.id == user_id))
-        ).scalars().first()
+        row = (
+            await db.execute(
+                select(User.dob, User.gender).where(User.id == user_id)
+            )
+        ).first()
+        if row is None:
+            return None, None
+        dob, gender = row
+        sex = (gender or "").strip().lower() or None
+        if sex not in ("female", "male"):
+            sex = None
         if dob is None:
-            return None
+            return None, sex
         today = utcnow().date()
-        return max(
+        age = max(
             0,
             today.year - dob.year
             - ((today.month, today.day) < (dob.month, dob.day)),
         )
+        return age, sex
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
 
 
-def _classify_bands(r: ThpAgeRange, value: float) -> tuple[str, str]:
+async def user_age(db: AsyncSession, user_id: uuid.UUID) -> int | None:
+    """Age in whole years from the user's DOB, or None if unknown."""
+    age, _ = await reader_bands(db, user_id)
+    return age
+
+
+def _classify_bands(
+    r: ThpAgeRange, value: float, metric_key: str = ""
+) -> tuple[str, str]:
     """(severity, direction) from ``low_warn``/``high_warn`` ONLY.
 
     Two zones, the model mhn-spring settled on in V28 when it dropped
@@ -130,10 +160,25 @@ def _classify_bands(r: ThpAgeRange, value: float) -> tuple[str, str]:
     HIGH, which is what today's code does — V28's header reads the ideal band
     as inclusive at both ends, and going that way would flip an LDL of exactly
     100 from "consult your doctor" to "that's reassuring".
+
+    ONE-SIDED METRICS. The backend gives every parameter both a `low_warn` and
+    a `high_warn`, because the table has both columns — not because both ends
+    are clinically meaningful. For HDL they are not: more is better, and
+    production's band is male 40-60, female 50-70, so an HDL of 65 was told it
+    was "above the usual range, please consult your doctor" about a GOOD
+    result. Davi's own DRAFT constants already carry the direction that table
+    cannot — `hdl` is `RangeSpec(40, None)`, "no upper bound is flagged" — and
+    the same is true of SpO2 (higher is better) and of LDL and total
+    cholesterol at the bottom end. So the curated spec, where we have one,
+    decides which SIDES may warn; the backend decides where the line sits.
+
+    A metric with no DRAFT spec keeps both sides, which is the conservative
+    direction.
     """
-    if value < r.low_warn:
+    spec = RANGES.get(metric_key)
+    if value < r.low_warn and (spec is None or spec.low is not None):
         return "warn", "low"
-    if value >= r.high_warn:
+    if value >= r.high_warn and (spec is None or spec.high is not None):
         return "warn", "high"
     return "normal", ""
 
@@ -180,9 +225,24 @@ async def _match_thp(
 
 
 async def evaluate_backend(
-    db: AsyncSession, metric_key: str, value: float, age: int | None
+    db: AsyncSession,
+    metric_key: str,
+    value: float,
+    age: int | None,
+    sex: str | None = None,
 ) -> BackendVerdict | None:
-    """Verdict from backend ranges, or None if none match."""
+    """Verdict from backend ranges, or None if none match.
+
+    ``sex`` picks between the sex-specific bands production seeds for 28
+    parameters. Pass it whenever it is known: without it a woman's HDL of 65
+    is graded against the male band (40-60) instead of her own (50-70).
+
+    When a parameter has ONLY sex-specific bands and the reader's sex is not
+    known, this returns None rather than guessing, and the caller falls back
+    to the DRAFT constants — the same safe direction every other failure here
+    takes. Grading someone against the other sex's range is worse than
+    grading them against a general one.
+    """
     try:
         # Own SAVEPOINT, so that swallowing an error below does not poison the
         # CALLER's transaction. It did: a failed statement leaves the whole
@@ -205,10 +265,24 @@ async def evaluate_backend(
             ).scalars().all()
             if not ranges:
                 return None
+            # The reader's own sex first, then the unisex band. Never the
+            # other sex's: `order_by(age_min)` alone had no tiebreak, so which
+            # of "HDL male 40-60" and "HDL female 50-70" a reader was graded
+            # against came down to row order.
+            want = (sex or "").strip().lower()
+            pool = [r for r in ranges if (r.sex or "any").lower() == want]
+            if not pool:
+                pool = [
+                    r for r in ranges if (r.sex or "any").lower() == "any"
+                ]
+            if not pool:
+                # Sex-specific bands only, and we do not know theirs. Fall
+                # back to the DRAFT constants rather than pick one.
+                return None
             chosen = next(
-                (r for r in ranges if r.age_min <= a <= r.age_max), ranges[0]
+                (r for r in pool if r.age_min <= a <= r.age_max), pool[0]
             )
-            severity, direction = _classify_bands(chosen, value)
+            severity, direction = _classify_bands(chosen, value, metric_key)
             return BackendVerdict(
                 severity=severity, direction=direction,
                 ideal_low=chosen.low_warn, ideal_high=chosen.high_warn,

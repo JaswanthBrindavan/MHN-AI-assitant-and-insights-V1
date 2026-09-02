@@ -570,6 +570,13 @@ class ThpAgeRange(Base):
     thp_id: Mapped[int] = mapped_column(sa.Integer, nullable=False, index=True)
     age_min: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     age_max: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    # `any` | `female` | `male`. 78 of the 277 seeded rows are sex-specific,
+    # covering 28 parameters — Alkaline Phosphatase is male 45-129 and female
+    # 35-104, HDL is male 40-60 and female 50-70. While this column was
+    # unmapped the band was chosen by age alone, so which one a reader was
+    # graded against came down to row order.
+    sex: Mapped[str] = mapped_column(sa.String(16), nullable=False,
+                                     server_default="any")
     min: Mapped[float] = mapped_column(sa.Float, nullable=False)
     low_warn: Mapped[float] = mapped_column(sa.Float, nullable=False)
     ideal: Mapped[float] = mapped_column(sa.Float, nullable=False)
