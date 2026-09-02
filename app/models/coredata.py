@@ -70,6 +70,10 @@ COREDATA_TABLES = {
     "sahha_daily_total",
     "sahha_weekly_total",
     "mood_log",
+    "user_thp_series",
+    "lifestyle_limit",
+    "body_measurement_goal",
+    "sahha_goal",
 }
 
 
@@ -772,3 +776,108 @@ class PeriodTracking(Base):
     # class, and the only one an exemption was hiding.
     cycle_length: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
     flow_intensity: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+
+
+class UserThpSeries(Base):
+    """mhn-spring's materialised biomarker trends feed (their V31).
+
+    One row per (user, biomarker) holding EVERY reading the AI extraction has
+    produced for that test, in the exact shape ``GET /files/biomarkers``
+    returns — which is what the mobile apps draw their graphs from.
+
+    Davi used to derive lab history by walking the newest 20 ``reports`` rows
+    and re-parsing ``content.ai.extraction.results[]``, grouping by the raw
+    printed test name. That disagreed with the app twice over: it saw only the
+    last 20 reports, and "HbA1c" / "HBA1C" / "Hb A1c" were three parameters to
+    us and one to them (they group on ``AiMarkers.normalize()``, stored here as
+    ``thp_key``). Same biomarker, two different graphs.
+
+    Read for the OWNER only. The upstream comment is explicit that the series
+    is privacy-agnostic — private reports' readings are stored here too, and
+    reading-level filtering against the viewer's accessible report ids is
+    expected to happen at read time. Davi does not do that filtering, so family
+    reads keep the older per-document path, which already honours
+    ``req_read``/``acc_read`` and ``file_access_exclusions``.
+    """
+
+    __tablename__ = "user_thp_series"
+
+    id: Mapped[int] = mapped_column(
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    thp_key: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    name: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    unit: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    reference_range: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    readings: Mapped[list | None] = mapped_column(JSONColumn, nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Targets the reader set for themselves
+# --------------------------------------------------------------------------- #
+# Three tables, one shape: (metric, effective_from, value, unit). They are
+# history, not settings — a row per change, so "my goal" is the newest row
+# whose ``effective_from`` has arrived, never simply the newest row (a goal
+# dated next Monday is not today's goal).
+#
+# Nothing in Davi read any of them, so a reader who had set a daily water
+# target, a weight goal and a step goal in the app was told none of it existed
+# when they asked here.
+_BIGINT_PK = sa.BigInteger().with_variant(sa.Integer(), "sqlite")
+
+
+class LifestyleLimit(Base):
+    """A self-set ceiling on a lifestyle metric (coffee, alcohol, ...)."""
+
+    __tablename__ = "lifestyle_limit"
+
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    metric: Mapped[str] = mapped_column(
+        _pg_enum("lifestyle_metric_enum", "water", "alcohol", "coffee",
+                 "tea", "smoking", "energy_drink", "other_drink",
+                 "caffeine_mg", "ethanol_g", "drink_volume_ml"),
+        nullable=False,
+    )
+    effective_from: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+    limit_value: Mapped[float | None] = mapped_column(sa.Numeric, nullable=True)
+    unit: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+
+
+class BodyMeasurementGoal(Base):
+    """A weight/BMI/body-fat target, with the direction the reader chose."""
+
+    __tablename__ = "body_measurement_goal"
+
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    type: Mapped[str] = mapped_column(
+        _pg_enum("body_measurement_type_enum", "weight", "height", "bmi",
+                 "body_fat", "muscle_mass", "water", "bone_mass",
+                 "visceral_fat"),
+        nullable=False,
+    )
+    effective_from: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+    goal_value: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    direction: Mapped[str | None] = mapped_column(
+        _pg_enum("goal_direction_enum", "lose", "gain", "maintain"),
+        nullable=True,
+    )
+    unit: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
+
+
+class SahhaGoal(Base):
+    """A target on a wearable-derived metric (steps, sleep, ...)."""
+
+    __tablename__ = "sahha_goal"
+
+    id: Mapped[int] = mapped_column(_BIGINT_PK, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False)
+    metric: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    effective_from: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
+    goal_value: Mapped[float | None] = mapped_column(sa.Numeric, nullable=True)
+    unit: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)

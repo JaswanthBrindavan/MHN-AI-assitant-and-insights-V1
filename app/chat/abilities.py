@@ -820,13 +820,6 @@ def parse_report_param_ask(message: str) -> str | None:
     return term
 
 
-def wants_param_trend(message: str) -> bool:
-    """True when the reader asked to SEE it over time, not just its value."""
-    low = (message or "").lower()
-    return any(w in low for w in ("graph", "chart", "trend", "over time",
-                                  "history", "progress"))
-
-
 def param_tokens(text: str) -> set[str]:
     """Lowercased alphanumeric tokens with a plural-tolerant singular form."""
     tokens = set()

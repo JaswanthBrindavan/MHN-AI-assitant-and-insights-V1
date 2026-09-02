@@ -84,6 +84,10 @@ from app.coredata.service import (
     resolve_family_member,
     resolve_family_member_by_name,
     sahha_meta,
+    target_phrase,
+    targets,
+    thp_series,
+    thp_series_names,
     vital_series,
     wearable_display,
     wearable_latest,
@@ -1186,6 +1190,7 @@ async def handle_summary_query(
     labs = await _section(
         db, failed, "labs", lambda: recent_lab_values(db, user_id)
     )
+    goals = await _section(db, failed, "goals", lambda: targets(db, user_id))
 
     lines: list[str] = []
     missing: list[str] = []
@@ -1259,6 +1264,15 @@ async def handle_summary_query(
         "Recent lab values: "
         + _listed([f"{v.name} {v.value} {v.unit or ''}".strip() for v in labs])
         + "." if labs else None,
+    )
+    # Targets the reader set for themselves, in the app. Stated as what they
+    # chose, never measured against what they did - this is a summary of the
+    # record, and "you are over your coffee limit" is a verdict.
+    _place(
+        "goals you set", "goals",
+        "Targets you have set: "
+        + _listed([target_phrase(t) for t in goals]) + "."
+        if goals else None,
     )
 
     if not lines and not unavailable:
@@ -1872,6 +1886,60 @@ def _is_abnormal_flag(flag: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Dynamic report-parameter asks ("what is my basophils")
 # --------------------------------------------------------------------------- #
+# The trends feed speaks mhn-spring's zone vocabulary, NOT the abnormal-flag
+# vocabulary a report carries. They overlap in nothing: `_is_abnormal_flag`
+# treats any string it does not recognise as abnormal, so an "ideal" reading —
+# a good result — would have been handed back as "flagged ideal against the
+# printed reference range". Translate deliberately, and say NOTHING for a zone
+# we do not recognise (including their explicit "unknown") rather than guess a
+# side. A wrong reassurance and a wrong alarm are both wrong.
+_SERIES_STATUS = {
+    "warning_low": "low",
+    "warning_high": "high",
+    "ideal": "normal",
+    "normal": "normal",
+}
+
+
+async def _series_history(
+    db: AsyncSession, user_id: uuid.UUID, want: set[str]
+) -> list[tuple] | None:
+    """The asked parameter's full history from mhn-spring's trends feed.
+
+    Preferred over walking ``reports`` because it is the SAME source the mobile
+    apps graph from: every reading rather than the newest 20 documents, and
+    grouped on their canonical ``thp_key`` instead of the raw printed spelling,
+    so "HbA1c" and "HBA1C" are one line here as they are there.
+
+    Returns None — not an empty list — when the feed has nothing for this
+    reader, so the caller falls back to the per-document path. The feed is
+    written by a scheduled ingester upstream; if it has not run, or has not yet
+    caught up with a new report, the older path still answers.
+    """
+    candidates = await thp_series_names(db, user_id)
+    if not candidates:
+        return None
+    matches = [c for c in candidates if want <= param_tokens(c[2])]
+    if not matches:
+        return None
+    # Shortest display name wins: "Vitamin D" over "Vitamin D 25-Hydroxy" for
+    # a bare "vitamin d", the same preference the per-document path gets for
+    # free by taking the first match in a newest-first walk.
+    series = await thp_series(db, user_id, min(matches, key=lambda c: len(c[2]))[0])
+    if series is None or not series.readings:
+        return None
+
+    history: list[tuple] = []
+    for r in reversed(series.readings):        # newest-first, as callers expect
+        flag = _SERIES_STATUS.get(r.status or "", "")
+        history.append((
+            r.at, r.value, r.unit or series.unit or "", series.name, flag,
+            _is_abnormal_flag(flag) if flag else False,
+            r.at.strftime("%d %b %Y") if r.at else "date unknown",
+        ))
+    return history
+
+
 async def handle_report_param_ask(
     db: AsyncSession, user_id: uuid.UUID, message: str
 ) -> dict | None:
@@ -1886,15 +1954,19 @@ async def handle_report_param_ask(
     if not want:
         return None
 
+    history = await _series_history(db, user_id, want) or []
+
     rows = (
-        await db.execute(
-            select(Report)
-            .where(Report.user_id == user_id, Report.content.is_not(None))
-            .order_by(Report.created_at.desc().nulls_last(), Report.id.desc())
-            .limit(20)
-        )
-    ).scalars().all()
-    history: list[tuple] = []
+        [] if history else
+        (
+            await db.execute(
+                select(Report)
+                .where(Report.user_id == user_id, Report.content.is_not(None))
+                .order_by(Report.created_at.desc().nulls_last(), Report.id.desc())
+                .limit(20)
+            )
+        ).scalars().all()
+    )
     for r in rows:
         ai = (r.content or {}).get("ai") or {}
         results = ((ai.get("extraction") or {}).get("results")) or []

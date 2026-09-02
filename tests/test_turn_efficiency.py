@@ -227,7 +227,12 @@ MAX_QUERIES_PER_TURN = 28
 # ORDINARY turn nothing -- both parsers run before any query and decline.
 MAX_QUERIES_PER_CORRELATION_TURN = 14
 
-MAX_QUERIES_PER_SUMMARY_TURN = 34
+# 35, raised from 34 when the summary gained a "targets you set" section.
+# Measured, not guessed: the three tables behind it (lifestyle_limit,
+# body_measurement_goal, sahha_goal) share one shape and are read with a single
+# UNION ALL, so a whole new section of the record costs exactly one query. Read
+# separately it was three, which is the read this budget exists to catch.
+MAX_QUERIES_PER_SUMMARY_TURN = 35
 
 
 async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):
