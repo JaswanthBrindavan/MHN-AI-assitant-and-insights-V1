@@ -58,6 +58,7 @@ FLYWAY_TABLES = {
     # Created in V6, gains actor_user_id in V21 — the case _added_columns
     # exists for.
     "job_runs": "V6__davi_ai_tables.sql",
+    "pattern_artifacts": "V43__davi_pattern_artifacts.sql",
 }
 
 # Migrations that create no table, so there is nothing for the column-parity

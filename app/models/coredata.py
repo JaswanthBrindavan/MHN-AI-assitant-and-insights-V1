@@ -69,6 +69,7 @@ COREDATA_TABLES = {
     "period_tracking",
     "sahha_daily_total",
     "sahha_weekly_total",
+    "mood_log",
 }
 
 
@@ -487,6 +488,39 @@ class FamilyFileAccess(Base):
     resource_type: Mapped[str] = mapped_column(sa.String(32), nullable=False)
     resource_id: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     allowed: Mapped[bool] = mapped_column(sa.Boolean, nullable=False)
+
+
+class MoodLog(Base):
+    """One mood entry per user per day. Read-only.
+
+    ``score`` is the slider stop, 1-10, higher being more pleasant. The seven
+    display bands live in mhn-spring's ``MoodScale`` and are deliberately NOT
+    mapped: their own comment says a score is orderable and averageable and a
+    band is not, so anything comparing days must use the score.
+
+    ``factors`` is a list of MoodFactor codes, and an EMPTY array is a real
+    answer — "I logged a score and skipped the chips" — not a missing one.
+    Anything counting factors has to use entries-with-factors as its
+    denominator, per the column's own comment in the Flyway chain.
+    """
+
+    __tablename__ = "mood_log"
+
+    id: Mapped[int] = mapped_column(
+        sa.BigInteger().with_variant(sa.Integer(), "sqlite"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    log_date: Mapped[date] = mapped_column(sa.Date, nullable=False)
+    score: Mapped[int] = mapped_column(sa.SmallInteger, nullable=False)
+    factors: Mapped[list | None] = mapped_column(
+        sa.ARRAY(sa.String).with_variant(sa.JSON(), "sqlite"), nullable=True
+    )
+    created_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
 
 
 class TraditionalHealthParameter(Base):

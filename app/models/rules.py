@@ -7,6 +7,7 @@ clinician sign-off.
 from __future__ import annotations
 
 import uuid
+from datetime import date
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
@@ -74,4 +75,47 @@ class InsightArtifact(Base, UUIDPrimaryKey, CreatedAt):
     superseded_by: Mapped[uuid.UUID | None] = mapped_column(
         sa.ForeignKey("insight_artifacts.id"), nullable=True
     )
+    recompute_reason: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+
+
+class PatternArtifact(Base, UUIDPrimaryKey, CreatedAt):
+    """One computed behaviour pattern, stored so reads never compute.
+
+    Mirrors ``InsightArtifact`` deliberately, because the invariant is the
+    same one: "only the nightly sweep creates artifacts; the read path serves
+    stored rows". `/api/v1/patterns` was computing ~14 queries on every screen
+    load before this existed.
+
+    ``content_hash`` covers the finding, not the moment it was taken, so a day
+    where nothing changed produces NO new row. That is what makes day-wise
+    history affordable: a row appears the day a pattern actually moves, rather
+    than 7 pairs x 365 days x every reader.
+    """
+
+    __tablename__ = "pattern_artifacts"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(sa.Uuid, nullable=False, index=True)
+    #: `exposure__outcome__lag` — the route id the detail screen uses.
+    pattern_key: Mapped[str] = mapped_column(sa.String(96), nullable=False, index=True)
+    exposure: Mapped[str] = mapped_column(sa.String(32), nullable=False)
+    outcome: Mapped[str] = mapped_column(sa.String(48), nullable=False)
+    lag: Mapped[str] = mapped_column(sa.String(16), nullable=False)
+    #: False when the minimum-days gate refused. Stored rather than dropped:
+    #: the "not yet" card is built from these counts.
+    enough_data: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    days_with: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    days_without: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    mean_with: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    mean_without: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    difference: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
+    favourable: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    #: The rendered card, so the read path does no wording work either.
+    card: Mapped[dict | None] = mapped_column(JSONColumn, nullable=True)
+    content_hash: Mapped[str] = mapped_column(sa.String(64), nullable=False, index=True)
+    # active | superseded
+    status: Mapped[str] = mapped_column(sa.String(20), nullable=False, default="active")
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        sa.Uuid, sa.ForeignKey("pattern_artifacts.id"), nullable=True
+    )
+    computed_for: Mapped[date] = mapped_column(sa.Date, nullable=False)
     recompute_reason: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)

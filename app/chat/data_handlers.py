@@ -1067,6 +1067,60 @@ def _lifestyle_chart(totals: dict, label: str, period: str) -> dict | None:
     )
 
 
+async def _lifestyle_week_chart(
+    db: AsyncSession, user_id: uuid.UUID, log_type: str, unit: str,
+    *, week_start: date,
+) -> dict | None:
+    """The daily bars for exactly the week a manual tracker's sentence names.
+
+    The lifestyle twin of ``_wearable_chart``, and it exists because a manual
+    tracker had no chart at all: ``handle_tracker_query`` built a ``visual``
+    only on its wearable branch, so "how did I sleep this week" drew a graph
+    and "how much water did I drink this week" -- the same question about a
+    number the reader typed in themselves -- drew nothing. ``_lifestyle_chart``
+    is not this: it is one bar per TRACKER for the summary, not one bar per
+    day for one tracker.
+
+    Reads ``lifestyle_daily_total`` through ``lifestyle_days``, which is the
+    table ``lifestyle_calendar_total`` sums for the sentence above the chart,
+    so the bars add up to the figure the reader is being shown. Unit-safe
+    without a decision: the platform stores exactly one unit per metric and
+    rejects any other, so a single metric's days never mix two.
+
+    Every day of the week gets a slot, ``None`` where nothing was logged --
+    the run of slots is the axis for both mobile clients, and an unlogged day
+    is not a logged zero.
+
+    The seven days are laid out from ``week_start``, NOT from the ask's own
+    span. ``calendar_window("this_week")`` is week-to-DATE -- on a Wednesday it
+    is four days -- and charting that would draw a four-bar week under a title
+    naming a seven-day one, and would move the axis every morning. The days
+    not yet reached are simply slots with nothing in them, which is what the
+    wearable chart does with the same week.
+    """
+    days = [week_start + timedelta(days=i) for i in range(7)]
+    by_day = await lifestyle_days(
+        db, user_id, log_type,
+        since=week_start, until=week_start + timedelta(days=7),
+    )
+    values: list[float | None] = [by_day.get(d) for d in days]
+    if sum(v is not None for v in values) < 2:
+        # One bar is not a trend, and chart_payload pads a flat single-bar
+        # series by +/-1, which looks like data. Same rule as the wearable.
+        return None
+    return chart_payload(
+        "bar",
+        f"{log_type.replace('_', ' ')} — week of {week_start:%d %b %Y}",
+        [d.strftime("%d %b") for d in days],
+        values,
+        unit=unit,
+        source="lifestyle",
+        metric=log_type,
+        grain="day",
+        window_days=7,
+    )
+
+
 async def handle_summary_query(
     db: AsyncSession, user_id: uuid.UUID, message: str,
     *,
@@ -2422,6 +2476,15 @@ async def handle_tracker_query(
             total, logged_days = await lifestyle_calendar_total(
                 db, user_id, query.key, since=span[0], until=span[1]
             )
+            # The week the sentence names, one bar per day. Only for a week
+            # ask: `yesterday` is a single day, and a chart titled as a week
+            # would not be the days its number came from. The unit is taken
+            # from the total rather than looked up again, so the axis and the
+            # sentence can never name two different units.
+            if total is not None and query.period in ("this_week", "last_week"):
+                visual = await _lifestyle_week_chart(
+                    db, user_id, query.key, total.unit, week_start=span[0],
+                )
         else:
             total = (await lifestyle_totals(db, user_id, since)).get(query.key)
         # An empty window is not an empty record. When the asked-about period
