@@ -41,8 +41,9 @@ import asyncio
 import os
 import sys
 from collections import defaultdict
+from typing import Any, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.coredata.service import _VESSEL_ML, LIFESTYLE_UNITS
@@ -138,7 +139,10 @@ async def main() -> int:
                         unit=LIFESTYLE_UNITS[log_type][0],
                     )
                 )
-                written += result.rowcount or 0
+                # `Session.execute` is typed `Result[Any]`; an UPDATE really
+                # returns a `CursorResult`, which is the only one carrying
+                # `rowcount`. The cast is the narrowing, not a silencing.
+                written += cast("CursorResult[Any]", result).rowcount or 0
         await db.commit()
         print(f"Converted {written} rows. Ambiguous rows were left untouched.")
 
