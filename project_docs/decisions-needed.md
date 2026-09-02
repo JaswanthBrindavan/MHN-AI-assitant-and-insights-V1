@@ -703,3 +703,35 @@ and it is consulted through `file_access_exclusions` instead).
   asks mhn-spring for adherence instead of computing it, because their window
   and timezone rules are not the obvious ones. Same principle the
   `user_thp_series` change follows — agree with the app the reader is holding.
+
+
+---
+
+## D27 — A second symptom source the chat cannot see
+
+Found by the `mhn-android-4b` session, not by my audit, and it is the kind of
+miss that audit existed to catch: I listed `period_day_log` among the unmapped
+user-scoped tables but did not notice it carries `symptoms text[]`.
+
+So there are two places a reader's symptoms live:
+
+* `symptom_logs` — what they told the CHAT. Now written (D26).
+* `period_day_log.symptoms` — codes ticked in cycle tracking, written by
+  mhn-spring since their V5, never read here. Independent of bleeding: a day
+  with no flow and three symptoms is the ordinary mid-cycle entry.
+
+The health summary's symptom section is window-scoped, so an empty one says
+"Nothing logged in the <period> for: symptoms you reported" and never asserts
+an absence it did not check — the wording is not wrong. But a reader who logs
+symptoms only in cycle tracking sees nothing of them here.
+
+Not built, deliberately: the other session was mid-flight in
+`app/patterns/service.py` in the SAME working tree, and two sessions editing
+one file in one checkout is how work gets lost. Proposed to them that their
+`_symptoms_on(db, user_id, day)` grow a range-scoped sibling, which the summary
+can then call.
+
+One thing to solve once, wherever the merge lands: the codes are mhn-spring's
+`PeriodSymptom` enum (`lower_back_pain`) while `symptom_logs.symptom` holds the
+phrase the reader typed (`lower back pain`). Without a de-dup on normalised
+form the reader sees both spellings of one complaint side by side.
