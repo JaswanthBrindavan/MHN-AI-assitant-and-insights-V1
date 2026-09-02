@@ -596,18 +596,59 @@ reaches the handler through the legacy path, which can see "my watch".
 
 ---
 
-## D25 — what is still open
+## D25 — what was still open, and what happened to it
 
-Not blocking, but you should know:
+All four are now closed or handed over. Recorded because three of them turned
+up something that was not in the original list.
 
-1. ~~**HDL grades backwards, and `ThpAgeRange.sex` is unmapped**~~ — fixed in
-   800f9cd, see D12.
-2. ~~**"does my metformin affect my sleep"** is answered as a sleep lookup~~ —
-   fixed in fdd4647. The catalogue check runs in the handler (the parser is
-   pure and cannot query), gated behind `medication_candidates()` so it costs
-   nothing on an ordinary turn, and checks the reader's own medication list
-   before `medicine_master` — that list is populated by definition, whereas
-   the catalogue can be empty in an environment that never ran V19.
-3. **`pg`-marked coexistence tests** have still never been run on this machine.
-4. **The reference catalogue has junk**: `HDL/LDL Ratio` has
-   `ideal = 499.7, high_warn = 999`.
+**1. HDL and `ThpAgeRange.sex`** — fixed in 800f9cd. See D12.
+
+**2. "does my metformin affect my sleep"** — fixed in fdd4647. The catalogue
+check runs in the handler (the parser is pure and cannot query), gated behind
+`medication_candidates()` so an ordinary turn spends no query, and it checks
+the reader's own medication list before `medicine_master` — that list is
+populated by definition, the catalogue can be empty in an environment that
+never ran V19.
+
+**3. The `pg` coexistence tests had never run** — fixed in 421c54f, and this
+one was worse than "not run on this machine".
+
+They **could not have passed anywhere**. `db/existing_schema.sql` was composed
+with Davi's own adopted migrations held out, while mhn-spring's V14 and V19
+both REFERENCE `drug_reference`, which Davi's V6 creates — so the file had no
+loadable form and the test threw before its first assertion. Every
+"coexistence is verified" line in CLAUDE.md and the README rested on that.
+
+The premise was wrong, not just the file: production applies ONE ordered chain,
+so "lay down their schema, then run Davi's chain on top" describes nothing that
+happens anywhere. The dump is now the whole chain and the tests check what is
+true of it.
+
+Two things fell out on the way:
+
+* **Seven columns come from Hibernate, not Flyway.** `insurance.from_date` and
+  `to_date`, `family_connect.req_read` and three more exist in production while
+  no migration creates them — and V25 builds an index on `insurance.to_date`,
+  so the chain alone cannot build a loadable schema. Found by diffing the live
+  database against everything the chain creates.
+* **A third phantom column, the V28/V35 class again.** `period_tracking`
+  `is_predicted` and `symptoms` were mapped and exist in NO environment. The
+  parity guard EXEMPTED them as "ddl-auto columns the dump cannot see", which
+  was false — and that exemption was the only reason it stayed green while
+  `cycle_snapshot` filtered on `is_predicted`, raised UndefinedColumn on every
+  call, and **returned an empty cycle history in production**. The test that
+  covered it passed only against the sqlite schema the ORM built from its own
+  wrong model. `DDL_AUTO_COLUMNS` is now empty: an exemption in a guard like
+  that is a claim about the world and needs checking against it.
+
+**4. The junk `HDL/LDL Ratio` row** (`ideal = 499.7, high_warn = 999`) — it is
+mhn-spring's data and still wants fixing at source, but Davi now defends
+itself. `_plausible` rejects a band that shares no values with Davi's own
+reviewed range and falls back to the constants. Verified against the live
+catalogue: all eleven reachable metrics overlap, so nothing real is rejected.
+
+**Still yours, deliberately:** `lifestyle_log` rows Davi wrote before the unit
+fix carry `quantity` in glasses. `scripts/audit_lifestyle_units.py` reports
+them and converts water only — alcohol records no drink, so a "glass" could be
+wine or beer and converting it would invent the reader's evening. It writes
+only with `--repair --yes`, because that table is mhn-spring's.
