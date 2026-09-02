@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.common import utcnow
 from app.models.rules import PatternArtifact
 from app.patterns.core import Observation, content_hash
+from app.patterns.facts import fact_for as lookup_fact
 from app.patterns.render import to_card
 from app.patterns.service import PAIRS, compute
 
@@ -49,14 +50,15 @@ async def recompute_patterns(
     *,
     reason: str = "nightly_sweep",
     today: date | None = None,
-    fact_for=None,
+    with_facts: bool = True,
 ) -> int:
     """Recompute every pair for one reader. Returns rows written.
 
-    ``fact_for`` is an optional callable ``(exposure, outcome) -> str | None``
-    supplying the general, clinician-reviewed sentence. It is injected rather
-    than imported so this module stays testable without the corpus, and so a
-    corpus lookup failing can never cost the card.
+    The general, clinician-reviewed sentence is looked up per pair unless
+    ``with_facts`` is False. It is retrieved by code from the same Master
+    Condition Profiles the chat quotes, never generated: if the corpus has
+    nothing, the card carries no "in general" line. A missing fact costs a
+    line; a wrong one costs the reader's trust.
     """
     observations = await compute(db, user_id, today=today)
     written = 0
@@ -80,11 +82,8 @@ async def recompute_patterns(
             continue
 
         fact = None
-        if fact_for is not None:
-            try:
-                fact = fact_for(o.exposure, o.outcome)
-            except Exception:  # noqa: BLE001 — a fact is a nicety, not the card
-                logger.warning("pattern fact lookup failed", exc_info=True)
+        if with_facts:
+            fact = await lookup_fact(db, o.exposure, o.outcome)
 
         fresh = PatternArtifact(
             user_id=user_id,

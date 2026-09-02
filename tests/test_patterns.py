@@ -293,13 +293,141 @@ async def test_the_general_fact_is_stored_with_the_card(db_session):
     from app.patterns.engine import active_patterns, recompute_patterns
 
     await _seed(db_session)
-    await recompute_patterns(
-        db_session, USER, reason="test",
-        fact_for=lambda e, o: "caffeine is a stimulant." if e == "coffee" else None,
-    )
+    from app.models.chat import McpChunk
+
+    # A reviewed profile sentence for the coffee/sleep pair.
+    db_session.add(McpChunk(
+        condition_code="MC287", chunk_type="lifestyle_triggers",
+        content=(
+            "Caffeine is a stimulant that blocks adenosine receptors and can "
+            "delay sleep onset and shorten total sleep time when taken late "
+            "in the day."
+        ),
+    ))
+    await db_session.flush()
+    await recompute_patterns(db_session, USER, reason="test")
     cards = [r.card or {} for r in await active_patterns(db_session, USER)]
     coffee = [c for c in cards if str(c.get("key", "")).startswith("coffee__sleep")]
     assert coffee
     card = coffee[0]
     if card.get("enough_data"):
         assert "in general:" in str(card.get("detail", "")).lower()
+
+
+# --------------------------------------------------------------------------- #
+# Screen 5 — a reading that moved against the reader's OWN baseline
+# --------------------------------------------------------------------------- #
+def _run(base: float, recent: float, n: int = 20):
+    d0 = date(2026, 8, 1)
+    return (
+        [DayValue(d0 + timedelta(days=i), base) for i in range(n)]
+        + [DayValue(d0 + timedelta(days=n + i), recent) for i in range(3)]
+    )
+
+
+def test_a_sustained_move_against_your_own_baseline_is_surfaced():
+    from app.patterns.baseline import detect, to_card
+
+    d = detect("heart_rate_resting", _run(62.0, 71.0))
+    assert d is not None
+    card = to_card(d)
+    # Both figures stated. This is arithmetic on their own record, not a band.
+    assert "71 bpm" in card["headline"] and "62 bpm" in card["headline"]
+    assert "your usual" in card["headline"]
+    assert "isn't a diagnosis" in card["note"]
+
+
+def test_it_never_claims_a_norm():
+    """The distinction that makes this card allowed: everywhere else a
+    wearable number is never graded, because there are no reference ranges for
+    sleep or HRV. Comparing someone to THEMSELVES is a different statement."""
+    from app.patterns.baseline import detect, to_card
+
+    found = detect("heart_rate_resting", _run(62.0, 71.0))
+    assert found is not None
+    card = to_card(found)
+    text = (card["headline"] + " " + card["note"]).lower()
+    for claim in ("normal range", "typical range", "too high", "too low",
+                  "abnormal", "elevated for your age", "unhealthy"):
+        assert claim not in text, claim
+
+
+def test_only_the_direction_worth_a_look_fires():
+    from app.patterns.baseline import detect
+
+    # A resting heart rate FALLING, or an HRV RISING, is not a concern.
+    assert detect("heart_rate_resting", _run(62.0, 54.0)) is None
+    assert detect("heart_rate_variability_sdnn", _run(40.0, 52.0)) is None
+    # ...but the other way round is.
+    assert detect("heart_rate_variability_sdnn", _run(52.0, 40.0)) is not None
+
+
+def test_a_single_odd_day_does_not_fire():
+    """A run matters; one bad night does not. RUN_DAYS is why."""
+    from app.patterns.baseline import detect
+
+    d0 = date(2026, 8, 1)
+    series = [DayValue(d0 + timedelta(days=i), 62.0) for i in range(22)]
+    series.append(DayValue(d0 + timedelta(days=22), 80.0))
+    assert detect("heart_rate_resting", series) is None
+
+
+def test_the_baseline_excludes_the_run_that_is_being_judged():
+    """Comparing a run against a mean it is part of drags the mean toward the
+    run and hides the very change the card exists to notice."""
+    from app.patterns.baseline import detect
+
+    d = detect("heart_rate_resting", _run(62.0, 71.0))
+    assert d is not None
+    assert d.baseline_mean == 62.0        # not pulled up by the recent days
+
+
+def test_too_little_history_is_not_a_baseline():
+    from app.patterns.baseline import detect
+
+    assert detect("heart_rate_resting", _run(62.0, 71.0, n=5)) is None
+
+
+async def test_attention_runs_over_the_watched_metrics(db_session):
+    from app.patterns.service import attention
+
+    items = await attention(db_session, uuid.uuid4())
+    assert isinstance(items, list)        # no data: no cards, no crash
+
+
+# --------------------------------------------------------------------------- #
+# Screen 2 — "This week"
+# --------------------------------------------------------------------------- #
+def test_the_trend_is_a_direction_not_a_verdict():
+    """The design's caption reads "Recovery trending up - Great job! Your body
+    is recovering well". The first half is a fact and is kept; the second is a
+    grade on a wearable reading, which this product does not do."""
+    from app.patterns.service import trend
+
+    d0 = date(2026, 8, 1)
+    rising = [DayValue(d0 + timedelta(days=i), 360.0) for i in range(7)] + [
+        DayValue(d0 + timedelta(days=7 + i), 420.0) for i in range(7)
+    ]
+    t = trend(rising)
+    assert t and t["direction"] == "up"
+    assert set(t) == {"direction", "this_week_mean", "last_week_mean",
+                      "days_this_week"}
+    # No adjective anywhere in it.
+    assert all(not isinstance(v, str) or v in ("up", "down", "steady")
+               for v in t.values())
+
+
+def test_a_flat_fortnight_is_steady_not_an_achievement():
+    from app.patterns.service import trend
+
+    d0 = date(2026, 8, 1)
+    flat = [DayValue(d0 + timedelta(days=i), 400.0) for i in range(14)]
+    t = trend(flat)
+    assert t is not None and t["direction"] == "steady"
+
+
+def test_a_short_history_has_no_trend():
+    from app.patterns.service import trend
+
+    d0 = date(2026, 8, 1)
+    assert trend([DayValue(d0 + timedelta(days=i), 400.0) for i in range(4)]) is None

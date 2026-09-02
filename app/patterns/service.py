@@ -267,3 +267,83 @@ async def compute(
             )
             record_fail_open("patterns_pair")
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Screen 2 — "This week", and screen 5 — "Worth a look"
+# --------------------------------------------------------------------------- #
+#: What the weekly chart can show. Each is a daily series the reader already
+#: has; nothing here is derived or modelled.
+TREND_METRICS = (
+    "sleep_duration", "steps", "heart_rate_resting",
+    "heart_rate_variability_sdnn",
+)
+
+
+async def daily_series(
+    db: AsyncSession, user_id, metric: str, days: int = 14,
+    *, today: date | None = None,
+) -> list[DayValue]:
+    """The last `days` complete days for one metric, oldest first."""
+    end = today or utcnow().date()
+    start = end - timedelta(days=days)
+    series = await _outcome_series(db, user_id, metric, start, end)
+    return sorted(series, key=lambda p: p.day)
+
+
+def trend(series: list[DayValue]) -> dict | None:
+    """This week against the one before it. A direction, never a verdict.
+
+    The design's caption is "Recovery trending up — Great job! Your body is
+    recovering well this week." The first half is a fact about the numbers and
+    is kept. The second is a grade on a wearable reading, which this product
+    does not do anywhere else, so it is not written here either.
+    """
+    if len(series) < 8:
+        return None
+    ordered = sorted(series, key=lambda p: p.day)
+    this_week, last_week = ordered[-7:], ordered[-14:-7]
+    if len(last_week) < 3 or len(this_week) < 3:
+        return None
+    now = sum(p.value for p in this_week) / len(this_week)
+    before = sum(p.value for p in last_week) / len(last_week)
+    if before == 0:
+        return None
+    change = (now - before) / abs(before)
+    if abs(change) < 0.05:
+        direction = "steady"
+    else:
+        direction = "up" if change > 0 else "down"
+    return {
+        "direction": direction,
+        "this_week_mean": round(now, 1),
+        "last_week_mean": round(before, 1),
+        "days_this_week": len(this_week),
+    }
+
+
+async def attention(
+    db: AsyncSession, user_id, *, today: date | None = None
+) -> list[dict]:
+    """Screen 5 — readings that have moved against the reader's own baseline.
+
+    Its own SAVEPOINT per metric for the same reason the pairs have one: a
+    missing rollup must not blank the tab.
+    """
+    from app.patterns.baseline import WATCHED
+    from app.patterns.baseline import detect as _detect
+    from app.patterns.baseline import to_card as _card
+
+    out: list[dict] = []
+    for metric in WATCHED:
+        try:
+            async with db.begin_nested():
+                series = await daily_series(db, user_id, metric, days=28,
+                                            today=today)
+            found = _detect(metric, series, today=today)
+            if found is not None:
+                out.append(_card(found))
+        except Exception:  # noqa: BLE001 — one metric must not cost the screen
+            logger.warning("attention check failed: %s", metric, exc_info=True)
+            record_fail_open("patterns_attention")
+    return out
