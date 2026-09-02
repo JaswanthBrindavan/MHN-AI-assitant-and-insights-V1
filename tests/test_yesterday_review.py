@@ -471,3 +471,39 @@ async def test_a_symptom_logged_late_evening_lands_on_the_right_day(db_session):
     start, end = _reader_day_bounds(DAY)
     assert start == datetime(2026, 9, 1, 18, 30, tzinfo=UTC)
     assert end == datetime(2026, 9, 2, 18, 30, tzinfo=UTC)
+
+
+async def test_the_card_reads_the_same_day_it_names(db_session):
+    """The regression that shipped and was caught on a phone rather than here.
+
+    An earlier version read the rollups on `utcnow().date() - 1` while naming
+    the reader's yesterday in `as_of`. For the five and a half hours the two
+    anchors differ those are DIFFERENT DAYS, so the card put Monday's figures in
+    a sentence about Tuesday — and only in the evening, which is exactly when
+    nobody is looking.
+
+    One day, and the figures come from it.
+    """
+    from app.models.coredata import LifestyleDailyTotal
+    from app.patterns.service import gather_yesterday
+
+    today = date(2026, 9, 3)
+    yesterday = today - timedelta(days=1)
+
+    # A baseline behind it, then a clearly different figure on the day itself.
+    for offset in range(2, 9):
+        db_session.add(LifestyleDailyTotal(
+            user_id=USER, metric="water", bucket_start=today - timedelta(days=offset),
+            total=2000, entries=4, days_counted=1,
+        ))
+    db_session.add(LifestyleDailyTotal(
+        user_id=USER, metric="water", bucket_start=yesterday,
+        total=400, entries=1, days_counted=1,
+    ))
+    await db_session.flush()
+
+    facts = await gather_yesterday(db_session, USER, today=today)
+
+    assert facts.water_ml is not None, "read a different day than it names"
+    assert facts.water_ml.value == 400
+    assert facts.water_ml.trend is Trend.BELOW

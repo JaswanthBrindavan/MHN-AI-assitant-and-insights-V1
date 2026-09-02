@@ -409,8 +409,11 @@ SPRING_RED_FLAG_SYMPTOMS = frozenset({
 #: `app.tracking.zone`, and that property is **unset in the deployed service**
 #: (`application.properties`: `app.tracking.zone=${TRACKING_ZONE:}`), so it
 #: falls back to the JVM default and those buckets are UTC today. Its own
-#: startup warning says so. Those reads stay on the UTC day — the same anchor
-#: `coredata.service.calendar_window` documents and uses.
+#: startup warning says so. No UTC bucket matches a reader's day exactly, so
+#: those are read on the bucket carrying the SAME DATE — the closest one by a
+#: wide margin, covering 18.5 of the reader's 24 hours against 5.5 for the
+#: bucket before it. Approximate, knowingly, and named as such rather than
+#: dressed up as a match.
 #:
 #: Setting `TRACKING_ZONE=Asia/Kolkata` on the Spring service collapses all of
 #: this into one anchor and is the real fix; it would also stop new rows
@@ -639,21 +642,23 @@ async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = No
     day = end - timedelta(days=1)
     span = YESTERDAY_BASELINE_DAYS
 
-    # ...but the rollups are bucketed on a day mhn-spring resolved in
-    # `app.tracking.zone`, which is unset in the deployed service and therefore
-    # UTC. Reading those on the reader's day would ask for a bucket that does
-    # not exist yet for the five and a half hours the two disagree. Until that
-    # property is pinned these are two different days and pretending otherwise
-    # is how the wrong figure ends up in a sentence about the right one.
-    server_day = (today or utcnow().date()) - timedelta(days=1)
+    # The rollups are bucketed on a day mhn-spring resolved in
+    # `app.tracking.zone`, which is unset and therefore UTC — so no bucket
+    # matches the reader's day exactly. The bucket with the SAME DATE is still
+    # far and away the closest one: a reader's 2 Sep runs 1 Sep 18:30Z to 2 Sep
+    # 18:30Z, which the UTC bucket for 2 Sep covers for 18.5 of its 24 hours,
+    # against 5.5 for the bucket before it. An earlier version of this reached
+    # for the previous bucket on the grounds that the rollups are UTC; that is
+    # true and the conclusion was backwards, and it put a Monday figure in a
+    # sentence about Tuesday for the five and a half hours the anchors differ.
+    #
+    # So there is one day here, and `as_of` names the one that was read.
 
     series: dict[str, dict[date, float]] = {}
     for metric in YESTERDAY_METRICS:
         try:
             async with db.begin_nested():
-                got = await daily_series(
-                    db, user_id, metric, days=span + 2, today=server_day + timedelta(days=1),
-                )
+                got = await daily_series(db, user_id, metric, days=span + 2, today=end)
             series[metric] = _by_day(got)
         except Exception:  # noqa: BLE001 — one metric must not blank the card
             logger.warning("yesterday metric failed: %s", metric, exc_info=True)
@@ -662,9 +667,7 @@ async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = No
 
     try:
         async with db.begin_nested():
-            habits = await _habit_totals(
-                db, user_id, server_day - timedelta(days=span), server_day,
-            )
+            habits = await _habit_totals(db, user_id, day - timedelta(days=span), day)
     except Exception:  # noqa: BLE001
         logger.warning("yesterday habits failed", exc_info=True)
         record_fail_open("patterns_yesterday")
@@ -680,13 +683,13 @@ async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = No
 
     def metric_signal(name: str):
         return _signal_for(
-            series.get(name, {}), server_day,
+            series.get(name, {}), day,
             min_change=YESTERDAY_METRICS[name], span=span,
         )
 
     def habit_signal(name: str):
         return _signal_for(
-            habits.get(name, {}), server_day,
+            habits.get(name, {}), day,
             min_change=YESTERDAY_HABITS[name], span=span,
         )
 
