@@ -28,6 +28,13 @@ from app.auth import get_current_user_id
 from app.db import get_db
 from app.patterns.core import MIN_DAYS_PER_GROUP, WINDOW_DAYS
 from app.patterns.engine import active_patterns, recompute_patterns
+from app.patterns.service import (
+    OUTCOMES,
+    TREND_METRICS,
+    attention,
+    daily_series,
+    trend,
+)
 
 router = APIRouter(prefix="/patterns", tags=["patterns"])
 
@@ -78,3 +85,74 @@ async def correlation_detail(
         if card.get("key") == key:
             return card
     raise HTTPException(status_code=404, detail="No such pattern")
+
+
+@router.get("/summary")
+async def summary(
+    metric: str = "sleep_duration",
+    current_user: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Screens 1 and 2 — "Building your baseline" and "This week".
+
+    `building_baseline` is what screen 1 renders: true while no pair has
+    enough days yet. `days_needed` comes from the closest pair rather than a
+    guess, so "3 more nights to unlock" is a real number.
+    """
+    if metric not in TREND_METRICS:
+        raise HTTPException(status_code=400, detail="Unknown metric")
+
+    cards = await _cards(db, current_user)
+    ready = [c for c in cards if c.get("enough_data")]
+    waiting = [c for c in cards if not c.get("enough_data")]
+
+    # How close the nearest pair is to unlocking. Screen 1's progress bar.
+    needed = None
+    if waiting:
+        needed = min(
+            max(0, MIN_DAYS_PER_GROUP - min(
+                int(c.get("days_with") or 0), int(c.get("days_without") or 0)
+            ))
+            for c in waiting
+        )
+
+    series = await daily_series(db, current_user, metric, days=14)
+    label, unit = OUTCOMES[metric][1], OUTCOMES[metric][2]
+    return {
+        "building_baseline": not ready,
+        "days_needed": needed,
+        "this_week": {
+            "metric": metric,
+            "label": label,
+            "unit": unit,
+            # Absent days are simply not here. The client must not zero-fill:
+            # a day the device did not sync is not a day of zero sleep.
+            "series": [
+                {"day": p.day.isoformat(), "value": round(p.value, 1)}
+                for p in series[-7:]
+            ],
+            "trend": trend(series),
+        },
+        # Screen 2 shows the first few and links to the full list.
+        "correlations": ready[:3],
+        "correlations_total": len(ready),
+        "not_yet_total": len(waiting),
+        # Screen 2's "Safety" row, and screen 5 in full.
+        "attention": await attention(db, current_user),
+        "subtitle": SUBTITLE,
+    }
+
+
+@router.get("/attention")
+async def worth_a_look(
+    current_user: uuid.UUID = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Screen 5 — readings that have moved against the reader's OWN baseline.
+
+    Not a grade. Everywhere else a wearable number is never graded, because
+    there are no reference ranges for sleep or HRV and inventing them would be
+    inventing clinical content. This compares the reader to themselves, states
+    both figures, and points at a doctor rather than at a conclusion.
+    """
+    return {"items": await attention(db, current_user)}
