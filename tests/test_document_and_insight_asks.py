@@ -75,6 +75,13 @@ def _content(*, document_id: int, title: str, report_date: str | None):
         ("02 Sep 2026", date(2026, 9, 2)),
         ("2026-09-02", date(2026, 9, 2)),
         ("18-Mar-2026", date(2026, 3, 18)),
+        # A month name between SLASHES. Two of this reader's own reports are
+        # stored this way, and neither this parser nor mhn-ai's own read it —
+        # so the fix above shipped and those documents still listed under
+        # their upload time.
+        ("01/Jul/2026", date(2026, 7, 1)),
+        ("01/July/2026", date(2026, 7, 1)),
+        ("01/Jul/26", date(2026, 7, 1)),
         ("02/09/2026", date(2026, 9, 2)),
         ("28th July 2026", date(2026, 7, 28)),
         ("2026-09-02T17:44:50.475613+00:00", date(2026, 9, 2)),

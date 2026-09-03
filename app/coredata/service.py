@@ -406,6 +406,11 @@ _PRINTED_DATE_FORMATS: tuple[str, ...] = (
     # "18-Mar-2026" — extremely common on Indian lab reports.
     "%d-%b-%Y",
     "%d-%B-%Y",
+    # The same month name with SLASHES — "01/Jul/2026", which two of this
+    # reader's own reports are stored with. No collision with "%d/%m/%Y": that
+    # needs a numeric month and this an alphabetic name.
+    "%d/%b/%Y",
+    "%d/%B/%Y",
     "%B %d %Y",
     "%b %d %Y",
     "%Y%m%d",       # DICOM StudyDate, on imaging reports
@@ -414,6 +419,7 @@ _PRINTED_DATE_FORMATS: tuple[str, ...] = (
     "%d.%m.%y",
     "%d %b %y",
     "%d-%b-%y",
+    "%d/%b/%y",
 )
 
 #: "28th July 2026" — printed on documents and typed by people.
