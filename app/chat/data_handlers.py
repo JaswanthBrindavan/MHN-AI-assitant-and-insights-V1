@@ -492,7 +492,7 @@ async def handle_document_query(
 
     lines = []
     for h in hits:
-        when = h.created_at.strftime("%d %b %Y") if h.created_at else "date unknown"
+        when = h.when.strftime("%d %b %Y") if h.when else "date unknown"
         # Prefer the AI classification title (production scans have no name
         # column); fall back to the file's basename.
         name = h.title or h.filepath.rsplit("/", 1)[-1]
@@ -511,10 +511,10 @@ async def handle_document_query(
             f"{'document is' if len(pending) == 1 else 'documents are'} "
             "still being processed:"
         )
-    if query.wants_date and hits and hits[0].created_at:
+    if query.wants_date and hits and hits[0].when:
         lead = (
             f"The most recent {hits[0].kind} for {owner_label} is from "
-            f"{hits[0].created_at.strftime('%d %b %Y')}."
+            f"{hits[0].when.strftime('%d %b %Y')}."
         )
     # Document cards: everything a client needs to open the file through the
     # EXISTING app flow (Spring GET /files/{resource_type}/{id}/url or the
@@ -533,7 +533,9 @@ async def handle_document_query(
             # never the DB id (mirrors the app's fileSlugFromPath).
             "slug": h.filepath.rsplit("/", 1)[-1],
             "title": h.title or h.filepath.rsplit("/", 1)[-1],
-            "date": h.created_at.isoformat() if h.created_at else None,
+            # The date on the DOCUMENT where the extraction found one, so the
+            # card agrees with the paper rather than with the upload log.
+            "date": h.when.isoformat() if h.when else None,
             "owner": h.owner_label,
             # For family documents: the member's username, so the client can
             # open the in-app family view (/family/{slug}/{section}/{file})
@@ -563,7 +565,9 @@ async def handle_document_query(
             "kinds": list(query.kinds),
             "found": len(hits),
             "documents": [
-                {"kind": h.kind, "id": h.doc_id, "created_at":
+                {"kind": h.kind, "id": h.doc_id,
+                 "date": h.when.isoformat() if h.when else None,
+                 "created_at":
                  h.created_at.isoformat() if h.created_at else None}
                 for h in hits
             ],
@@ -1670,18 +1674,145 @@ async def handle_doctor_consult_query(
 # --------------------------------------------------------------------------- #
 # Document AI results — pulled from mhn-ai, never generated here
 # --------------------------------------------------------------------------- #
+def _document_search_text(hit) -> str:
+    """What a reader could plausibly call this document."""
+    return f"{hit.title or ''} {hit.filepath.rsplit('/', 1)[-1]}".lower()
+
+
+async def _resolve_named_document(
+    db: AsyncSession, user_id: uuid.UUID, query
+) -> tuple[int, str] | dict:
+    """A named / latest / family document → (pipeline document id, title).
+
+    Returns a REPLY DICT instead when nothing qualifies, because each way of
+    failing needs a different sentence: an unknown name, a member who has not
+    shared, and a document whose processing has not run are three different
+    situations and one "not found" for all three tells the reader nothing.
+
+    Family reads go through ``latest_documents``, which applies production's
+    own gate — not private, accepted connection with the owner-side read
+    grant, no per-file exclusion for this viewer. A member's insights are as
+    consent-bound as their documents, and this is the check that says so.
+    """
+    owner_id, owner_label, include_private = user_id, "you", True
+
+    if query.relation or query.owner_name:
+        if query.relation:
+            member = await resolve_family_member(db, user_id, query.relation)
+            asked, owner_label = query.relation, f"your {query.relation}"
+        else:
+            member = await resolve_family_member_by_name(
+                db, user_id, query.owner_name or ""
+            )
+            asked = query.owner_name or ""
+            owner_label = asked.title()
+        if member is None:
+            return {
+                "reply": (
+                    f"I couldn't find a connected family member matching "
+                    f"'{asked}' with document sharing enabled. They may need "
+                    "to accept the family connection or turn on file sharing "
+                    "in the app."
+                ),
+                "action": "none",
+                "provenance": {"path": "ai_result", "asked": asked,
+                               "resolved": False},
+            }
+        owner_id, include_private = member, False
+
+    # Wider than a listing: this is a search over what the reader might name,
+    # not the three most recent.
+    hits = await latest_documents(
+        db, owner_id, list(DOCUMENT_KINDS),
+        owner_label=owner_label, include_private=include_private,
+        viewer_id=user_id, limit=25,
+    )
+    if not hits:
+        return {
+            "reply": (
+                f"I couldn't find any documents for {owner_label} that I can "
+                "access."
+            ),
+            "action": "none",
+            "provenance": {"path": "ai_result", "owner": owner_label,
+                           "found": 0},
+        }
+
+    chosen = hits[0]          # "the latest", and the fallback for a lone match
+    if query.handle:
+        wanted = query.handle.lower().split()
+        matches = [
+            h for h in hits
+            if all(word in _document_search_text(h) for word in wanted)
+        ]
+        if not matches:
+            return {
+                "reply": (
+                    f"I couldn't find a document called '{query.handle}' for "
+                    f"{owner_label}. You can ask me to list the documents and "
+                    "then name one from that list."
+                ),
+                "action": "none",
+                "provenance": {"path": "ai_result", "handle": query.handle,
+                               "found": 0},
+            }
+        if len(matches) > 1 and not query.wants_latest:
+            # Guessing between two documents somebody named ambiguously is
+            # how the wrong report gets read back as theirs.
+            listed = "\n".join(
+                f"• {h.title or h.filepath.rsplit('/', 1)[-1]}"
+                + (f" ({h.when.strftime('%d %b %Y')})" if h.when else "")
+                for h in matches[:5]
+            )
+            return {
+                "reply": (
+                    f"There are {len(matches)} documents matching "
+                    f"'{query.handle}'. Which one did you mean?\n{listed}"
+                ),
+                "action": "none",
+                "provenance": {"path": "ai_result", "handle": query.handle,
+                               "found": len(matches), "ambiguous": True},
+            }
+        chosen = matches[0]
+
+    model, _label = DOCUMENT_KINDS[chosen.kind]
+    row = (
+        await db.execute(select(model).where(model.id == chosen.doc_id))
+    ).scalars().first()
+    title = chosen.title or chosen.filepath.rsplit("/", 1)[-1]
+    ai = (getattr(row, "content", None) or {}).get("ai") or {}
+    document_id = ai.get("document_id")
+    if not isinstance(document_id, int):
+        # Filed, but with no pipeline envelope: an older document from before
+        # automatic processing, or one that never completed. Neither is
+        # something to render as an absent insight.
+        return {
+            "reply": (
+                f"'{title}' doesn't have processed results I can pull — it "
+                "was filed without going through analysis. Opening it in the "
+                "Health Wallet will still show the document itself."
+            ),
+            "action": "none",
+            "provenance": {"path": "ai_result", "kind": chosen.kind,
+                           "id": chosen.doc_id, "document_id": None},
+        }
+    return document_id, title
+
+
 async def handle_ai_result_query(
     db: AsyncSession,
     user_id: uuid.UUID,
     message: str,
     session_id: uuid.UUID | None = None,
 ) -> dict | None:
-    """"Get insights for this report" → mhn-ai's ai-result for the user's
-    most recent upload. Insights for reports; section extraction for other
+    """"Get insights for this report" → mhn-ai's ai-result for the document
+    the reader meant. Insights for reports; section extraction for other
     document types. Davi renders what the pipeline produced — it never
     invents analysis of a document it cannot see."""
-    if not parse_ai_result_query(message):
+    query = parse_ai_result_query(message)
+    if query is None:
         return None
+
     # Resolve "this report" to a pipeline document id, in order:
     #   0. the document the CONVERSATION is about — the last reply in this
     #      session that carried document cards (persisted in message meta);
@@ -1693,7 +1824,17 @@ async def handle_ai_result_query(
     document_id: int | None = None
     name = "your document"
 
-    if session_id is not None:
+    # A document named by title, "the latest one", or a family member's, is
+    # resolved on its own terms — the ladder below answers only the
+    # unqualified "this report", where the conversation says which.
+    named = query.handle or query.wants_latest or query.relation or query.owner_name
+    if named:
+        resolved = await _resolve_named_document(db, user_id, query)
+        if isinstance(resolved, dict):
+            return resolved          # nothing matched; the reply says so
+        document_id, name = resolved
+
+    if document_id is None and session_id is not None:
         recent = (
             await db.execute(
                 select(ConversationMessage)
@@ -2025,8 +2166,20 @@ async def handle_report_param_ask(
 
     history = await _series_history(db, user_id, want) or []
 
+    # The per-document walk runs unless the series ALREADY holds a trend.
+    #
+    # It used to be skipped whenever the series returned anything at all
+    # (`[] if history else ...`), which quietly capped a reader at one point
+    # whenever the feed had ingested one of their reports and not the rest —
+    # and one point draws no chart. Asking for a graph then returned a single
+    # number, which is the reported "cannot pull the individual THP graphs":
+    # the series row exists, so the richer source was never consulted.
+    #
+    # Below two readings the walk is worth its query; at two or more the series
+    # is authoritative (every reading, canonical key) and the walk would only
+    # duplicate it.
     rows = (
-        [] if history else
+        [] if len(history) >= 2 else
         (
             await db.execute(
                 select(Report)
@@ -2036,7 +2189,17 @@ async def handle_report_param_ask(
             )
         ).scalars().all()
     )
+    # Days the series already accounted for, so a merged history cannot plot
+    # the same reading twice. Compared as DAYS because the two sources disagree
+    # about type: the series stores a `date`, the walk carries the report row's
+    # `datetime`, and the two never compare equal however close they are.
+    seen_days = {
+        (h[0].date() if isinstance(h[0], datetime) else h[0])
+        for h in history if h[0] is not None
+    }
     for r in rows:
+        if r.created_at is not None and r.created_at.date() in seen_days:
+            continue        # already in the series; not a second reading
         ai = (r.content or {}).get("ai") or {}
         results = ((ai.get("extraction") or {}).get("results")) or []
         for item in results:
@@ -2080,7 +2243,24 @@ async def handle_report_param_ask(
     if not history:
         return None
 
-    # `rows` is newest-first, so the head is the latest reading.
+    # Newest first, across BOTH sources.
+    #
+    # Each source is already ordered, but concatenating two ordered lists does
+    # not give an ordered list — with the walk now able to run alongside the
+    # series, the head stopped being the latest reading and `reversed()`
+    # stopped being oldest-first. That would misreport the current value and
+    # draw the trend through shuffled points, so the order is established here
+    # rather than assumed. Undated readings sort last; they still answer "what
+    # is my X" but cannot claim to be the newest.
+    history.sort(
+        key=lambda h: (
+            h[0] is None,
+            -(h[0].timestamp() if isinstance(h[0], datetime)
+              else datetime(h[0].year, h[0].month, h[0].day, tzinfo=UTC).timestamp())
+            if h[0] is not None else 0.0,
+        )
+    )
+
     _, value, unit, test_name, flag, abnormal, when = history[0]
     flag_note = (
         f" It is flagged {flag} against the printed reference range."
@@ -2112,6 +2292,16 @@ async def handle_report_param_ask(
                 f"{first:g} to {last:g} {unit}".rstrip() + f", {direction} "
                 f"than the earliest one here."
             )
+    elif points:
+        # Somebody asked for a trend and there is exactly one result. Saying so
+        # is the answer; returning the number with no chart and no explanation
+        # reads as the chart having failed, which is how this arrived as a bug
+        # report. One reading is not a trend, and no amount of drawing makes
+        # it one.
+        trend_note = (
+            " That is the only result for it on file so far, so there is no "
+            "trend to plot yet — a second one will give it a line."
+        )
 
     return {
         "reply": (
