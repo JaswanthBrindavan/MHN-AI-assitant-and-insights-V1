@@ -25,13 +25,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.common import utcnow
+from app.models.common import (
+    tracking_day_bounds,
+    tracking_today,
+    tracking_zone,
+)
 from app.models.coredata import (
     LifestyleDailyTotal,
     LifestyleLog,
@@ -113,7 +117,7 @@ def window_bounds(today: date | None = None) -> tuple[date, date]:
     Today is EXCLUDED: a day in progress is not a day, and the wearable
     rollups only catch up when Spring reconciles overnight.
     """
-    end = today or utcnow().date()
+    end = today or tracking_today()
     return end - timedelta(days=WINDOW_DAYS), end
 
 
@@ -286,7 +290,7 @@ async def daily_series(
     *, today: date | None = None,
 ) -> list[DayValue]:
     """The last `days` complete days for one metric, oldest first."""
-    end = today or utcnow().date()
+    end = today or tracking_today()
     start = end - timedelta(days=days)
     series = await _outcome_series(db, user_id, metric, start, end)
     return sorted(series, key=lambda p: p.day)
@@ -424,30 +428,44 @@ SPRING_RED_FLAG_SYMPTOMS = frozenset({
 #: observed daylight saving, so +05:30 IS the zone rather than an approximation
 #: of it, and a named zone needs the IANA database, which Windows does not ship
 #: — `ZoneInfoNotFoundError` on any machine without `tzdata`.
-READER_ZONE = timezone(timedelta(hours=5, minutes=30), "IST")
-
-
-def tracking_today() -> date:
-    """Today as the READER's calendar reckons it, not as UTC does.
-
-    +05:30 is always ahead, so for the five and a half hours before midnight UTC
-    the two name different days — and a card about "yesterday" that picks the
-    wrong one is wrong for every reader who opens it in that window.
-    """
-    return datetime.now(READER_ZONE).date()
-
-
-def _reader_day_bounds(day: date) -> tuple[datetime, datetime]:
-    """The UTC instants a reader's calendar day starts and ends at.
-
-    For the source that is a TIMESTAMP rather than a calendar date:
-    `symptom_logs.created_at` is UTC, so `date(created_at)` is the UTC day, and
-    comparing that to a reader's day is the same mistake pointing the other way.
-    A half-open range converted from the zone is exact.
-    """
-    start = datetime.combine(day, time.min, tzinfo=READER_ZONE)
-    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
-
+# Moved to `app/models/common.py`, beside `utcnow()`, and the offset is now
+# `Settings.tracking_zone_offset_minutes`. Two reasons: `app/coredata/service.py`
+# needs the same anchor and importing it from here would invert the layering,
+# and the value belongs in configuration rather than a constant — assuming a
+# value for another service's property is what caused this whole class.
+#
+# `TRACKING_ZONE=Asia/Kolkata` is SET and LIVE. Spring restarted at
+# 2026-09-03T10:06:24Z (deployment 0f3a4a89) and the
+# `ManualTrackingIndexCheck` warning is gone from a complete startup buffer.
+# That absence is positive confirmation rather than silence: the bean only
+# constructs if `ZoneId.of(value)` parses, `requireKnownZone()` throws unless
+# PostgreSQL knows that exact region name, and the WARN fires only when the
+# property is blank — so a successful boot with no WARN means it resolved to a
+# real, PG-known, non-blank zone, and the service variable is the property's
+# only source.
+#
+# So the anchors have collapsed: reader-supplied dates, reader-facing
+# timestamps and server-resolved buckets all reckon the same day, and the
+# same-date bucket match below is now EXACT rather than the 18.5-of-24 hours
+# approximation it was.
+#
+# The split of names is KEPT anyway. They are distinct in principle and equal
+# only by configuration; collapsing them turns a documented coincidence into an
+# invisible assumption, and the variable can be unset by the same route it was
+# set.
+#
+# **10:06:24Z is a boundary, and it is a SMEAR rather than a line.** Spring's
+# reconcilers DELETE and re-INSERT rather than upserting, over a trailing
+# window only — `ManualTrackingReconciler.WINDOW_DAYS = 3` nightly at 03:15,
+# `SahhaReconciler` 7 at 03:35. So the days nearest the restart get rewritten
+# in IST on the next run, and everything older stays UTC-bucketed permanently
+# (only a hand-run V1 backfill repairs those). The band is ~3 days wide for
+# lifestyle and ~7 for Sahha, and it closes itself rather than creeping.
+#
+# Two windows means TWO boundaries: the two rollups disagree about where the
+# smear ends for four days. Harmless against a 28-day correlation window, and
+# worth knowing before reading a chart that spans it.
+READER_ZONE = tracking_zone()
 
 #: At most this many symptoms are named. Two lines cannot list a whole day.
 MAX_SYMPTOMS = 3
@@ -596,8 +614,8 @@ async def symptoms_between(
             select(SymptomLog.symptom, SymptomLog.risk_level, SymptomLog.created_at)
             .where(
                 SymptomLog.user_id == user_id,
-                SymptomLog.created_at >= _reader_day_bounds(since)[0],
-                SymptomLog.created_at < _reader_day_bounds(until)[1],
+                SymptomLog.created_at >= tracking_day_bounds(since)[0],
+                SymptomLog.created_at < tracking_day_bounds(until)[1],
             )
         )
     ).all()
@@ -643,14 +661,17 @@ async def gather_yesterday(db: AsyncSession, user_id, *, today: date | None = No
     span = YESTERDAY_BASELINE_DAYS
 
     # The rollups are bucketed on a day mhn-spring resolved in
-    # `app.tracking.zone`, which is unset and therefore UTC — so no bucket
-    # matches the reader's day exactly. The bucket with the SAME DATE is still
-    # far and away the closest one: a reader's 2 Sep runs 1 Sep 18:30Z to 2 Sep
-    # 18:30Z, which the UTC bucket for 2 Sep covers for 18.5 of its 24 hours,
-    # against 5.5 for the bucket before it. An earlier version of this reached
-    # for the previous bucket on the grounds that the rollups are UTC; that is
-    # true and the conclusion was backwards, and it put a Monday figure in a
-    # sentence about Tuesday for the five and a half hours the anchors differ.
+    # `app.tracking.zone`, which is now pinned to the same zone this reads in —
+    # so the bucket carrying the SAME DATE is the reader's day exactly, not
+    # merely the closest one. It was an approximation covering 18.5 of 24 hours
+    # while the property was unset, and taking the same-date bucket was the
+    # right call then too: an earlier version reached for the PREVIOUS bucket
+    # on the grounds that the rollups are UTC, which was true and backwards,
+    # and put a Monday figure in a sentence about Tuesday.
+    #
+    # Rows written before 2026-09-03T10:06:24Z are still UTC-bucketed, so for
+    # those the same-date match is the old approximation again. A card about
+    # yesterday never reaches that far back; a 28-day window does.
     #
     # So there is one day here, and `as_of` names the one that was read.
 

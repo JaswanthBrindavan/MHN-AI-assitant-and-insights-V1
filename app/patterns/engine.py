@@ -27,7 +27,7 @@ from datetime import date
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.common import utcnow
+from app.models.common import tracking_today
 from app.models.rules import PatternArtifact
 from app.patterns.core import Observation, content_hash
 from app.patterns.facts import fact_for as lookup_fact
@@ -62,7 +62,10 @@ async def recompute_patterns(
     """
     observations = await compute(db, user_id, today=today)
     written = 0
-    stamp = today or utcnow().date()
+    # The same anchor `compute` just used for its windows. A stamp naming a
+    # different day from the data it summarises is how an artifact ends up
+    # filed under a day it does not describe.
+    stamp = today or tracking_today()
 
     for o in observations:
         digest = _hash_one(o)

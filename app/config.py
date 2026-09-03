@@ -125,6 +125,27 @@ class Settings(BaseSettings):
     # 0 disables a sweep entirely, for an operator who wants to stage it.
     retention_batch_size: int = 5000
 
+    # --- day boundaries ---------------------------------------------------
+    # mhn-spring resolves a CALENDAR DAY at write time for every rollup
+    # (`lifestyle_daily_total.bucket_start`, `sahha_daily_total`,
+    # `lifestyle_limit.effective_from`, ...), using its `app.tracking.zone`
+    # property. Davi must read those buckets in the SAME zone or it asks for
+    # the wrong day for the hours the two disagree.
+    #
+    # This is a SETTING rather than a constant because the whole bug class
+    # came from this repo assuming a value for another service's property.
+    # It was unset in production — Spring fell back to Etc/UTC and warned
+    # about it on every boot — until it was pinned to Asia/Kolkata. If it
+    # moves again, this moves with it, in one place, without a code change.
+    #
+    # Minutes rather than an IANA name on purpose: `ZoneInfo("Asia/Kolkata")`
+    # raises `ZoneInfoNotFoundError` on any machine without the `tzdata`
+    # package, Windows included. India has never observed daylight saving, so
+    # +05:30 IS the zone rather than an approximation of it — but a zone that
+    # DOES observe DST cannot be expressed here, and would need a real
+    # tzdata dependency rather than a bigger number.
+    tracking_zone_offset_minutes: int = 330
+
     # Embeddings
     embedding_base_url: str = ""
     embedding_model: str = ""

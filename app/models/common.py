@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import overload
 
 import sqlalchemy as sa
@@ -82,3 +82,48 @@ class CreatedAt:
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), default=utcnow, nullable=False
     )
+
+
+# --------------------------------------------------------------------------- #
+# Calendar days — the zone mhn-spring resolved them in
+# --------------------------------------------------------------------------- #
+# `utcnow()` above answers "when". These answer "which DAY", which is a
+# different question and has bitten this repo repeatedly.
+#
+# mhn-spring stamps a calendar day at WRITE time on every rollup
+# (`lifestyle_daily_total.bucket_start`, `sahha_daily_total`,
+# `lifestyle_limit.effective_from`, `body_measurement_goal.effective_from`)
+# using its `app.tracking.zone` property. Reading those with `utcnow().date()`
+# asks for the wrong day for every hour the two zones disagree — 5.5 of every
+# 24 at +05:30. Measured, not theorised: a symptom ticked today vanished from
+# the health summary for that whole span, and a test carrying the same wrong
+# clock passed anyway.
+#
+# The offset is `Settings.tracking_zone_offset_minutes`, not a constant here,
+# because assuming a value for another service's property is what caused the
+# bug in the first place.
+#
+# NOT for age from a date of birth. A birthday is a fact about a person, not a
+# bucket mhn-spring wrote, and moving it into this zone would add a dependency
+# to shift an integer number of years by at most a day.
+def tracking_zone() -> timezone:
+    """The zone mhn-spring resolves calendar days in."""
+    from app.config import get_settings
+
+    return timezone(timedelta(minutes=get_settings().tracking_zone_offset_minutes))
+
+
+def tracking_today() -> date:
+    """Today as the day-bucketed tables reckon it, not as UTC does."""
+    return datetime.now(tracking_zone()).date()
+
+
+def tracking_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """The UTC instants a tracking-zone calendar day starts and ends at.
+
+    For the sources that are TIMESTAMPS rather than calendar dates — comparing
+    `date(created_at)` in UTC against a tracking-zone day is the same mistake
+    pointing the other way. A half-open range converted from the zone is exact.
+    """
+    start = datetime.combine(day, time.min, tzinfo=tracking_zone())
+    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)

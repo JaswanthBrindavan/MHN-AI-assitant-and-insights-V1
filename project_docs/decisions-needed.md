@@ -874,3 +874,51 @@ Rewriting is not obviously right: `lifestyle_daily_total` is a rollup Spring
 owns and rebuilds, but `bucket_start` is also what `uq_` constraints and the
 correlation windows key on. Whoever pins the variable should decide this
 deliberately rather than discover it later.
+
+### D28 — the pin is live, and the history question is smaller than it looked
+
+`TRACKING_ZONE=Asia/Kolkata` is set AND in effect. Spring restarted at
+**2026-09-03T10:06:24Z** (deployment `0f3a4a89`) and the
+`ManualTrackingIndexCheck` warning is gone from a complete startup buffer.
+
+That absence is positive evidence, not silence, and it was worth establishing
+rather than assuming: the bean only constructs if `ZoneId.of(value)` parses,
+`requireKnownZone()` throws unless PostgreSQL knows that exact region name, and
+the WARN fires only when the property is blank. A successful boot with no WARN
+means it resolved to a real, PG-known, non-blank zone, and the service variable
+is the property's only source. (The log does not print the zone NAME — that
+appears only inside the WARN. Worth a one-line INFO upstream so the next person
+does not have to derive it.)
+
+**All seven day-bucket anchors moved in one commit** — `calendar_window`,
+`targets`, `handle_correlation_query`'s window and the "might still be pending"
+guard beside it, `window_bounds`, `daily_series`, and the artifact stamp in
+`recompute_patterns`. Age from date of birth deliberately did NOT move, and a
+test now fails if a non-age reader appears on the UTC anchor.
+
+**The history story changed, and in our favour.** The worry was that overnight
+reconciliation rewrites rollups, which would make the boundary creep rather
+than sit still. It does rewrite — `ManualTrackingReconciler` DELETEs and
+re-INSERTs rather than upserting — but over a TRAILING WINDOW only:
+
+* lifestyle: `WINDOW_DAYS = 3`, nightly at 03:15
+* Sahha: `WINDOW_DAYS = 7`, nightly at 03:35
+
+So rows older than that window at the first post-restart run are never
+revisited and stay UTC-bucketed permanently (the class docstring says only a
+hand-run V1 backfill repairs those). Rows inside it are re-bucketed in IST.
+The result is a transition band ~3 days wide for lifestyle and ~7 for Sahha
+that closes itself after tonight's runs — not a clean line, but a short smear
+that stops, which is better than either reading we had.
+
+**Two windows means two boundaries.** Lifestyle and Sahha will disagree about
+where the smear ends for four days. Harmless against a 28-day correlation
+window; worth knowing before anyone reads a chart spanning it.
+
+**Confirmed in the data, half of it.** Seven `lifestyle_log` rows whose UTC and
+IST dates actually differ (all 2026-08-26, all pre-restart) are bucketed on
+their UTC day — the "ages out" claim demonstrated rather than argued, since 26
+Aug is well outside the 3-day window. The post-restart half is **not yet
+testable**: UTC and IST dates only diverge for instants at or after 18:30 UTC,
+and the restart was 10:06 UTC, so no discriminating row exists yet. Recorded as
+untested, not as agreed.

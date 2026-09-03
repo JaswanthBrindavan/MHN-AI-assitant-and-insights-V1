@@ -425,3 +425,73 @@ it records which clinician read whose data and exists to protect the subject.
 That is defensible and it is also the subject's own data. If you would rather
 it be erased with everything else, it is one line in
 `app/chat/erasure.py::_ERASE_IN_ORDER`.
+
+---
+
+## TZ1 — Verify the reconciliation boundary in production data (OUTSTANDING)
+
+**Owed, not done. TZ1 is the AUTHORITATIVE record of this check** — the
+parallel session's own memory note points here rather than carrying a copy,
+because two records of one pending item drift: theirs would still have said
+"owed" after this was closed, and a session reading it would re-run a settled
+check or contradict this file. If anything disagrees with TZ1, TZ1 wins.
+
+Raised 2026-09-03. Needs natural production data written
+after 00:00 IST on 2026-09-04, and the nightly reconcilers to have run
+(03:15 IST lifestyle, 03:35 IST Sahha). Written here rather than left to
+whichever session happens to still be alive — assuming continuity is the same
+mistake, one layer up, as assuming a property's value, which is what started
+this whole thread.
+
+### Background, verified
+
+`TRACKING_ZONE=Asia/Kolkata` went live when Spring restarted at
+**2026-09-03T10:06:24Z** (deployment `0f3a4a89`). All seven of Davi's
+day-bucket read anchors moved to `tracking_today()` in one commit. Age from
+date of birth deliberately did not move.
+
+Spring's reconcilers DELETE and re-INSERT rather than upserting, over a
+TRAILING window: `ManualTrackingReconciler.WINDOW_DAYS = 3`,
+`SahhaReconciler` 7. So the model is: rows near the restart get rewritten in
+IST, rows older than the window stay UTC-bucketed permanently, and the
+transition band closes itself.
+
+### The three checks
+
+The discriminating set is rows whose UTC date and IST date actually differ —
+only instants at or after 18:30 UTC qualify.
+
+1. **A post-restart row in the discriminating band is IST-bucketed.**
+   Confirmatory. Was untestable on 3 Sep: the restart was 10:06 UTC and the
+   band opens at 18:30 UTC.
+2. **The 3-day window rewrote the days around the restart.** Confirmatory.
+3. **Did anything OUTSIDE the window move?** ← **the one that matters.** The
+   first two confirm the code does what it says. This one catches the code
+   having been read correctly and still being the wrong code: a second writer,
+   a re-run migration, a support fix — anything touching rollups outside
+   `[today-2 .. today]`.
+
+   **Baseline captured 2026-09-03, before the boundary:** seven `lifestyle_log`
+   rows from 2026-08-26, every one `utc_bucket=True`, all eight days back and
+   therefore well outside the window. **If any of those seven is IST-bucketed
+   on re-run, the trailing-window model is not incomplete — it is wrong, and
+   the anchor flip rests on it.** No interpretation needed.
+
+### Two traps
+
+* **`EXISTS` does not attribute.** A check for "an IST bucket exists for this
+  row's IST day" returns true whenever ANY entry fell on that day, not because
+  this row was bucketed there. Three of the seven baseline rows show that and
+  it is not double-bucketing. Only `utc_bucket` carries signal.
+* **Two windows, two boundaries.** Lifestyle (3) and Sahha (7) disagree about
+  where the smear ends for four days. Harmless against a 28-day correlation
+  window; not harmless if someone reads a chart spanning it and assumes one
+  line.
+
+### Explicitly NOT to be done
+
+Do **not** manufacture the discriminating row by logging a lifestyle entry
+after midnight IST. It writes a synthetic entry into a real person's health
+record — one the chat later summarises back to them as something they did — to
+close a gap in our evidence. The confirmation arrives free by waiting. If it is
+ever worth doing, it is the user's call, not an agent's.
