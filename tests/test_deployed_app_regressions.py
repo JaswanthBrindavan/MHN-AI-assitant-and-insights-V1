@@ -569,25 +569,34 @@ async def test_the_banner_returns_when_the_turn_is_about_their_health(
 # on the day it matters it is furniture too.
 
 def test_a_plain_data_readout_asks_nobody_to_see_a_doctor():
-    """Their own step count, read back. No corpus, no condition, no risk."""
+    """Their own step count, read back. The answer cited nothing."""
     from app.chat.orchestrator import _answer_action
 
-    assert _answer_action(
-        "none", chunks=[], conditions=[], degraded=None
-    ) == "none"
+    assert _answer_action("none", cited=False, degraded=None) == "none"
 
 
-def test_a_corpus_answer_still_points_at_a_clinician():
+def test_retrieval_alone_is_not_a_reason_to_see_a_doctor():
+    """The trap, and the one this fix was first written wrong for.
+
+    Retrieval runs AHEAD of the engine branch, so a tracker total leaves it
+    with the same `chunks` in scope as a condition lookup — the `Used`
+    docstring records that reading `chunks` is what made "how much water did I
+    drink" cite four unrelated condition profiles. `cited` is what the ANSWER
+    used, and a data readout uses nothing.
+    """
+    from app.chat.orchestrator import _answer_action
+
+    # Chunks were fetched; the reply cited none of them.
+    assert _answer_action("none", cited=False, degraded=None) == "none"
+
+
+def test_an_answer_that_cited_the_corpus_still_points_at_a_clinician():
     """Educational content ABOUT a condition keeps the pointer — that is the
     case the line was written for."""
     from app.chat.orchestrator import _answer_action
 
     assert _answer_action(
-        "none", chunks=["chunk-1"], conditions=[], degraded=None
-    ) == "discuss_with_clinician"
-
-    assert _answer_action(
-        "none", chunks=[], conditions=["E11"], degraded=None
+        "none", cited=True, degraded=None
     ) == "discuss_with_clinician"
 
 
@@ -596,9 +605,7 @@ def test_high_risk_still_escalates():
     from app.chat.orchestrator import _answer_action
     from app.triage.red_flags import HIGH
 
-    assert _answer_action(
-        HIGH, chunks=[], conditions=[], degraded=None
-    ) == "seek_care_promptly"
+    assert _answer_action(HIGH, cited=False, degraded=None) == "seek_care_promptly"
 
 
 def test_a_degraded_turn_keeps_the_pointer_because_the_reply_says_it():
@@ -607,5 +614,5 @@ def test_a_degraded_turn_keeps_the_pointer_because_the_reply_says_it():
     from app.chat.orchestrator import _answer_action
 
     assert _answer_action(
-        "none", chunks=[], conditions=[], degraded="validation"
+        "none", cited=False, degraded="validation"
     ) == "discuss_with_clinician"
