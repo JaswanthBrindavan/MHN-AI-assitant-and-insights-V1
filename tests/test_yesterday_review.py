@@ -453,7 +453,7 @@ async def test_a_symptom_logged_late_evening_lands_on_the_right_day(db_session):
     finished. Filtering on the UTC calendar date reads the wrong day for five
     and a half hours every evening.
     """
-    from app.patterns.service import _reader_day_bounds
+    from app.models.common import tracking_day_bounds
 
     # 00:30 IST on the 3rd — belongs to the 3rd, carries a UTC date of the 2nd.
     db_session.add(SymptomLog(
@@ -468,7 +468,7 @@ async def test_a_symptom_logged_late_evening_lands_on_the_right_day(db_session):
     assert await _symptoms_on(db_session, USER, DAY + timedelta(days=1)) == ("cough",)
 
     # And the bounds themselves are the zone's, not UTC's midnight.
-    start, end = _reader_day_bounds(DAY)
+    start, end = tracking_day_bounds(DAY)
     assert start == datetime(2026, 9, 1, 18, 30, tzinfo=UTC)
     assert end == datetime(2026, 9, 2, 18, 30, tzinfo=UTC)
 

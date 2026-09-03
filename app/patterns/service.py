@@ -25,13 +25,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.common import utcnow
+from app.models.common import (
+    tracking_day_bounds,
+    tracking_today,
+    tracking_zone,
+    utcnow,
+)
 from app.models.coredata import (
     LifestyleDailyTotal,
     LifestyleLog,
@@ -424,30 +429,35 @@ SPRING_RED_FLAG_SYMPTOMS = frozenset({
 #: observed daylight saving, so +05:30 IS the zone rather than an approximation
 #: of it, and a named zone needs the IANA database, which Windows does not ship
 #: — `ZoneInfoNotFoundError` on any machine without `tzdata`.
-READER_ZONE = timezone(timedelta(hours=5, minutes=30), "IST")
-
-
-def tracking_today() -> date:
-    """Today as the READER's calendar reckons it, not as UTC does.
-
-    +05:30 is always ahead, so for the five and a half hours before midnight UTC
-    the two name different days — and a card about "yesterday" that picks the
-    wrong one is wrong for every reader who opens it in that window.
-    """
-    return datetime.now(READER_ZONE).date()
-
-
-def _reader_day_bounds(day: date) -> tuple[datetime, datetime]:
-    """The UTC instants a reader's calendar day starts and ends at.
-
-    For the source that is a TIMESTAMP rather than a calendar date:
-    `symptom_logs.created_at` is UTC, so `date(created_at)` is the UTC day, and
-    comparing that to a reader's day is the same mistake pointing the other way.
-    A half-open range converted from the zone is exact.
-    """
-    start = datetime.combine(day, time.min, tzinfo=READER_ZONE)
-    return start.astimezone(UTC), (start + timedelta(days=1)).astimezone(UTC)
-
+# Moved to `app/models/common.py`, beside `utcnow()`, and the offset is now
+# `Settings.tracking_zone_offset_minutes`. Two reasons: `app/coredata/service.py`
+# needs the same anchor and importing it from here would invert the layering,
+# and the value belongs in configuration rather than a constant — assuming a
+# value for another service's property is what caused this whole class.
+#
+# `TRACKING_ZONE=Asia/Kolkata` has been SET on the Spring service and is NOT
+# yet live: the property is read at startup, and the deployments that change
+# created are awaiting approval, so the running JVM still resolves `Etc/UTC`.
+# The variable existing in a dashboard and the running process having read it
+# are two different facts, and only the first is established — which is the
+# same shape as the assumption that started this whole thread.
+#
+# So the three anchors are still three, the `server_day` split below is still
+# load-bearing, and the rollup readers stay on the UTC day until a restart is
+# confirmed from the startup log. When it is, they move TOGETHER — this file's
+# windows, `calendar_window`, `targets` and `handle_correlation_query` — because
+# V2 promises a limit and the total it bounds agree about where a day begins,
+# and half a migration breaks that guarantee rather than keeping it.
+#
+# Keep the `day`/`server_day` split even after that. They are distinct in
+# principle and equal only by configuration; collapsing them turns a documented
+# coincidence into an invisible assumption, and someone can unset the variable.
+#
+# Pinning also reconciles NOTHING. Rows written before the restart stay
+# UTC-bucketed, so a window reaching back across it mixes two anchors 5.5 hours
+# apart — weighted toward readers whose history is mostly older rows, and it
+# heals as those age out.
+READER_ZONE = tracking_zone()
 
 #: At most this many symptoms are named. Two lines cannot list a whole day.
 MAX_SYMPTOMS = 3
@@ -596,8 +606,8 @@ async def symptoms_between(
             select(SymptomLog.symptom, SymptomLog.risk_level, SymptomLog.created_at)
             .where(
                 SymptomLog.user_id == user_id,
-                SymptomLog.created_at >= _reader_day_bounds(since)[0],
-                SymptomLog.created_at < _reader_day_bounds(until)[1],
+                SymptomLog.created_at >= tracking_day_bounds(since)[0],
+                SymptomLog.created_at < tracking_day_bounds(until)[1],
             )
         )
     ).all()

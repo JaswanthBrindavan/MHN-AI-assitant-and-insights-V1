@@ -1122,10 +1122,25 @@ def calendar_window(
     normally a PARTIAL week -- callers must say so rather than presenting three
     days as a week's total. ``last_week`` is the previous complete week.
 
-    ``today`` defaults to the UTC date, not ``app.tracking.zone``: that zone is
-    empty by default in mhn-spring and unrecoverable from the data, so within a
-    few hours of midnight a window can be one day out. Same anchor
-    ``handle_correlation_query`` already uses.
+    ``today`` anchors on the UTC date, which is the zone mhn-spring is CURRENTLY
+    resolving rollup days in: `app.tracking.zone` is `${TRACKING_ZONE:}` and the
+    deployed service falls back to `Etc/UTC`, warning about it on every boot.
+    Same anchor ``handle_correlation_query`` uses.
+
+    **`TRACKING_ZONE=Asia/Kolkata` has been set on the Spring service but is
+    NOT yet live** — the property is read at startup, and the deployments
+    created by that change are awaiting approval, so the running JVM still has
+    the old value. The moment Spring actually restarts, this and its siblings
+    (`targets`, `handle_correlation_query`, the correlation windows in
+    `app/patterns/service.py`) move to `tracking_today()` together. Moving them
+    first would make every rollup read wrong in the OTHER direction, which is
+    strictly worse than the bug being fixed.
+
+    Note when that happens: pinning fixes new writes and reconciles nothing.
+    Rows written before the restart stay UTC-bucketed, so a window reaching
+    back across it mixes two anchors 5.5 hours apart — an edge of at most one
+    day, weighted toward readers whose history is mostly older rows, and it
+    heals as those age out.
     """
     today = today or utcnow().date()
     if period == "today":
@@ -2181,6 +2196,14 @@ async def targets(db: AsyncSession, user_id: uuid.UUID) -> list[Target]:
     # tables are histories, so the newest row is not always the current one: a
     # goal the reader dated for next Monday is a plan, not today's target.
     # Undated rows are treated as always in force.
+    #
+    # UTC today, matching `calendar_window` — see its docstring. `effective_from`
+    # is server-resolved in `app.tracking.zone` (V2 and V38: "only ever written
+    # as today: the application never accepts a date from the client"), and that
+    # property is still resolving to UTC in the running service. V2 also
+    # promises a limit and the total it bounds always agree about where a day
+    # begins, so this must move in the SAME commit as the rollup readers and
+    # never before them.
     today = utcnow().date()
     best: dict[str, Target] = {}
     for kind, metric, value, unit, direction, since in rows:
