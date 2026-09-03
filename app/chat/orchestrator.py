@@ -279,6 +279,42 @@ def _lead(escalation: str, risk: str, reply: str) -> str:
     return f"{escalation} {reply}" if risk == HIGH and reply else reply
 
 
+def _answer_action(
+    risk: str, *, chunks: list | None, conditions: list | None, degraded: str | None
+) -> str:
+    """What the reader should do next, matching what the answer actually was.
+
+    The agentic engine answers everything — "how did I sleep this week" as well
+    as "what is a high HbA1c" — and it used to return `discuss_with_clinician`
+    for every one of them that was not HIGH risk. The mobile clients render
+    that in RED under the reply, so reading back somebody's own step count came
+    with the same alarming line as a question about a symptom. A warning that
+    appears on every answer stops being a warning; it becomes furniture, and
+    the day it matters it is furniture too.
+
+    So it is derived from what the turn did:
+
+    * HIGH risk keeps its escalation, unchanged.
+    * A degraded turn keeps the pointer, because `safe_reply` literally says
+      "speak with a clinician" — the field and the prose have to agree.
+    * A turn that consulted the CORPUS, or that named a condition, is
+      educational or clinical content and keeps the pointer.
+    * Everything else is the reader's own data read back to them, and gets
+      `none`. A step count is not clinical advice and does not need a doctor.
+
+    Deliberately not a judgement about the reader's health: it is a judgement
+    about the ANSWER. Nothing here inspects a value to decide whether it looks
+    worrying — that is the triage floor's job, and it has already run.
+    """
+    if risk == HIGH:
+        return "seek_care_promptly"
+    if degraded:
+        return "discuss_with_clinician"
+    if chunks or conditions:
+        return "discuss_with_clinician"
+    return "none"
+
+
 def _led_action(risk: str, reply: str, action: str) -> str:
     """The action that matches the reply the reader actually got.
 
@@ -2263,8 +2299,8 @@ async def _dispatch_agentic(
     return ChatResult(
         response_message=display,
         risk_level=risk,
-        recommended_action=(
-            "seek_care_promptly" if risk == HIGH else "discuss_with_clinician"
+        recommended_action=_answer_action(
+            risk, chunks=chunks, conditions=sorted(codes), degraded=degraded
         ),
         provenance=provenance,
         used=used,
