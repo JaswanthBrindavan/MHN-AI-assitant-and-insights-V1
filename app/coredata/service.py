@@ -9,6 +9,7 @@ the same table the core app writes — on the user's behalf.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -379,6 +380,71 @@ def _sort_key(when: datetime | date | None) -> float:
     return -datetime(when.year, when.month, when.day, tzinfo=UTC).timestamp()
 
 
+#: How a printed date can arrive, most specific first.
+#:
+#: **These are not normalised upstream and cannot be assumed ISO.** mhn-ai runs
+#: every ``section_extraction`` date through its own ``iso_date``, but a report's
+#: ``report_date`` is written straight through from the model, and the prompt
+#: asks for "the report's overall date if shown" without naming a format. So the
+#: stored value is whatever the lab printed — production rows hold "02 Sep 2026"
+#: — and reading these as ISO silently fell back to the upload date for every
+#: report, which is the bug this whole field exists to fix.
+#:
+#: Four-digit years first so a full year is never captured by a two-digit
+#: pattern. Deliberately narrower than mhn-ai's table in one respect: "%m/%d/%Y"
+#: is absent. It cannot be told from "%d/%m/%Y" for the first twelve days of a
+#: month, and guessing wrong dates a document by up to eleven days without
+#: anything looking wrong — whereas falling through to the upload time is a
+#: known, visible approximation.
+_PRINTED_DATE_FORMATS: tuple[str, ...] = (
+    "%Y-%m-%d",
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%d.%m.%Y",
+    "%d %B %Y",
+    "%d %b %Y",
+    # "18-Mar-2026" — extremely common on Indian lab reports.
+    "%d-%b-%Y",
+    "%d-%B-%Y",
+    "%B %d %Y",
+    "%b %d %Y",
+    "%Y%m%d",       # DICOM StudyDate, on imaging reports
+    "%d/%m/%y",
+    "%d-%m-%y",
+    "%d.%m.%y",
+    "%d %b %y",
+    "%d-%b-%y",
+)
+
+#: "28th July 2026" — printed on documents and typed by people.
+_ORDINAL_SUFFIX = re.compile(r"\b(\d{1,2})(st|nd|rd|th)\b", re.IGNORECASE)
+
+#: A trailing clock time: an ISO datetime's T separator, or a radiology report's
+#: study timestamp. Only the date is ever wanted, so the rest is dropped rather
+#: than failing the whole value.
+_TRAILING_TIME = re.compile(
+    r"[T\s]+\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\s*(?:[ap]\.?m\.?)?"
+    r"(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _printed_date(raw: object) -> date | None:
+    """One transcribed date, in whatever shape the document printed it."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    text = _ORDINAL_SUFFIX.sub(r"\1", text).replace(",", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = _TRAILING_TIME.sub("", text).strip()
+    for fmt in _PRINTED_DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def _ai_document_date(kind: str, content) -> date | None:
     """The date printed on the document, or None when it carries none.
 
@@ -400,16 +466,13 @@ def _ai_document_date(kind: str, content) -> date | None:
             raw = block.get(field)
             if not raw:
                 continue
-            # mhn-ai normalises these to ISO in Python before storing, but an
-            # older row predates that and a bad string must not take out a
-            # whole document listing.
-            try:
-                return date.fromisoformat(str(raw)[:10])
-            except ValueError:
-                logger.warning(
-                    "unparseable %s date %r on a %s; using the upload time",
-                    field, raw, kind,
-                )
+            parsed = _printed_date(raw)
+            if parsed is not None:
+                return parsed
+            logger.warning(
+                "unparseable %s date %r on a %s; using the upload time",
+                field, raw, kind,
+            )
     return None
 
 

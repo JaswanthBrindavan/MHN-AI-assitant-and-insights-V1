@@ -357,17 +357,32 @@ REMOVE_MEDICATION = ToolSpec(
 GET_DOCUMENT_AI_RESULT = ToolSpec(
     name="get_document_ai_result",
     description=(
-        "Fetch the AI pipeline's processing result for a document the reader "
-        "uploaded — its filing status, extracted insights, and any failure "
-        "reason, including a patient-name mismatch (a document whose printed "
-        "name does not match the account is never filed; explain that rather "
-        "than suggesting a retry). Use when they ask about an upload's "
-        "insights, status, or why a report has not appeared."
+        "Fetch the AI pipeline's processing result for an uploaded document — "
+        "its filing status, extracted insights, and any failure reason, "
+        "including a patient-name mismatch (a document whose printed name does "
+        "not match the account is never filed; explain that rather than "
+        "suggesting a retry). Use when they ask about a document's insights, "
+        "status, or why a report has not appeared. "
+        # Spelled out because the model read the old wording — "a document the
+        # reader uploaded" — as the reader's OWN only, and answered "insights
+        # for my father's latest report" with get_family_members plus
+        # get_documents instead, which degraded to the safe reply. The handler
+        # resolves all three of these; nothing but this description was missing.
+        "This ALSO covers a document named by title ('insights from my full "
+        "body checkup'), 'the latest one', and a connected family member's "
+        "('my father's latest report') — consent is checked when the document "
+        "is resolved, so ask here rather than assembling it from other tools."
     ),
     input_schema=_obj(
         {"request": {
             "type": "string",
-            "description": "The reader's ask, e.g. 'insights for my report'.",
+            "description": (
+                "The reader's ask, in THEIR OWN WORDS, e.g. 'insights for my "
+                "report', 'insights from the full body checkup doc', "
+                "'insights for my father's latest report'. Pass the phrasing "
+                "through unchanged — which document it is and whose it is are "
+                "parsed from it, and a rewritten sentence loses both."
+            ),
         }},
         [],
     ),

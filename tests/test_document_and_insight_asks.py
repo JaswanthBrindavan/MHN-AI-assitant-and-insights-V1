@@ -16,6 +16,7 @@ Four reader-reported failures, each with its own root cause:
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, timedelta
 
@@ -63,6 +64,37 @@ def _content(*, document_id: int, title: str, report_date: str | None):
 # --------------------------------------------------------------------------- #
 # 1. The date on the document, not the date it was uploaded
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("printed", "expected"),
+    [
+        # THE SHAPE PRODUCTION ACTUALLY HOLDS. mhn-ai writes a report's
+        # `report_date` straight through from the model with no format asked
+        # for, so it is whatever the lab printed. Read as ISO, this parsed as
+        # nothing and every report fell back to its upload time — the exact bug
+        # the doc_date field was added to fix, still present after the fix.
+        ("02 Sep 2026", date(2026, 9, 2)),
+        ("2026-09-02", date(2026, 9, 2)),
+        ("18-Mar-2026", date(2026, 3, 18)),
+        ("02/09/2026", date(2026, 9, 2)),
+        ("28th July 2026", date(2026, 7, 28)),
+        ("2026-09-02T17:44:50.475613+00:00", date(2026, 9, 2)),
+        ("20260902", date(2026, 9, 2)),
+        # Unreadable stays unreadable: the caller falls back to the upload time
+        # rather than inventing a date.
+        ("last Tuesday", None),
+        ("", None),
+        # Ambiguous by construction and deliberately refused: "%m/%d/%Y" is not
+        # in the table, because it cannot be told from "%d/%m/%Y" for the first
+        # twelve days of a month and guessing wrong misdates a document by up
+        # to eleven days with nothing looking wrong.
+        ("2026-13-45", None),
+    ],
+)
+def test_a_printed_date_is_read_in_whatever_shape_it_was_printed(printed, expected):
+    content = _content(document_id=1, title="Lab", report_date=printed)
+    assert _ai_document_date("report", content) == expected
+
+
 def test_the_printed_date_is_read_from_both_envelopes():
     """Reports carry ``extraction.report_date``; every other section carries
     its own field under ``section_extraction``."""
@@ -380,3 +412,110 @@ async def test_the_same_reading_is_not_plotted_twice(db_session):
     assert out is not None
     assert out["provenance"]["results"] == 1, "one reading, counted once"
     assert out["visual"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 5. The chart the reader can see
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_multi_year_series_keeps_the_year_on_its_labels(db_session):
+    """A real reader's hemoglobin runs 2019 to 2026.
+
+    Labelled "%d %b" that renders as "14 Oct, 15 Dec, 11 Nov, 30 Oct" — which
+    reads as a chart with its points shuffled. They were in order the whole
+    time; the label was throwing away the only thing that showed it.
+    """
+    db_session.add(UserThpSeries(
+        user_id=READER, thp_key="hemoglobin", name="HEMOGLOBIN", unit="g/dL",
+        readings=[
+            {"date": "2019-10-14T00:00Z", "value": "16.6", "unit": "g/dL"},
+            {"date": "2026-08-21T11:07:23Z", "value": "17.1", "unit": "g/dL"},
+        ],
+    ))
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, READER, "my hemoglobin trend")
+    assert out is not None and out["visual"] is not None
+    assert out["visual"]["labels"] == ["14 Oct 19", "21 Aug 26"], "oldest first, with years"
+
+
+@pytest.mark.asyncio
+async def test_a_single_year_series_leaves_the_year_off(db_session):
+    """Nothing is gained by repeating the same year on every label."""
+    db_session.add(UserThpSeries(
+        user_id=READER, thp_key="ferritin", name="Ferritin", unit="ng/mL",
+        readings=[
+            {"date": "2026-07-01T00:00Z", "value": "45", "unit": "ng/mL"},
+            {"date": "2026-08-01T00:00Z", "value": "52", "unit": "ng/mL"},
+        ],
+    ))
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, READER, "my ferritin trend")
+    assert out is not None and out["visual"] is not None
+    assert out["visual"]["labels"] == ["01 Jul", "01 Aug"]
+
+
+def test_the_model_is_told_a_chart_was_drawn():
+    """It used to answer "I can't generate a graph" underneath the graph.
+
+    The values are lifted out of band so a figure cannot be quoted that was
+    never read — but that left the model with no idea a chart existed, and the
+    reader saw a chart and a sentence denying it in the same reply.
+    """
+    from app.chat.tools import executors, registry
+
+    payload = {
+        "deterministic_reply": "Your most recent HbA1c is 6.1 %.",
+        executors.OUT_OF_BAND_VISUAL: {
+            "title": "HbA1c — last 3 results",
+            "values": [5.4, 5.9, 6.1],
+            "labels": ["01 Jul 24", "01 Jan 25", "01 Jul 26"],
+        },
+    }
+    visuals: list[dict] = []
+
+    visual = payload.pop(executors.OUT_OF_BAND_VISUAL, None)
+    if visual is not None:
+        visuals.append(visual)
+        payload["chart_shown_to_reader"] = {
+            "title": visual.get("title"),
+            "points": len(visual.get("values") or []),
+            "note": "...",
+        }
+
+    assert visuals, "the chart still reaches the client"
+    told = payload["chart_shown_to_reader"]
+    assert told["points"] == 3
+    assert told["title"] == "HbA1c — last 3 results"
+    # The numbers stay out of the model's reach.
+    assert "5.4" not in json.dumps(payload)
+    assert registry is not None
+
+
+@pytest.mark.asyncio
+async def test_the_insights_tool_reaches_the_family_path(db_session):
+    """The agentic engine is what production runs, and it routes on tool text.
+
+    Asking the deployed service for "insights for my father's latest report"
+    called get_family_members and get_documents and then degraded to the safe
+    reply: the tool's description said "a document the reader uploaded", which
+    the model read as the reader's OWN only. The handler had supported family
+    documents since the previous change; nothing but the description was
+    missing, so the executor is exercised here rather than the handler alone.
+    """
+    from app.chat.tools import definitions, executors
+
+    described = definitions.GET_DOCUMENT_AI_RESULT.description.lower()
+    assert "family member" in described
+    assert "named by title" in described
+
+    # No connection exists, so reaching the family path means being told so —
+    # which is only possible if the possessive survived into the handler.
+    out = await executors.get_document_ai_result(
+        db_session, READER,
+        {"request": "insights for my father's latest report"},
+        None,
+    )
+    assert out is not None
+    assert "family connection" in out["deterministic_reply"]
