@@ -75,7 +75,7 @@ Rules we follow (do not break these):
 - Migrations are verified two ways: reversibility on a fresh DB
   (`tests/test_migrations.py`), and coexistence — apply Davi's chain on top of
   a full load of `db/existing_schema.sql` (`tests/test_coexistence.py`, both
-  `pg`-marked). That dump is now composed from mhn-spring V1–V41 by
+  `pg`-marked). That dump is now composed from mhn-spring V1–V48 by
   `python -m scripts.build_existing_schema`; regenerate it whenever they add a
   migration. It used to be the V1 baseline and the coexistence check was
   manual, which is why V7–V19 went unnoticed. Production also has ddl-auto
@@ -250,7 +250,12 @@ clinical content is DRAFT.
 
 **PRs #38–#41 are merged or open on `praveen-mhn`.** The schema is adopted into
 mhn-spring as `V21__davi_chat_platform.sql` (and `V23__davi_conversation_...`);
-**mhn-spring's head is V41, so the next Davi migration is V42+**.
+**mhn-spring's head is V48, so the next Davi migration is V49+** (checked
+2026-09-03; V43 is Davi's own `davi_pattern_artifacts`). V44–V48 are theirs:
+account deletion, document notifications, Razorpay subscriptions, Care+ gates,
+and V48 splitting `family_connect.*_share_tracking` into separate period and
+medication grants — Davi maps only the file-share columns and serves no
+relative's period or medication data, so it is unaffected by that split.
 V40 (2026-09-01) added the `sahha_*` tables — wearable-derived sleep, steps,
 resting heart rate and HRV, pre-aggregated daily/weekly/monthly exactly like
 `lifestyle_*_total`. Davi reads NONE of it yet.
