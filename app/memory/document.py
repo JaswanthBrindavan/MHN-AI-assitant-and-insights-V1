@@ -181,7 +181,13 @@ async def _gather(db: AsyncSession, user_id: uuid.UUID) -> dict:
         rows = [
             {
                 "title": d.title,
-                "on": d.created_at.date().isoformat() if d.created_at else None,
+                # The document's own date where it has one, so the model dates
+                # a document the same way the cards and the reply do.
+                "on": (
+                    d.doc_date.isoformat() if d.doc_date
+                    else d.created_at.date().isoformat() if d.created_at
+                    else None
+                ),
                 "id": d.doc_id,
                 "kind": d.kind,
             }

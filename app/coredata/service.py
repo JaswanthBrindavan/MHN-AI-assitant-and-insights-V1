@@ -76,7 +76,19 @@ class DocumentHit:
     # AI classification title (content.ai.classification.title) — production
     # scans have no name column, so this is their canonical display name.
     title: str | None = None
+    # The date PRINTED ON the document, when the extraction found one.
+    #
+    # A different question from ``created_at``, which is when somebody happened
+    # to upload the file. A reader asking for their recent documents means the
+    # recent *tests*: a scan taken in March and uploaded last night is a March
+    # scan, and listing it as last night's — above a test actually taken this
+    # week — is the app disagreeing with the paper in the reader's hand.
+    doc_date: date | None = None
 
+    @property
+    def when(self) -> datetime | date | None:
+        """What to show and sort on: the printed date, else the upload."""
+        return self.doc_date or self.created_at
 
 
 # --------------------------------------------------------------------------- #
@@ -334,6 +346,73 @@ def _ai_title(content) -> str | None:
         return None
 
 
+#: Where each kind prints its own date, in the mhn-ai envelope.
+#:
+#: Reports carry ``content.ai.extraction.report_date``; every other section is
+#: transcribed into ``content.ai.section_extraction`` under its own field name
+#: (mhn-ai ``SECTION_SPECS[...].date_fields``) — the two envelopes are mutually
+#: exclusive, so both are searched and whichever is present answers.
+#:
+#: Prescriptions are deliberately absent: mhn-ai has no prescription section
+#: spec, so there is no printed date to read and ``created_at`` stands.
+_DOCUMENT_DATE_FIELDS: dict[str, tuple[str, ...]] = {
+    "report": ("report_date",),
+    "scan": ("scan_date",),
+    "vaccination": ("date_given",),
+    "insurance": ("start_date",),
+    "bill": ("bill_date",),
+}
+
+
+def _sort_key(when: datetime | date | None) -> float:
+    """Newest-first ordering across a mix of dates and timestamps.
+
+    ``datetime`` is checked first because it SUBCLASSES ``date`` — the obvious
+    order of these two branches sends every timestamp down the date path and
+    throws its time away. A naive timestamp is read in local time, which is
+    only ever used to order two documents against each other.
+    """
+    if when is None:
+        return 0.0
+    if isinstance(when, datetime):
+        return -when.timestamp()
+    return -datetime(when.year, when.month, when.day, tzinfo=UTC).timestamp()
+
+
+def _ai_document_date(kind: str, content) -> date | None:
+    """The date printed on the document, or None when it carries none.
+
+    None is a real answer, not a failure: plenty of documents show no date, and
+    the caller falls back to the upload time rather than inventing one.
+    """
+    try:
+        ai = (content or {}).get("ai") or {}
+    except AttributeError:
+        return None
+    if not isinstance(ai, dict):
+        return None
+
+    for envelope in ("extraction", "section_extraction"):
+        block = ai.get(envelope)
+        if not isinstance(block, dict):
+            continue
+        for field in _DOCUMENT_DATE_FIELDS.get(kind, ()):
+            raw = block.get(field)
+            if not raw:
+                continue
+            # mhn-ai normalises these to ISO in Python before storing, but an
+            # older row predates that and a bad string must not take out a
+            # whole document listing.
+            try:
+                return date.fromisoformat(str(raw)[:10])
+            except ValueError:
+                logger.warning(
+                    "unparseable %s date %r on a %s; using the upload time",
+                    field, raw, kind,
+                )
+    return None
+
+
 async def _viewer_exclusions(
     db: AsyncSession, viewer_id: uuid.UUID
 ) -> dict[str, set[int]]:
@@ -438,6 +517,7 @@ async def latest_documents(
         for r in rows:
             if r.id in denied_ids:
                 continue
+            content = getattr(r, "content", None)
             hits.append(
                 DocumentHit(
                     kind=kind,
@@ -445,12 +525,17 @@ async def latest_documents(
                     filepath=r.filepath or "",
                     created_at=r.created_at,
                     owner_label=owner_label,
-                    title=_ai_title(getattr(r, "content", None)),
+                    title=_ai_title(content),
+                    doc_date=_ai_document_date(kind, content),
                 )
             )
-    hits.sort(
-        key=lambda h: (h.created_at is None, -(h.created_at.timestamp() if h.created_at else 0))
-    )
+    # Newest first by the date on the DOCUMENT, falling back to the upload.
+    #
+    # The rows arrive ordered by created_at (the database can sort that; it
+    # cannot sort a date buried in JSON across six tables), so the printed date
+    # has to be applied here, after the envelopes are read. A dateless document
+    # sorts last rather than to the epoch, so it cannot displace a dated one.
+    hits.sort(key=lambda h: (h.when is None, _sort_key(h.when)))
     return hits[:limit]
 
 

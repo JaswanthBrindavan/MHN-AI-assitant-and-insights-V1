@@ -410,15 +410,25 @@ def test_a_specific_ask_is_not_swallowed_by_the_whole_health_summary():
         )
 
 
-def test_the_ai_result_parser_is_kept_out_of_the_precedence_list():
-    """It claims the bare word "summary", so consulting it here would hand
-    every whole-health ask to a handler that then declines. Its own handler
-    gates on a document reference, which is the real precedence."""
+def test_the_ai_result_parser_leaves_whole_health_asks_alone():
+    """A whole-health summary is not a document ask and must not be read as
+    one, or the handler resolves some document and answers about that instead.
+
+    This assertion used to read ``is not None`` against a parser that returned
+    a BOOL, so ``False is not None`` passed no matter how the parser behaved.
+    It documented the parser as claiming a bare summary while never checking
+    it — and the parser has never matched one. Now that the parser returns a
+    query or None the check bites, so it states the fact that is actually true.
+    """
     from app.chat.abilities import parse_ai_result_query
 
-    assert parse_ai_result_query("summarise my health") is not None, (
-        "if this parser stops claiming a bare summary, it can join the list"
-    )
+    for message in (
+        "summarise my health",
+        "give me my health summary",
+        # A condition asked about by name is a topic, not a document.
+        "give me insights on diabetes",
+    ):
+        assert parse_ai_result_query(message) is None, message
 
 
 def test_a_carried_banner_and_the_action_field_cannot_disagree():

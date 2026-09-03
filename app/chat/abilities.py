@@ -743,22 +743,124 @@ def parse_document_query_fuzzy(message: str) -> DocumentQuery | None:
 # --------------------------------------------------------------------------- #
 # Answered from mhn-ai's ai-result endpoint (insights for reports, section
 # extraction for other document types) — never by the chat LLM guessing.
+#: What makes "insights for X" an ask about a DOCUMENT rather than a topic.
+#:
+#: Requiring one of these is what keeps "give me insights on diabetes" — an
+#: ordinary condition question — out of the document path once the determiner
+#: stopped being mandatory.
+_DOC_SUBJECT_WORD = (
+    r"this|that|my|the|latest|last|recent|newest|previous|uploaded"
+    r"|reports?|results?|scans?|files?|documents?|docs?|uploads?|pdf"
+    r"|prescriptions?|bills?|invoices?|insurances?|vaccinations?"
+)
+
 _AI_RESULT_RE = re.compile(
-    r"\b(?:get|pull|show|give(?:\s+me)?|fetch)?\s*insights?\s+"
-    r"(?:for|from|on|of|about)\s+(?:this|that|my|the)\b"
-    r"[^.?!]{0,30}?\b(?:reports?|results?|scans?|files?|documents?|uploads?|pdf)?\b"
+    # "pull my insights from the full body checkup doc", and — now the
+    # determiner is not mandatory in front of a named document — "need
+    # insights for latest uploaded doc", which used to fall through to the
+    # LLM because "latest" is not one of this/that/my/the.
+    r"\b(?:get|pull|show|give(?:\s+me)?|fetch|need|want)?\s*insights?\s+"
+    r"(?:for|from|on|of|about)\s+[^.?!]{0,40}?\b(?:" + _DOC_SUBJECT_WORD + r")\b"
     r"|\b(?:analy[sz]e|interpret)\s+(?:this|that|my|the)\s+"
     r"(?:latest\s+|last\s+|recent\s+|uploaded\s+)?(?:lab\s+)?"
     r"(?:reports?|results?|scans?|files?|documents?|uploads?|pdf)\b"
-    r"|\bextractions?\s+(?:for|from|of)\s+(?:this|that|my|the)\b"
+    r"|\bextractions?\s+(?:for|from|of)\s+[^.?!]{0,40}?\b(?:"
+    + _DOC_SUBJECT_WORD + r")\b"
     r"|\bwhat\s+(?:do|does)\s+(?:this|that|my|the)\s+"
     r"(?:latest\s+|recent\s+)?(?:reports?|results?|scans?)\s+(?:say|show|mean)\b",
     re.IGNORECASE,
 )
 
+#: The phrase naming WHICH document, when the reader named one.
+_AI_RESULT_SUBJECT_RE = re.compile(
+    r"\b(?:insights?|extractions?|analysis|breakdown)\s+"
+    r"(?:for|from|on|of|about)\s+(?P<subject>[^.?!]{1,60})",
+    re.IGNORECASE,
+)
 
-def parse_ai_result_query(message: str) -> bool:
-    return bool(_AI_RESULT_RE.search(message))
+#: "the latest one" rather than a document named by its title.
+_AI_RESULT_LATEST_RE = re.compile(
+    r"\b(?:latest|last|recent|newest|just uploaded|newly uploaded)\b",
+    re.IGNORECASE,
+)
+
+#: Stripped from a captured subject: these say which document it is only in
+#: the sense that every document is one. What survives is the document's NAME.
+_SUBJECT_NOISE = re.compile(
+    r"\b(?:this|that|my|our|the|a|an|latest|last|recent|newest|most|previous"
+    r"|uploaded|newly|just|one|of|from|for|please"
+    r"|reports?|results?|scans?|files?|documents?|docs?|uploads?|pdf"
+    r"|prescriptions?|bills?|invoices?|insurances?|vaccinations?)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class AiResultQuery:
+    """Which document's processed results the reader asked for, and whose.
+
+    Every field empty is the ordinary case — "get insights for this report" —
+    and means the handler resolves the document from the conversation exactly
+    as it always has.
+    """
+
+    #: The document named by (part of) its title: "full body checkup".
+    handle: str | None = None
+    #: "the latest doc" — newest on file, whatever it is called.
+    wants_latest: bool = False
+    #: "my father's" — a connected member by relation.
+    relation: str | None = None
+    #: "Bhargava's" — a connected member by name.
+    owner_name: str | None = None
+
+
+def parse_ai_result_query(message: str) -> AiResultQuery | None:
+    """Parse an insights/extraction ask, or None when it is not one.
+
+    Returns a QUERY rather than the bool it used to. Detecting the ask and
+    capturing nothing meant every one of these resolved to the same document —
+    the newest — so naming one ("insights from my full body checkup") did
+    nothing whatsoever.
+    """
+    if not _AI_RESULT_RE.search(message):
+        return None
+
+    relation = find_relation(message)
+    owner_name = None
+    if relation is None:
+        m = _POSSESSIVE_NAME_RE.search(message.lower())
+        if m and m.group(1) not in _POSSESSIVE_STOP:
+            owner_name = m.group(1)
+
+    handle = None
+    wants_latest = False
+    subject = _AI_RESULT_SUBJECT_RE.search(message)
+    if subject:
+        text = subject.group("subject")
+        wants_latest = bool(_AI_RESULT_LATEST_RE.search(text))
+        # Drop the member from the handle: "insights from my father's full
+        # body checkup" names a person AND a document, and leaving the person
+        # in would search document titles for them.
+        if relation:
+            text = re.sub(rf"\bmy\s+{re.escape(relation)}(?:'s)?\b", " ", text,
+                          flags=re.IGNORECASE)
+        elif owner_name:
+            text = re.sub(rf"\b{re.escape(owner_name)}(?:'s)?\b", " ", text,
+                          flags=re.IGNORECASE)
+        text = _SUBJECT_NOISE.sub(" ", text)
+        # Possessives and punctuation the substitutions left behind.
+        text = re.sub(r"[^\w\s-]", " ", text)
+        cleaned = " ".join(text.split())
+        # A single character is not a name; it is whatever the stripping left.
+        if len(cleaned) >= 2:
+            handle = cleaned
+
+    return AiResultQuery(
+        handle=handle,
+        wants_latest=wants_latest,
+        relation=relation,
+        owner_name=owner_name,
+    )
 
 
 # --------------------------------------------------------------------------- #
