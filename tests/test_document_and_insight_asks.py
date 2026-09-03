@@ -63,6 +63,37 @@ def _content(*, document_id: int, title: str, report_date: str | None):
 # --------------------------------------------------------------------------- #
 # 1. The date on the document, not the date it was uploaded
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("printed", "expected"),
+    [
+        # THE SHAPE PRODUCTION ACTUALLY HOLDS. mhn-ai writes a report's
+        # `report_date` straight through from the model with no format asked
+        # for, so it is whatever the lab printed. Read as ISO, this parsed as
+        # nothing and every report fell back to its upload time — the exact bug
+        # the doc_date field was added to fix, still present after the fix.
+        ("02 Sep 2026", date(2026, 9, 2)),
+        ("2026-09-02", date(2026, 9, 2)),
+        ("18-Mar-2026", date(2026, 3, 18)),
+        ("02/09/2026", date(2026, 9, 2)),
+        ("28th July 2026", date(2026, 7, 28)),
+        ("2026-09-02T17:44:50.475613+00:00", date(2026, 9, 2)),
+        ("20260902", date(2026, 9, 2)),
+        # Unreadable stays unreadable: the caller falls back to the upload time
+        # rather than inventing a date.
+        ("last Tuesday", None),
+        ("", None),
+        # Ambiguous by construction and deliberately refused: "%m/%d/%Y" is not
+        # in the table, because it cannot be told from "%d/%m/%Y" for the first
+        # twelve days of a month and guessing wrong misdates a document by up
+        # to eleven days with nothing looking wrong.
+        ("2026-13-45", None),
+    ],
+)
+def test_a_printed_date_is_read_in_whatever_shape_it_was_printed(printed, expected):
+    content = _content(document_id=1, title="Lab", report_date=printed)
+    assert _ai_document_date("report", content) == expected
+
+
 def test_the_printed_date_is_read_from_both_envelopes():
     """Reports carry ``extraction.report_date``; every other section carries
     its own field under ``section_extraction``."""
