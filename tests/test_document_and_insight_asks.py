@@ -491,3 +491,31 @@ def test_the_model_is_told_a_chart_was_drawn():
     # The numbers stay out of the model's reach.
     assert "5.4" not in json.dumps(payload)
     assert registry is not None
+
+
+@pytest.mark.asyncio
+async def test_the_insights_tool_reaches_the_family_path(db_session):
+    """The agentic engine is what production runs, and it routes on tool text.
+
+    Asking the deployed service for "insights for my father's latest report"
+    called get_family_members and get_documents and then degraded to the safe
+    reply: the tool's description said "a document the reader uploaded", which
+    the model read as the reader's OWN only. The handler had supported family
+    documents since the previous change; nothing but the description was
+    missing, so the executor is exercised here rather than the handler alone.
+    """
+    from app.chat.tools import definitions, executors
+
+    described = definitions.GET_DOCUMENT_AI_RESULT.description.lower()
+    assert "family member" in described
+    assert "named by title" in described
+
+    # No connection exists, so reaching the family path means being told so —
+    # which is only possible if the possessive survived into the handler.
+    out = await executors.get_document_ai_result(
+        db_session, READER,
+        {"request": "insights for my father's latest report"},
+        None,
+    )
+    assert out is not None
+    assert "family connection" in out["deterministic_reply"]
