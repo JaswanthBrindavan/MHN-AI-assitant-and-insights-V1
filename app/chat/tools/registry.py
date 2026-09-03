@@ -145,6 +145,27 @@ async def execute_tool(
         visual = payload.pop(executors.OUT_OF_BAND_VISUAL, None)
         if visual is not None and visuals is not None:
             visuals.append(visual)
+        if visual is not None:
+            # Say a chart exists, without handing over the numbers in it.
+            #
+            # The values are lifted out of band so the model cannot quote a
+            # figure it never read — but the model then had no idea a chart had
+            # been produced, and answered "I can't generate a graph, but here's
+            # what's on file" **underneath the graph it had just produced**.
+            # The reader saw a chart and a sentence denying it in the same reply.
+            #
+            # The title and the count are enough to stop that, and both are
+            # already in the deterministic reply, so nothing new becomes
+            # quotable and the fidelity guard has the same sources it had.
+            payload["chart_shown_to_reader"] = {
+                "title": visual.get("title"),
+                "points": len(visual.get("values") or []),
+                "note": (
+                    "This chart is displayed to the reader with your answer. "
+                    "Do not say you cannot draw or plot one, and do not "
+                    "describe the individual points — they can see it."
+                ),
+            }
         used = payload.pop(executors.OUT_OF_BAND_SOURCES, None)
         if used and sources is not None:
             sources.extend(used)

@@ -16,6 +16,7 @@ Four reader-reported failures, each with its own root cause:
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import date, timedelta
 
@@ -411,3 +412,82 @@ async def test_the_same_reading_is_not_plotted_twice(db_session):
     assert out is not None
     assert out["provenance"]["results"] == 1, "one reading, counted once"
     assert out["visual"] is None
+
+
+# --------------------------------------------------------------------------- #
+# 5. The chart the reader can see
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_a_multi_year_series_keeps_the_year_on_its_labels(db_session):
+    """A real reader's hemoglobin runs 2019 to 2026.
+
+    Labelled "%d %b" that renders as "14 Oct, 15 Dec, 11 Nov, 30 Oct" — which
+    reads as a chart with its points shuffled. They were in order the whole
+    time; the label was throwing away the only thing that showed it.
+    """
+    db_session.add(UserThpSeries(
+        user_id=READER, thp_key="hemoglobin", name="HEMOGLOBIN", unit="g/dL",
+        readings=[
+            {"date": "2019-10-14T00:00Z", "value": "16.6", "unit": "g/dL"},
+            {"date": "2026-08-21T11:07:23Z", "value": "17.1", "unit": "g/dL"},
+        ],
+    ))
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, READER, "my hemoglobin trend")
+    assert out is not None and out["visual"] is not None
+    assert out["visual"]["labels"] == ["14 Oct 19", "21 Aug 26"], "oldest first, with years"
+
+
+@pytest.mark.asyncio
+async def test_a_single_year_series_leaves_the_year_off(db_session):
+    """Nothing is gained by repeating the same year on every label."""
+    db_session.add(UserThpSeries(
+        user_id=READER, thp_key="ferritin", name="Ferritin", unit="ng/mL",
+        readings=[
+            {"date": "2026-07-01T00:00Z", "value": "45", "unit": "ng/mL"},
+            {"date": "2026-08-01T00:00Z", "value": "52", "unit": "ng/mL"},
+        ],
+    ))
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, READER, "my ferritin trend")
+    assert out is not None and out["visual"] is not None
+    assert out["visual"]["labels"] == ["01 Jul", "01 Aug"]
+
+
+def test_the_model_is_told_a_chart_was_drawn():
+    """It used to answer "I can't generate a graph" underneath the graph.
+
+    The values are lifted out of band so a figure cannot be quoted that was
+    never read — but that left the model with no idea a chart existed, and the
+    reader saw a chart and a sentence denying it in the same reply.
+    """
+    from app.chat.tools import executors, registry
+
+    payload = {
+        "deterministic_reply": "Your most recent HbA1c is 6.1 %.",
+        executors.OUT_OF_BAND_VISUAL: {
+            "title": "HbA1c — last 3 results",
+            "values": [5.4, 5.9, 6.1],
+            "labels": ["01 Jul 24", "01 Jan 25", "01 Jul 26"],
+        },
+    }
+    visuals: list[dict] = []
+
+    visual = payload.pop(executors.OUT_OF_BAND_VISUAL, None)
+    if visual is not None:
+        visuals.append(visual)
+        payload["chart_shown_to_reader"] = {
+            "title": visual.get("title"),
+            "points": len(visual.get("values") or []),
+            "note": "...",
+        }
+
+    assert visuals, "the chart still reaches the client"
+    told = payload["chart_shown_to_reader"]
+    assert told["points"] == 3
+    assert told["title"] == "HbA1c — last 3 results"
+    # The numbers stay out of the model's reach.
+    assert "5.4" not in json.dumps(payload)
+    assert registry is not None

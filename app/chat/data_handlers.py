@@ -2272,10 +2272,19 @@ async def handle_report_param_ask(
     points = [h for h in reversed(history) if h[0] is not None]
     visual = None
     if len(points) >= 2:
+        # The year goes on the label as soon as the series crosses one.
+        #
+        # Lab history is not a recent window like the tracker charts — a real
+        # reader's hemoglobin here runs from 2019 to 2026 — and "%d %b" renders
+        # that as "14 Oct, 15 Dec, 11 Nov, 30 Oct", which reads as a chart whose
+        # points are shuffled. They were in order the whole time; the label was
+        # throwing away the only thing that showed it.
+        span_years = len({p[0].year for p in points}) > 1
+        label = "%d %b %y" if span_years else "%d %b"
         visual = chart_payload(
             "line",
             f"{test_name} — last {len(points)} results",
-            [p[0].strftime("%d %b") for p in points],
+            [p[0].strftime(label) for p in points],
             [float(p[1]) for p in points],
             unit=unit or None,
         )
