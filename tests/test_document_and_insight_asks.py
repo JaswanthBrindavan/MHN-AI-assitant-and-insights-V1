@@ -124,9 +124,12 @@ async def test_a_dateless_document_falls_back_to_its_upload(db_session):
 
     hits = await latest_documents(db_session, READER, ["report"])
     assert hits[0].doc_date is None
-    # sqlite hands back a naive datetime for a timestamptz column, so compare
-    # the instant rather than the tzinfo the driver happens to attach.
-    assert hits[0].when.replace(tzinfo=None) == now.replace(tzinfo=None)
+    # Compared against the row's own timestamp rather than against `now`:
+    # falling back to the upload is the whole claim, and sqlite hands back a
+    # NAIVE datetime for a timestamptz column, so the two would differ by a
+    # tzinfo that says nothing about the behaviour under test.
+    assert hits[0].when == hits[0].created_at
+    assert hits[0].created_at is not None
 
 
 @pytest.mark.asyncio
