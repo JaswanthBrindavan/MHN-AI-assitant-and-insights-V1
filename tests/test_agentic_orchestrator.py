@@ -422,3 +422,77 @@ async def test_a_drifted_figure_is_still_degraded(db_session):
     )
 
     assert "1,950 ml" not in result.response_message
+
+
+# --------------------------------------------------------------------------- #
+# "Discuss with your clinician" under every answer
+# --------------------------------------------------------------------------- #
+# Reported from a phone, and the reason these are INTEGRATION tests rather than
+# unit tests of the rule: the first attempt at this fix passed its own unit
+# tests and changed nothing on the device, because the flaw was in which
+# variable the rule was given — `chunks`, which retrieval fills in ahead of the
+# engine branch for every question — rather than in the logic around it. Only a
+# test that goes through `handle_chat` can see that.
+
+async def test_a_tracker_answer_does_not_tell_the_reader_to_see_a_doctor(
+    db_session, monkeypatch
+):
+    """The exact turn that shipped wrong: a tool answer, no risk, no citation.
+
+    The trace on the device read `Engine — agentic`, `Records — looked up: get
+    tracker total`, and the reply still carried the red line.
+
+    **Retrieval is forced to return something**, which is the whole point of
+    this test rather than a decoration on it. Production retrieves corpus
+    blocks for EVERY question — `retrieve_chunks` runs ahead of the engine
+    branch — and the first attempt at this fix keyed on that variable. With an
+    empty test corpus that attempt passed a version of this test while the
+    device stayed broken. A chunk is seeded here so the two cannot agree by
+    accident: retrieval returns a block, the answer cites none of it, and the
+    reader gets no clinician line.
+    """
+    from app.rag.retrieval import RetrievedChunk
+
+    async def _one_chunk(db, codes, message):
+        return [
+            RetrievedChunk(
+                id="chunk-1",
+                condition_code="E11",
+                chunk_type="overview",
+                content="Type 2 diabetes is a long-term condition.",
+                score=0.9,
+            )
+        ]
+
+    monkeypatch.setattr("app.chat.orchestrator.retrieve_chunks", _one_chunk)
+
+    provider = _tool_then_say(
+        "get_tracker_total",
+        {"metric": "steps", "period": "this_week"},
+        "You've walked 12,236 steps so far this week.",
+    )
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "how many steps did I walk this week", provider
+    )
+
+    assert result.provenance["path"] == "agentic"
+    assert result.provenance["chunks"], "retrieval must have returned something"
+    assert result.recommended_action == "none", (
+        "a step count is not a reason to see a doctor"
+    )
+
+
+async def test_a_cited_answer_still_points_at_a_clinician(db_session):
+    """The other half. A reply that cites the corpus keeps the line — that is
+    the case it was written for, and this fix must not take it away."""
+    provider = FakeProvider(
+        turns=[LLMTurn(text="Blood pressure is usually reported as two numbers [1].")]
+    )
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "what is blood pressure?", provider
+    )
+
+    if result.provenance.get("path") == "agentic" and not result.provenance.get(
+        "degraded"
+    ):
+        assert result.recommended_action == "discuss_with_clinician"
