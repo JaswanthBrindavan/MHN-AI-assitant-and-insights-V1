@@ -279,9 +279,7 @@ def _lead(escalation: str, risk: str, reply: str) -> str:
     return f"{escalation} {reply}" if risk == HIGH and reply else reply
 
 
-def _answer_action(
-    risk: str, *, chunks: list | None, conditions: list | None, degraded: str | None
-) -> str:
+def _answer_action(risk: str, *, cited: bool, degraded: str | None) -> str:
     """What the reader should do next, matching what the answer actually was.
 
     The agentic engine answers everything — "how did I sleep this week" as well
@@ -292,25 +290,33 @@ def _answer_action(
     appears on every answer stops being a warning; it becomes furniture, and
     the day it matters it is furniture too.
 
-    So it is derived from what the turn did:
+    `cited` is whether the ANSWER used corpus content — `Used.markers`, not
+    `chunks`. That distinction is the whole of this function, and getting it
+    wrong is a mistake this file already documents: retrieval runs ahead of the
+    engine branch, so a tracker total leaves it with the same `chunks` variable
+    in scope as a condition lookup. Reading `chunks` here says every answer is
+    clinical, which is the bug being fixed rather than the fix. See `Used`.
 
-    * HIGH risk keeps its escalation, unchanged.
-    * A degraded turn keeps the pointer, because `safe_reply` literally says
-      "speak with a clinician" — the field and the prose have to agree.
-    * A turn that consulted the CORPUS, or that named a condition, is
-      educational or clinical content and keeps the pointer.
-    * Everything else is the reader's own data read back to them, and gets
-      `none`. A step count is not clinical advice and does not need a doctor.
+    Condition codes are not a signal either, and for the same reason: they are
+    scoped from the message and the reader's own history before the branch, so
+    somebody with a diagnosis on file carries codes into a step count.
 
-    Deliberately not a judgement about the reader's health: it is a judgement
-    about the ANSWER. Nothing here inspects a value to decide whether it looks
-    worrying — that is the triage floor's job, and it has already run.
+      HIGH      -> the escalation, untouched. It ran first and it wins.
+      degraded  -> the pointer, because `safe_reply` says "speak with a
+                   clinician" in prose and the field must agree with it.
+      cited     -> the pointer. Educational or clinical content is the case the
+                   line was written for.
+      otherwise -> none. The reader's own data, read back to them.
+
+    Deliberately a judgement about the ANSWER, never about the reader's health:
+    nothing here inspects a value to decide whether it looks worrying. That is
+    the triage floor's job and it has already run.
     """
     if risk == HIGH:
         return "seek_care_promptly"
     if degraded:
         return "discuss_with_clinician"
-    if chunks or conditions:
+    if cited:
         return "discuss_with_clinician"
     return "none"
 
@@ -2300,7 +2306,7 @@ async def _dispatch_agentic(
         response_message=display,
         risk_level=risk,
         recommended_action=_answer_action(
-            risk, chunks=chunks, conditions=sorted(codes), degraded=degraded
+            risk, cited=bool(used.markers), degraded=degraded
         ),
         provenance=provenance,
         used=used,
