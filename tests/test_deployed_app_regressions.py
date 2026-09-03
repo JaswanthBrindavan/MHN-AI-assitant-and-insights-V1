@@ -553,3 +553,59 @@ async def test_the_banner_returns_when_the_turn_is_about_their_health(
     assert result.risk_level in (HIGH, EMERGENCY), (
         "a second symptom after an open episode must still escalate"
     )
+
+
+# --------------------------------------------------------------------------- #
+# "Discuss with your clinician" on every single answer
+# --------------------------------------------------------------------------- #
+# Reported from the phone: reading back a step count, a sleep total or a water
+# figure all carried the same red line under the reply as a question about a
+# symptom would. The deterministic handlers had already been calibrated —
+# `none`, `self_care`, `review_with_clinician` — but the agentic engine, which
+# answers most real questions, returned `discuss_with_clinician` for everything
+# that was not HIGH risk.
+#
+# A warning that appears on every answer is not a warning. It is furniture, and
+# on the day it matters it is furniture too.
+
+def test_a_plain_data_readout_asks_nobody_to_see_a_doctor():
+    """Their own step count, read back. No corpus, no condition, no risk."""
+    from app.chat.orchestrator import _answer_action
+
+    assert _answer_action(
+        "none", chunks=[], conditions=[], degraded=None
+    ) == "none"
+
+
+def test_a_corpus_answer_still_points_at_a_clinician():
+    """Educational content ABOUT a condition keeps the pointer — that is the
+    case the line was written for."""
+    from app.chat.orchestrator import _answer_action
+
+    assert _answer_action(
+        "none", chunks=["chunk-1"], conditions=[], degraded=None
+    ) == "discuss_with_clinician"
+
+    assert _answer_action(
+        "none", chunks=[], conditions=["E11"], degraded=None
+    ) == "discuss_with_clinician"
+
+
+def test_high_risk_still_escalates():
+    """Nothing here may weaken the escalation. It runs before this and wins."""
+    from app.chat.orchestrator import _answer_action
+    from app.triage.red_flags import HIGH
+
+    assert _answer_action(
+        HIGH, chunks=[], conditions=[], degraded=None
+    ) == "seek_care_promptly"
+
+
+def test_a_degraded_turn_keeps_the_pointer_because_the_reply_says_it():
+    """`safe_reply` literally says "speak with a clinician". The field and the
+    prose have to agree, or the payload contradicts itself."""
+    from app.chat.orchestrator import _answer_action
+
+    assert _answer_action(
+        "none", chunks=[], conditions=[], degraded="validation"
+    ) == "discuss_with_clinician"
