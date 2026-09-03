@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.models.common import as_utc, utcnow
+from app.models.common import as_utc, tracking_today, utcnow
 from app.models.core import User
 from app.models.coredata import (
     Bill,
@@ -1122,27 +1122,28 @@ def calendar_window(
     normally a PARTIAL week -- callers must say so rather than presenting three
     days as a week's total. ``last_week`` is the previous complete week.
 
-    ``today`` anchors on the UTC date, which is the zone mhn-spring is CURRENTLY
-    resolving rollup days in: `app.tracking.zone` is `${TRACKING_ZONE:}` and the
-    deployed service falls back to `Etc/UTC`, warning about it on every boot.
-    Same anchor ``handle_correlation_query`` uses.
+    ``today`` anchors on the TRACKING-ZONE date — the zone mhn-spring resolves
+    a rollup's calendar day in at write time.
 
-    **`TRACKING_ZONE=Asia/Kolkata` has been set on the Spring service but is
-    NOT yet live** — the property is read at startup, and the deployments
-    created by that change are awaiting approval, so the running JVM still has
-    the old value. The moment Spring actually restarts, this and its siblings
-    (`targets`, `handle_correlation_query`, the correlation windows in
-    `app/patterns/service.py`) move to `tracking_today()` together. Moving them
-    first would make every rollup read wrong in the OTHER direction, which is
-    strictly worse than the bug being fixed.
+    This anchored on UTC until 2026-09-03, and correctly: `app.tracking.zone`
+    is `${TRACKING_ZONE:}` and the deployed service was falling back to
+    `Etc/UTC`, warning about it on every boot. That is why this function was
+    deliberately left alone through two earlier rounds of timezone work.
+    `TRACKING_ZONE=Asia/Kolkata` is now pinned AND live (Spring restarted at
+    10:06:24Z; the warning is gone from a complete startup buffer), so the
+    anchor moves with it — together with `targets`,
+    `handle_correlation_query` and the windows in `app/patterns/service.py`,
+    because V2 promises a limit and the total it bounds always agree about
+    where a day begins and half a migration would break that.
 
-    Note when that happens: pinning fixes new writes and reconciles nothing.
-    Rows written before the restart stay UTC-bucketed, so a window reaching
-    back across it mixes two anchors 5.5 hours apart — an edge of at most one
-    day, weighted toward readers whose history is mostly older rows, and it
-    heals as those age out.
+    **The restart is a boundary, and a smear rather than a line.** Spring's
+    reconcilers DELETE and re-INSERT a TRAILING window nightly (3 days for
+    lifestyle, 7 for Sahha), so days near the restart are rewritten in IST and
+    everything older stays UTC-bucketed permanently. A window reaching back
+    across that band mixes two anchors 5.5 hours apart, at most a day at the
+    edge, and the band closes itself once those runs have happened.
     """
-    today = today or utcnow().date()
+    today = today or tracking_today()
     if period == "today":
         return today, today + timedelta(days=1)
     if period == "yesterday":
@@ -2197,14 +2198,14 @@ async def targets(db: AsyncSession, user_id: uuid.UUID) -> list[Target]:
     # goal the reader dated for next Monday is a plan, not today's target.
     # Undated rows are treated as always in force.
     #
-    # UTC today, matching `calendar_window` — see its docstring. `effective_from`
-    # is server-resolved in `app.tracking.zone` (V2 and V38: "only ever written
-    # as today: the application never accepts a date from the client"), and that
-    # property is still resolving to UTC in the running service. V2 also
+    # Tracking-zone today, matching `calendar_window` — see its docstring.
+    # `effective_from` is server-resolved (V2 and V38: "the first day the row
+    # applies to, in the tracking zone ... only ever written as today: the
+    # application never accepts a date from the client"), and V2 further
     # promises a limit and the total it bounds always agree about where a day
-    # begins, so this must move in the SAME commit as the rollup readers and
-    # never before them.
-    today = utcnow().date()
+    # begins. That guarantee spans two tables, so this moved in the SAME commit
+    # as the rollup readers rather than on its own.
+    today = tracking_today()
     best: dict[str, Target] = {}
     for kind, metric, value, unit, direction, since in rows:
         # The WHERE already excludes NULL values; the type checker cannot see

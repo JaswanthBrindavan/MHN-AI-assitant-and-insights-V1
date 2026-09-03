@@ -67,3 +67,49 @@ def test_a_negative_offset_works_too(set_offset):
     set_offset(-300)
     start, _ = tracking_day_bounds(date(2026, 9, 3))
     assert start == datetime(2026, 9, 3, 5, 0, tzinfo=UTC)
+
+
+# --------------------------------------------------------------------------- #
+# Which readers use the anchor, and which deliberately do not
+# --------------------------------------------------------------------------- #
+def test_calendar_window_follows_the_configured_zone(set_offset):
+    """`calendar_window` reads Spring-resolved day buckets, so it must reckon
+    the day the way Spring does. It anchored on UTC until `TRACKING_ZONE` was
+    pinned and live — correctly, because the property was unset and Spring was
+    falling back to Etc/UTC."""
+    # A day where the two zones disagree: 18:45 UTC on the 2nd is 00:15 on the
+    # 3rd at +05:30.
+    from datetime import datetime as _dt
+
+    from app.coredata.service import calendar_window
+
+    at = _dt(2026, 9, 2, 18, 45, tzinfo=UTC)
+    set_offset(330)
+    ist_day = at.astimezone(tracking_zone()).date()
+    set_offset(0)
+    utc_day = at.astimezone(tracking_zone()).date()
+    assert ist_day != utc_day, "fixture must straddle the boundary"
+
+    set_offset(330)
+    span = calendar_window("today", today=ist_day)
+    assert span is not None, "'today' is a calendar period, not a rolling one"
+    since, until = span
+    assert since == ist_day and until == ist_day + timedelta(days=1)
+
+
+def test_age_deliberately_does_not_follow_the_zone(set_offset):
+    """A birthday is a fact about a person, not a bucket mhn-spring wrote.
+    Moving it into this zone would add a dependency to shift an integer number
+    of years by at most a day, so both age readers stay on UTC — and that is a
+    decision, not an oversight."""
+    import pathlib
+    import re
+
+    for path in ("app/health/reference.py", "app/chat/data_handlers.py"):
+        src = pathlib.Path(path).read_text(encoding="utf-8")
+        for m in re.finditer(r"today = utcnow\(\)\.date\(\)", src):
+            window = src[max(0, m.start() - 400):m.start()]
+            assert "dob" in window.lower() or "age" in window.lower(), (
+                f"{path}: a non-age reader still anchors on the UTC date — "
+                "day-bucketed reads must use tracking_today()"
+            )

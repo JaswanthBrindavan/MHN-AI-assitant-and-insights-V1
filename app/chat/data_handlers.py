@@ -103,10 +103,10 @@ from app.health import ranges as health_ranges
 from app.health import reference as health_reference
 from app.knowledge.registry import load_condition_index
 from app.models.chat import ConversationMessage, McpChunk
-from app.models.common import utcnow
+from app.models.common import tracking_today, utcnow
 from app.models.core import User
 from app.models.coredata import MedicalCondition, Report, UnclassifiedFile
-from app.patterns.service import ticked_between, tracking_today
+from app.patterns.service import ticked_between
 from app.rag.retrieval import RetrievedChunk, resolve_scope
 from app.telemetry import record_fail_open
 
@@ -2607,7 +2607,11 @@ async def handle_correlation_query(
     # Half-open [since, until) ending at TODAY, so today is excluded: a day in
     # progress has partial steps and no sleep yet, and both rollups are rebuilt
     # as late syncs land. Comparing finished days only.
-    until = utcnow().date()
+    # Tracking-zone today: these are Spring-resolved day buckets, and since
+    # 2026-09-03T10:06:24Z Spring resolves them in the same zone this reads in.
+    # Rows older than that instant are UTC-bucketed, so a window reaching back
+    # across it is an anchor short by a day at that edge — it ages out.
+    until = tracking_today()
     since = until - timedelta(days=WINDOW_DAYS)
     # Never reach back past the day the reader started tracking AT ALL. A day
     # before their first lifestyle row is a day the feature did not exist for
@@ -2898,7 +2902,7 @@ async def handle_tracker_query(
             total is None
             and span is not None
             and query.period != "today"
-            and span[1] > utcnow().date()
+            and span[1] > tracking_today()
         ):
             # NOT "you logged nothing": the daily totals are Spring's, compiled
             # overnight, so a row added here today is genuinely absent from
