@@ -240,3 +240,78 @@ async def test_an_unknown_zone_claims_nothing(db_session):
     assert out is not None
     assert "flagged" not in out["reply"]
     assert "reference range" not in out["reply"]
+
+
+# --------------------------------------------------------------------------- #
+# One measurement, two spellings
+# --------------------------------------------------------------------------- #
+# Found on a real account: hemoglobin filed as TWO series, "HEMOGLOBIN" with
+# ten readings and "Haemoglobin" with nine, because the upstream key folds case
+# and punctuation but not spelling. The chat matched whichever half the question
+# spelled it like, and named that half's newest reading as the latest -- 16.6
+# from 21 Aug, while the newer 13.4 from 02 Sep sat in the other series.
+def _hb(name, key, readings):
+    return UserThpSeries(
+        user_id=USER, thp_key=key, name=name, unit="g/dL",
+        reference_range="13-17", readings=readings,
+    )
+
+
+def _hb_reading(day: str, value: float):
+    return {"reportId": 1, "reportName": "Labs", "date": day, "value": value,
+            "unit": "g/dL", "referenceRange": "13-17", "status": "normal"}
+
+
+async def test_both_spellings_of_one_marker_are_one_history(db_session):
+    db_session.add(_hb("HEMOGLOBIN", "hemoglobin", [
+        _hb_reading("2026-07-01", 16.2), _hb_reading("2026-08-21", 16.6),
+    ]))
+    db_session.add(_hb("Haemoglobin", "haemoglobin", [
+        _hb_reading("2026-08-31", 14.1), _hb_reading("2026-09-02", 13.4),
+    ]))
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, USER, "my hemoglobin trend")
+    assert out is not None
+    assert out["visual"]["values"] == [16.2, 16.6, 14.1, 13.4], (
+        "both spellings belong to one history, oldest first"
+    )
+    assert "13.4" in out["reply"], "the newest reading across BOTH is the answer"
+    # One title, not one per spelling.
+    assert out["visual"]["title"].lower().count("emoglobin") == 1
+
+
+async def test_the_ask_finds_the_other_spelling(db_session):
+    """Asked the American way, filed the British way, and nothing else on file."""
+    db_session.add(_hb("Haemoglobin", "haemoglobin", [
+        _hb_reading("2026-08-31", 14.1), _hb_reading("2026-09-02", 13.4),
+    ]))
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, USER, "my hemoglobin trend")
+    assert out is not None
+    assert out["visual"]["values"] == [14.1, 13.4]
+
+
+async def test_corpuscular_indices_are_not_folded_into_hemoglobin(db_session):
+    """MCH and MCHC both CONTAIN "hemoglobin" and are different measurements.
+
+    Matching the series by name has no newest-first document order to lean on,
+    so only the exclusions keep them apart.
+    """
+    db_session.add(_hb("HEMOGLOBIN", "hemoglobin", [
+        _hb_reading("2026-07-01", 16.2), _hb_reading("2026-08-21", 16.6),
+    ]))
+    db_session.add(_hb("MEAN CORPUSCULAR HEMOGLOBIN(MCH)", "meancorpuscularhemoglobinmch", [
+        _hb_reading("2026-08-21", 29.4),
+    ]))
+    db_session.add(_hb("Glycosylated Haemoglobin HbA1c", "glycosylatedhaemoglobinhba1c", [
+        _hb_reading("2026-08-31", 5.6),
+    ]))
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, USER, "my hemoglobin trend")
+    assert out is not None
+    assert out["visual"]["values"] == [16.2, 16.6], (
+        "an index that merely mentions hemoglobin is not a hemoglobin reading"
+    )

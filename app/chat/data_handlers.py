@@ -32,6 +32,7 @@ from app.chat.abilities import (
     TrackerQuery,
     is_about_me_query,
     is_my_conditions_query,
+    param_aliases,
     param_tokens,
     parse_ai_result_query,
     parse_correlation_query,
@@ -59,6 +60,7 @@ from app.coredata.service import (
     _RESOURCE_TYPE,
     DOCUMENT_KINDS,
     HRV_SIBLING,
+    DocumentHit,
     WearablePoint,
     active_medications,
     add_lifestyle_log,
@@ -401,6 +403,39 @@ async def _try_backend(
 # --------------------------------------------------------------------------- #
 # Documents
 # --------------------------------------------------------------------------- #
+def _document_card(h: DocumentHit, *, owner_slug: str | None = None) -> dict:
+    """A document card: everything a client needs to open the file through
+    the EXISTING app flow (Spring GET /files/{resource_type}/{id}/url or the
+    health-wallet detail routes). Davi never mints URLs or touches S3.
+
+    The ONE place this shape is built — `handle_section_detail_query` reuses
+    it too, so "pull my latest insurance" gets a card the same way "show my
+    documents" does, rather than a second hand-rolled copy that drifts.
+    """
+    return {
+        "kind": h.kind,
+        "resource_type": _RESOURCE_TYPE.get(h.kind, h.kind),
+        # Spring's file routes address the serial id (verified:
+        # FileController GET /files/{type}/{id}/url takes Integer id).
+        # Clients open the FILE via that presigned-URL endpoint — the
+        # wallet detail page only exists for the viewer's own documents.
+        "id": h.doc_id,
+        # The wallet detail route's public slug is the file's storage-key
+        # UUID — the last segment of the S3 filepath ("reports/<uuid>"),
+        # never the DB id (mirrors the app's fileSlugFromPath).
+        "slug": h.filepath.rsplit("/", 1)[-1],
+        "title": h.title or h.filepath.rsplit("/", 1)[-1],
+        # The date on the DOCUMENT where the extraction found one, so the
+        # card agrees with the paper rather than with the upload log.
+        "date": h.when.isoformat() if h.when else None,
+        "owner": h.owner_label,
+        # For family documents: the member's username, so the client can
+        # open the in-app family view (/family/{slug}/{section}/{file})
+        # instead of the raw file.
+        **({"owner_slug": owner_slug} if owner_slug else {}),
+    }
+
+
 async def handle_document_query(
     db: AsyncSession, user_id: uuid.UUID, message: str,
     *,
@@ -519,31 +554,7 @@ async def handle_document_query(
     # Document cards: everything a client needs to open the file through the
     # EXISTING app flow (Spring GET /files/{resource_type}/{id}/url or the
     # health-wallet detail routes). Davi never mints URLs or touches S3.
-    cards = [
-        {
-            "kind": h.kind,
-            "resource_type": _RESOURCE_TYPE.get(h.kind, h.kind),
-            # Spring's file routes address the serial id (verified:
-            # FileController GET /files/{type}/{id}/url takes Integer id).
-            # Clients open the FILE via that presigned-URL endpoint — the
-            # wallet detail page only exists for the viewer's own documents.
-            "id": h.doc_id,
-            # The wallet detail route's public slug is the file's storage-key
-            # UUID — the last segment of the S3 filepath ("reports/<uuid>"),
-            # never the DB id (mirrors the app's fileSlugFromPath).
-            "slug": h.filepath.rsplit("/", 1)[-1],
-            "title": h.title or h.filepath.rsplit("/", 1)[-1],
-            # The date on the DOCUMENT where the extraction found one, so the
-            # card agrees with the paper rather than with the upload log.
-            "date": h.when.isoformat() if h.when else None,
-            "owner": h.owner_label,
-            # For family documents: the member's username, so the client can
-            # open the in-app family view (/family/{slug}/{section}/{file})
-            # instead of the raw file.
-            **({"owner_slug": owner_slug} if owner_slug else {}),
-        }
-        for h in hits
-    ]
+    cards = [_document_card(h, owner_slug=owner_slug) for h in hits]
     cards.extend(
         {
             "kind": "document",
@@ -2129,24 +2140,69 @@ async def _series_history(
     candidates = await thp_series_names(db, user_id)
     if not candidates:
         return None
-    matches = [c for c in candidates if want <= param_tokens(c[2])]
+
+    # Matched through the registry's own spellings where it has them.
+    #
+    # The feed groups readings on a canonical key that folds case and
+    # punctuation but NOT spelling, so a reader whose labs print both
+    # "Haemoglobin" and "HEMOGLOBIN" has two series holding one measurement --
+    # nineteen readings filed as ten and nine on a real account here. Token
+    # matching saw only the half that spelled it the way the question did, and
+    # the answer named that half's newest reading as the latest. The registry
+    # has listed both spellings all along.
+    aliases = param_aliases(want)
+    if aliases is not None:
+        terms, exclude = aliases
+        matches = [
+            c for c in candidates
+            if any(t in c[2].lower() for t in terms)
+            and not any(x in c[2].lower() for x in exclude)
+        ]
+    else:
+        # The long tail the registry does not curate keeps its own matching.
+        matches = [c for c in candidates if want <= param_tokens(c[2])]
     if not matches:
         return None
-    # Shortest display name wins: "Vitamin D" over "Vitamin D 25-Hydroxy" for
-    # a bare "vitamin d", the same preference the per-document path gets for
-    # free by taking the first match in a newest-first walk.
-    series = await thp_series(db, user_id, min(matches, key=lambda c: len(c[2]))[0])
-    if series is None or not series.readings:
+
+    # Every match, merged -- not the best one.
+    #
+    # Picking one was right while a match meant one series and the rest were
+    # near-misses ("Vitamin D 25-Hydroxy" for a bare "vitamin d"). Once the
+    # spellings match as equals it silently halves the history instead: the
+    # reader has nineteen readings and would be shown whichever nine or ten
+    # sorted first. The shortest name still wins, but only to NAME the result.
+    opened = []
+    for match in matches:
+        series = await thp_series(db, user_id, match[0])
+        if series is not None and series.readings:
+            opened.append(series)
+    if not opened:
         return None
+    primary = min(opened, key=lambda s: len(s.name or ""))
 
     history: list[tuple] = []
-    for r in reversed(series.readings):        # newest-first, as callers expect
-        flag = _SERIES_STATUS.get(r.status or "", "")
-        history.append((
-            r.at, r.value, r.unit or series.unit or "", series.name, flag,
-            _is_abnormal_flag(flag) if flag else False,
-            r.at.strftime("%d %b %Y") if r.at else "date unknown",
-        ))
+    seen: set[tuple] = set()
+    for series in opened:
+        for r in series.readings:
+            # A reading is identified by when it was taken and what it said: the
+            # same lab line reached both series only if it was ingested twice,
+            # and two readings that agree on both are indistinguishable anyway.
+            mark = (r.at, r.value)
+            if mark in seen:
+                continue
+            seen.add(mark)
+            flag = _SERIES_STATUS.get(r.status or "", "")
+            history.append((
+                r.at, r.value, r.unit or series.unit or primary.unit or "",
+                # Named once for the whole merged history: two spellings of one
+                # measurement must not chart under two different titles.
+                primary.name, flag,
+                _is_abnormal_flag(flag) if flag else False,
+                r.at.strftime("%d %b %Y") if r.at else "date unknown",
+            ))
+    # Newest first, as callers expect. Concatenating series leaves it unordered
+    # however each one arrived.
+    history.sort(key=lambda h: (h[0] is None, -h[0].toordinal() if h[0] else 0))
     return history
 
 
@@ -2367,6 +2423,15 @@ async def handle_section_detail_query(
         or (doc.filepath or "").rsplit("/", 1)[-1]
         or label
     )
+    # The card the reader can actually OPEN, in the same shape the document
+    # listing builds — asking to "pull my latest insurance" wants the details
+    # AND a way to open the file, not the contents with no button under them.
+    card = _document_card(
+        DocumentHit(
+            kind=kind, doc_id=doc.id, filepath=doc.filepath,
+            created_at=doc.created_at, owner_label="you", title=title,
+        )
+    )
     fields = ((ai.get("section_extraction") or {}).get("fields")) or {}
     if not fields:
         state = ai.get("state") or "pending"
@@ -2376,6 +2441,7 @@ async def handle_section_detail_query(
                 f"(processing state: {state}). Ask me again once it's done."
             ),
             "action": "none",
+            "documents": [card],
             "provenance": {"path": "section_detail", "kind": kind,
                            "state": state},
         }
@@ -2393,6 +2459,7 @@ async def handle_section_detail_query(
     return {
         "reply": "\n".join(lines),
         "action": "none",
+        "documents": [card],
         "provenance": {"path": "section_detail", "kind": kind,
                        "document_id": doc.id},
     }

@@ -102,3 +102,40 @@ def test_unrecognised_or_missing_kinds_over_answer_rather_than_return_nothing():
         assert normalize_document_kinds(value), value
     assert normalize_document_kinds(["nonsense_kind"]) == ALL_DOCUMENT_KINDS
     assert normalize_document_kinds(None) == ALL_DOCUMENT_KINDS
+
+
+# --------------------------------------------------------------------------- #
+# get_section_details must ALSO produce an openable card
+#
+# "pull my latest insurance" routes here, not to get_documents — and until
+# now this tool returned the policy's CONTENTS (insurer, sum insured,
+# validity) with no `documents` array, so the client had nothing to open.
+# Only get_documents produced cards. Verified against the deployed service.
+# --------------------------------------------------------------------------- #
+async def test_section_details_tool_also_returns_a_document_card(db_session):
+    from app.chat.tools.executors import get_section_details
+    from app.models.coredata import Insurance
+
+    db_session.add(Insurance(
+        user_id=READER, filepath="insurance/policy.pdf",
+        content={"ai": {
+            "classification": {"title": "Star Health Policy"},
+            "section_extraction": {
+                "section": "insurance",
+                "fields": {"policy_number": "SH-991", "sum_insured": "500000"},
+                "flags": [],
+            },
+        }},
+        private=False, created_at=utcnow(),
+    ))
+    await db_session.flush()
+
+    out = await get_section_details(db_session, READER, {"kind": "insurance"}, None)
+    assert out is not None
+    assert OUT_OF_BAND_DOCUMENTS in out, "no card — the client has nothing to open"
+    cards = out[OUT_OF_BAND_DOCUMENTS]
+    assert len(cards) == 1
+    assert cards[0]["kind"] == "insurance"
+    assert cards[0]["resource_type"] == "insurance"
+    assert cards[0]["title"] == "Star Health Policy"
+    assert "SH-991" in out["deterministic_reply"]

@@ -966,6 +966,17 @@ async def test_section_detail_insurance_fields(db_session):
     assert "policy number: SH-991" in out["reply"]
     assert "Star Health Policy" in out["reply"]
     assert out["provenance"]["path"] == "section_detail"
+    # "pull my latest insurance" wants the details AND a way to open the
+    # file — get_section_details used to return the contents with nothing
+    # for the client to open, while only get_documents produced cards.
+    assert out["documents"] and len(out["documents"]) == 1
+    card = out["documents"][0]
+    assert card["kind"] == "insurance"
+    assert card["resource_type"] == "insurance"
+    assert card["slug"] == "policy.pdf"
+    assert card["title"] == "Star Health Policy"
+    assert card["owner"] == "you"
+    assert card["id"] is not None
 
 
 @pytest.mark.asyncio
@@ -985,6 +996,9 @@ async def test_section_detail_pending_document(db_session):
     assert out is not None
     assert "doesn't have extracted details yet" in out["reply"]
     assert "classifying" in out["reply"]
+    # The document exists even though extraction has not finished — still
+    # worth a card so the reader can open the raw file themselves.
+    assert out["documents"] and out["documents"][0]["kind"] == "bill"
 
 
 @pytest.mark.asyncio

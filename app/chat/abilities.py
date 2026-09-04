@@ -434,8 +434,15 @@ METRIC_REGISTRY: dict[str, dict] = {
         "source": "report_param",
         "param_terms": ("hemoglobin", "haemoglobin"),
         # "Hemoglobin A1c" sits FIRST in real extractions — plain hemoglobin
-        # must never return the A1c percentage.
-        "param_exclude": ("a1c", "glycated", "glycosylated"),
+        # must never return the A1c percentage. MCH and MCHC are excluded for
+        # the same reason and were not: every one of them CONTAINS "hemoglobin",
+        # and the terms are matched as substrings. The per-document walk got
+        # away with it because a panel prints plain haemoglobin before the
+        # corpuscular indices; matching series by name has no such order to
+        # lean on, and "MEAN CORPUSCULAR HEMOGLOBIN(MCH)" is a real series on
+        # a real account here.
+        "param_exclude": ("a1c", "glycated", "glycosylated",
+                          "mean corpuscular", "mch"),
         "display": "hemoglobin", "unit": "g/dL",
     },
 }
@@ -920,6 +927,32 @@ def parse_report_param_ask(message: str) -> str | None:
     if len(term) < 3:
         return None
     return term
+
+
+def param_aliases(
+    want: set[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """The registry's spellings for an asked parameter, and what they must not catch.
+
+    Labs print both "Haemoglobin" and "HEMOGLOBIN", and upstream folds only case
+    and punctuation into the series key, so one reader's history splits in two on
+    spelling alone — nineteen readings filed as ten and nine, with the chat
+    answering from whichever half it matched and calling it the latest. The
+    registry has named both spellings all along; this is what lets a series
+    lookup use them.
+
+    None for a parameter the registry does not curate (basophils, RDW, GGT — the
+    long tail), leaving the caller its own token matching.
+    """
+    for spec in METRIC_REGISTRY.values():
+        terms = spec.get("param_terms")
+        if not terms:
+            continue
+        # Whole-term equality, not containment: "hemoglobin" must find the
+        # hemoglobin spec and not the one whose terms merely mention it.
+        if any(param_tokens(t) == want for t in terms):
+            return tuple(terms), tuple(spec.get("param_exclude", ()))
+    return None
 
 
 def param_tokens(text: str) -> set[str]:

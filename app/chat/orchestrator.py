@@ -321,6 +321,73 @@ def _answer_action(risk: str, *, cited: bool, degraded: str | None) -> str:
     return "none"
 
 
+# Everyday and clinical words for the same measurement. A chart tagged
+# `blood_sugar` and a reader asking about "glucose" are about the same thing;
+# holding the chart against its own tag alone dropped it. Kept deliberately
+# short — every alias added here is a new way for the WRONG chart to match,
+# which is the failure this whole path exists to prevent.
+_METRIC_ALIASES: dict[str, tuple[str, ...]] = {
+    "sugar": ("glucose",),
+    "glucose": ("sugar",),
+    "pressure": ("hypertension",),
+    "water": ("hydration",),
+}
+
+
+def _visual_topic_words(visual: dict) -> set[str]:
+    """Words that name a chart's SUBJECT, for matching it against the ask.
+
+    `metric` is a stable key ("sleep", "blood_sugar") set by every chart
+    builder except the multi-metric lifestyle summary, which has no single
+    subject to match anyway. The title's leading words back it up — a report
+    parameter's trend chart (`"Fasting Glucose — last 3 results"`) never
+    carries a `metric` at all — filtered to length >= 4 so "the", "a week"
+    and the like cannot manufacture a false match.
+    """
+    words: set[str] = set()
+    metric = visual.get("metric")
+    if metric:
+        words.add(str(metric).replace("_", " ").strip().lower())
+    title = str(visual.get("title") or "")
+    head = re.split(r"[-—]", title, maxsplit=1)[0]
+    words.update(w.lower() for w in head.split() if len(w) >= 4)
+    for word in list(words):
+        for part in word.split():
+            words.update(_METRIC_ALIASES.get(part, ()))
+    return {w for w in words if w}
+
+
+def _matching_visual(visuals: list[dict], asked: str) -> dict | None:
+    """The chart from THIS turn that the reader actually asked for, or none.
+
+    Reported from the deployed app: asked for "fasting blood glucose trends"
+    and got a SLEEP graph. Several tools can run in one turn, each producing
+    its own chart, and attaching `tool_visuals[0]` shipped whichever one
+    happened to be called FIRST — with no regard for which tool answered the
+    question. A chart ships only when its own subject is named in the ask and
+    no OTHER chart's subject is too; ambiguous or unmatched charts are dropped
+    rather than guessed at, since a wrong chart under a health answer is worse
+    than no chart.
+
+    Held against the QUESTION, never the reply. The reply was tried first and
+    is the wrong signal twice over: it paraphrases, so a weight chart under
+    "you are down 2 kg since March" and a water chart under "you drank about
+    2.1 L a day" both vanished; and in the reported bug it *describes the
+    wrong data* ("here is your sleep for the week"), which matched the sleep
+    chart and kept the very graph this exists to drop. The reader names the
+    metric they want in the question. That is the only half that is about
+    what they asked rather than about what was found.
+
+    The cost is a follow-up that names nothing — "what about last month?" —
+    losing its chart. That is the direction to fail in.
+    """
+    if not visuals:
+        return None
+    low = asked.lower()
+    matches = [v for v in visuals if any(w in low for w in _visual_topic_words(v))]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _led_action(risk: str, reply: str, action: str) -> str:
     """The action that matches the reply the reader actually got.
 
@@ -2310,7 +2377,7 @@ async def _dispatch_agentic(
         ),
         provenance=provenance,
         used=used,
-        visual=None if degraded else (tool_visuals[0] if tool_visuals else None),
+        visual=None if degraded else _matching_visual(tool_visuals, message),
         documents=None if degraded else (tool_documents or None),
         language=lang,
         trace=trace,
