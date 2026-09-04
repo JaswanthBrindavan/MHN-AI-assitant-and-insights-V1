@@ -73,3 +73,36 @@ async def test_first_turn_has_no_recent_block(db_session):
     await handle_chat(db_session, USER, "tell me about diabetes", provider)
     # First message of a session → no prior turns → no recent-conversation block.
     assert "Recent conversation" not in provider.systems[-1]
+
+
+# --------------------------------------------------------------------------- #
+# The SAME guarantee, on the agentic engine — production runs CHAT_ENGINE=
+# agentic, and `_SpyProvider` above only overrides `.generate`, the LEGACY
+# call. `run_agent` calls `.generate_turn` instead, so the two tests above
+# have never actually looked at what the engine that answers real users was
+# told — an engine-parity gap this codebase has hit before (see
+# test_agentic_orchestrator.py). `FakeProvider.generate_turn` records to
+# `.calls` regardless of subclass, so no spy override is needed here.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_followup_recent_turns_reach_the_agentic_prompt(
+    db_session, monkeypatch
+):
+    from app.config import get_settings
+
+    monkeypatch.setenv("CHAT_ENGINE", "agentic")
+    get_settings.cache_clear()
+    try:
+        await _seed_diabetes_chunk(db_session)
+        provider = FakeProvider(responses=["Here is some information [1]."] * 2)
+
+        r1 = await handle_chat(db_session, USER, "tell me about diabetes", provider)
+        await handle_chat(
+            db_session, USER, "is it serious?", provider, r1.session_id
+        )
+
+        second_system = join_system(provider.calls[-1]["system"])
+        assert "Recent conversation" in second_system
+        assert "diabetes" in second_system.lower()
+    finally:
+        get_settings.cache_clear()

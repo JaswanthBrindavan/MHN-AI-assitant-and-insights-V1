@@ -321,6 +321,45 @@ def _answer_action(risk: str, *, cited: bool, degraded: str | None) -> str:
     return "none"
 
 
+def _visual_topic_words(visual: dict) -> set[str]:
+    """Words that name a chart's SUBJECT, for matching it against a reply.
+
+    `metric` is a stable key ("sleep", "blood_sugar") set by every chart
+    builder except the multi-metric lifestyle summary, which has no single
+    subject to match anyway. The title's leading words back it up — a report
+    parameter's trend chart (`"Fasting Glucose — last 3 results"`) never
+    carries a `metric` at all — filtered to length >= 4 so "the", "a week"
+    and the like cannot manufacture a false match.
+    """
+    words: set[str] = set()
+    metric = visual.get("metric")
+    if metric:
+        words.add(str(metric).replace("_", " ").strip().lower())
+    title = str(visual.get("title") or "")
+    head = re.split(r"[-—]", title, maxsplit=1)[0]
+    words.update(w.lower() for w in head.split() if len(w) >= 4)
+    return {w for w in words if w}
+
+
+def _matching_visual(visuals: list[dict], text: str) -> dict | None:
+    """The chart from THIS turn that the reply is actually about, or none.
+
+    Reported from the deployed app: asked for "fasting blood glucose trends"
+    and got a SLEEP graph. Several tools can run in one turn, each producing
+    its own chart, and attaching `tool_visuals[0]` shipped whichever one
+    happened to be called FIRST — with no regard for which tool actually
+    answered the question. A chart ships only when its own subject is named
+    in the reply and no OTHER chart's subject is too; ambiguous or unmatched
+    charts are dropped rather than guessed at, since a wrong chart under a
+    health answer is worse than no chart.
+    """
+    if not visuals:
+        return None
+    low = text.lower()
+    matches = [v for v in visuals if any(w in low for w in _visual_topic_words(v))]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _led_action(risk: str, reply: str, action: str) -> str:
     """The action that matches the reply the reader actually got.
 
@@ -2310,7 +2349,7 @@ async def _dispatch_agentic(
         ),
         provenance=provenance,
         used=used,
-        visual=None if degraded else (tool_visuals[0] if tool_visuals else None),
+        visual=None if degraded else _matching_visual(tool_visuals, display),
         documents=None if degraded else (tool_documents or None),
         language=lang,
         trace=trace,

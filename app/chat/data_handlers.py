@@ -59,6 +59,7 @@ from app.coredata.service import (
     _RESOURCE_TYPE,
     DOCUMENT_KINDS,
     HRV_SIBLING,
+    DocumentHit,
     WearablePoint,
     active_medications,
     add_lifestyle_log,
@@ -401,6 +402,39 @@ async def _try_backend(
 # --------------------------------------------------------------------------- #
 # Documents
 # --------------------------------------------------------------------------- #
+def _document_card(h: DocumentHit, *, owner_slug: str | None = None) -> dict:
+    """A document card: everything a client needs to open the file through
+    the EXISTING app flow (Spring GET /files/{resource_type}/{id}/url or the
+    health-wallet detail routes). Davi never mints URLs or touches S3.
+
+    The ONE place this shape is built — `handle_section_detail_query` reuses
+    it too, so "pull my latest insurance" gets a card the same way "show my
+    documents" does, rather than a second hand-rolled copy that drifts.
+    """
+    return {
+        "kind": h.kind,
+        "resource_type": _RESOURCE_TYPE.get(h.kind, h.kind),
+        # Spring's file routes address the serial id (verified:
+        # FileController GET /files/{type}/{id}/url takes Integer id).
+        # Clients open the FILE via that presigned-URL endpoint — the
+        # wallet detail page only exists for the viewer's own documents.
+        "id": h.doc_id,
+        # The wallet detail route's public slug is the file's storage-key
+        # UUID — the last segment of the S3 filepath ("reports/<uuid>"),
+        # never the DB id (mirrors the app's fileSlugFromPath).
+        "slug": h.filepath.rsplit("/", 1)[-1],
+        "title": h.title or h.filepath.rsplit("/", 1)[-1],
+        # The date on the DOCUMENT where the extraction found one, so the
+        # card agrees with the paper rather than with the upload log.
+        "date": h.when.isoformat() if h.when else None,
+        "owner": h.owner_label,
+        # For family documents: the member's username, so the client can
+        # open the in-app family view (/family/{slug}/{section}/{file})
+        # instead of the raw file.
+        **({"owner_slug": owner_slug} if owner_slug else {}),
+    }
+
+
 async def handle_document_query(
     db: AsyncSession, user_id: uuid.UUID, message: str,
     *,
@@ -519,31 +553,7 @@ async def handle_document_query(
     # Document cards: everything a client needs to open the file through the
     # EXISTING app flow (Spring GET /files/{resource_type}/{id}/url or the
     # health-wallet detail routes). Davi never mints URLs or touches S3.
-    cards = [
-        {
-            "kind": h.kind,
-            "resource_type": _RESOURCE_TYPE.get(h.kind, h.kind),
-            # Spring's file routes address the serial id (verified:
-            # FileController GET /files/{type}/{id}/url takes Integer id).
-            # Clients open the FILE via that presigned-URL endpoint — the
-            # wallet detail page only exists for the viewer's own documents.
-            "id": h.doc_id,
-            # The wallet detail route's public slug is the file's storage-key
-            # UUID — the last segment of the S3 filepath ("reports/<uuid>"),
-            # never the DB id (mirrors the app's fileSlugFromPath).
-            "slug": h.filepath.rsplit("/", 1)[-1],
-            "title": h.title or h.filepath.rsplit("/", 1)[-1],
-            # The date on the DOCUMENT where the extraction found one, so the
-            # card agrees with the paper rather than with the upload log.
-            "date": h.when.isoformat() if h.when else None,
-            "owner": h.owner_label,
-            # For family documents: the member's username, so the client can
-            # open the in-app family view (/family/{slug}/{section}/{file})
-            # instead of the raw file.
-            **({"owner_slug": owner_slug} if owner_slug else {}),
-        }
-        for h in hits
-    ]
+    cards = [_document_card(h, owner_slug=owner_slug) for h in hits]
     cards.extend(
         {
             "kind": "document",
@@ -2367,6 +2377,15 @@ async def handle_section_detail_query(
         or (doc.filepath or "").rsplit("/", 1)[-1]
         or label
     )
+    # The card the reader can actually OPEN, in the same shape the document
+    # listing builds — asking to "pull my latest insurance" wants the details
+    # AND a way to open the file, not the contents with no button under them.
+    card = _document_card(
+        DocumentHit(
+            kind=kind, doc_id=doc.id, filepath=doc.filepath,
+            created_at=doc.created_at, owner_label="you", title=title,
+        )
+    )
     fields = ((ai.get("section_extraction") or {}).get("fields")) or {}
     if not fields:
         state = ai.get("state") or "pending"
@@ -2376,6 +2395,7 @@ async def handle_section_detail_query(
                 f"(processing state: {state}). Ask me again once it's done."
             ),
             "action": "none",
+            "documents": [card],
             "provenance": {"path": "section_detail", "kind": kind,
                            "state": state},
         }
@@ -2393,6 +2413,7 @@ async def handle_section_detail_query(
     return {
         "reply": "\n".join(lines),
         "action": "none",
+        "documents": [card],
         "provenance": {"path": "section_detail", "kind": kind,
                        "document_id": doc.id},
     }
