@@ -302,7 +302,7 @@ def _fake_visual(title: str, metric: str) -> dict:
     }
 
 
-async def test_the_attached_chart_matches_what_the_reply_is_about(
+async def test_the_attached_chart_matches_what_was_asked(
     db_session, monkeypatch
 ):
     """Reported from the deployed app: asked for "fasting blood glucose
@@ -313,6 +313,10 @@ async def test_the_attached_chart_matches_what_the_reply_is_about(
     glucose question only. Attaching `tool_visuals[0]` unconditionally means
     whichever tool the model happened to call FIRST wins the chart, with no
     regard for which one the reply is actually about.
+
+    Held against the QUESTION: the reply is the wrong signal, because in this
+    exact bug the reply describes the wrong data and would re-match the very
+    chart being dropped. See test_a_chart_survives_a_reply_that_paraphrases.
     """
     from app.chat.tools import executors, registry
 
@@ -360,6 +364,48 @@ async def test_the_attached_chart_matches_what_the_reply_is_about(
     )
     assert result.visual is not None, "the glucose chart should be attached"
     assert result.visual["metric"] == "glucose"
+
+
+async def test_a_chart_survives_a_reply_that_paraphrases(db_session, monkeypatch):
+    """A chart is held against the ask, so a reply that never names the
+    metric still keeps it.
+
+    Matching the reply instead looked reasonable and quietly traded one bug
+    for another: "You are down 2 kg since March" is a good answer about
+    weight that never says "weight", and holding the chart against those
+    words dropped it. Every metric whose natural answer is a number and a
+    direction has this shape.
+    """
+    from app.chat.tools import executors, registry
+
+    async def _weight(*_a, **_kw):
+        return {
+            "deterministic_reply": "You are down 2 kg since March.",
+            executors.OUT_OF_BAND_VISUAL: _fake_visual(
+                "Weight - last 6 months", "weight"
+            ),
+        }
+
+    monkeypatch.setitem(registry.EXECUTORS, "get_tracker_total", _weight)
+    provider = FakeProvider(
+        turns=[
+            LLMTurn(
+                tool_calls=(
+                    ToolCall(
+                        id="c1", name="get_tracker_total",
+                        arguments={"metric": "weight", "period": "month"},
+                    ),
+                ),
+                stop_reason="tool_use",
+            ),
+            LLMTurn(text="You are down 2 kg since March."),
+        ]
+    )
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "how is my weight going?", provider,
+    )
+    assert result.visual is not None, "the ask named weight, so the chart stays"
+    assert result.visual["metric"] == "weight"
 
 
 # --------------------------------------------------------------------------- #
