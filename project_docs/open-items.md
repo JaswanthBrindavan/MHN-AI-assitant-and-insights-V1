@@ -495,3 +495,43 @@ after midnight IST. It writes a synthetic entry into a real person's health
 record — one the chat later summarises back to them as something they did — to
 close a gap in our evidence. The confirmation arrives free by waiting. If it is
 ever worth doing, it is the user's call, not an agent's.
+
+### TZ1 — result, 2026-09-04: falsifier PASSED, confirmatory half still untested
+
+Run by the user against production. **The model was not falsified.**
+
+**Check 3, the falsifier — passed.** Four discriminating buckets from 26–27
+Aug, every one attributed to the **UTC** anchor:
+
+| bucket_start | metric | stored | if UTC | if IST | anchored |
+|---|---|---|---|---|---|
+| 2026-08-27 | water | 1 | 1 | 4 | UTC |
+| 2026-08-26 | water | 5 | 5 | 2 | UTC |
+| 2026-08-26 | alcohol | 2 | 2 | — | UTC |
+| 2026-08-26 | smoking | 2 | 2 | — | UTC |
+
+Part B: `utc_bucket_exists = true` for all five baseline log rows — no bucket
+vanished. Nothing outside the reconciliation window moved, which is what the
+trailing-window model predicts and what the merged anchor flip rests on.
+
+**The `EXISTS` trap materialised exactly as predicted, and was caught.** Part B
+reports `ist_bucket_exists = true` for the two water rows and false for
+alcohol and smoking, which reads as water having been re-bucketed to IST. It
+was not: part A shows the 27-Aug water bucket holds `stored_entries = 1`
+against `if_utc = 1` and `if_ist = 4`, so it is UTC-anchored and contains one
+genuine 27-Aug-UTC water log. Relying on `EXISTS` alone would have reported a
+falsification that did not happen. This is why part A recomputes both
+groupings and compares counts instead of asking whether a bucket exists.
+
+**Checks 1 and 2 — UNTESTED, not passed.** The output contains no rows dated
+3–4 Sep at all: no lifestyle entry has been logged in the discriminating band
+(at or after 18:30 UTC) since the restart, so there is nothing to confirm the
+post-restart half against. Recorded as untested. Part C
+(`logs since the restart` / `in the discriminating band`) distinguishes "no
+data" from "data that cannot discriminate" and should be re-run before anyone
+concludes the post-restart behaviour is verified.
+
+**Status: the half that could have broken the flip did not. The half that
+would confirm it positively is still open, and needs one natural late-evening
+lifestyle entry to become testable.** Manufacturing one remains out of bounds
+for the reason recorded above.
