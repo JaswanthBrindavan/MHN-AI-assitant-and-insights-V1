@@ -2004,10 +2004,26 @@ async def handle_ai_result_query(
         title = str(classification["title"])
 
     lines: list[str] = []
-    action = "review_with_clinician"
     insights = (result.get("insights") or {})
     extraction = (result.get("extraction") or {})
     section_extraction = (result.get("section_extraction") or {})
+
+    # Nothing to act on until something says otherwise.
+    #
+    # This defaulted to "review_with_clinician" and never came back down, so a report
+    # whose every value sits inside its printed range still arrived tagged to take to a
+    # doctor. A prompt that fires on good news and bad news alike is not caution, it is
+    # noise, and it spends the attention needed for the times something IS wrong.
+    # Reported from the deployed app on a report with 0 flags and 4 stable values.
+    #
+    # Each branch below raises it on its own evidence. Insight items count as evidence:
+    # mhn-ai writes them when it has something to say, and "LDL slightly elevated" is a
+    # finding whether or not extracted values came with it.
+    action = "none"
+    flagged = sum(
+        1 for r in (extraction.get("results") or [])
+        if _is_abnormal_flag((r.get("abnormal_flag") or "").strip().lower())
+    )
 
     if insights.get("insights") or insights.get("summary"):
         if insights.get("summary"):
@@ -2034,14 +2050,10 @@ async def handle_ai_result_query(
     elif extraction.get("results"):
         results = extraction["results"]
         lines.append(f"Here's what was read from \"{title}\":")
-        abnormal = 0
+        abnormal = flagged
         for r in results[:8]:
             flag = (r.get("abnormal_flag") or "").strip().lower()
-            if _is_abnormal_flag(flag):
-                abnormal += 1
-                flag_note = f" — {flag}"
-            else:
-                flag_note = ""
+            flag_note = f" — {flag}" if _is_abnormal_flag(flag) else ""
             unit = f" {r.get('unit')}" if r.get("unit") else ""
             lines.append(
                 f"• {r.get('test_name', 'value')}: {r.get('value', '?')}"
@@ -3291,7 +3303,15 @@ async def handle_about_me_query(
         "provenance": {
             "path": "about_me",
             "asked": "profile" if wants_profile else "conditions",
-            "conditions": len(conditions),
+            # A LIST, like every other path that reports this key.
+            #
+            # This one sent `len(conditions)`, so `provenance.conditions` was a count
+            # here and a list of codes everywhere else. Android decodes it strictly and
+            # threw -- "Expected BEGIN_ARRAY but was NUMBER" -- which surfaced as
+            # "Something went wrong. Please try again." on every "who am I". The reply
+            # was correct and complete the whole time; a diagnostic field killed it.
+            # One key, one type: the length is still there, in the obvious way.
+            "conditions": sorted(c.name for c in conditions if c.name),
         },
     }
 

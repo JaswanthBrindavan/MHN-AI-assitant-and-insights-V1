@@ -164,9 +164,25 @@ def render_adherence(name: str, adherence: Adherence) -> str:
             f"There are no scheduled doses on record for {name} in that "
             "period, so there is nothing to measure yet."
         )
+    # "You took X%" is a claim about the person; the dose log only supports a claim
+    # about the log. A dose taken and never logged is recorded identically to one that
+    # was missed, so the sentence says "logged as taken" throughout.
+    window = f"Between {adherence.from_date} and {adherence.to_date}"
+    if adherence.taken == 0:
+        # Reported from the deployed app: a flat "you took 0.0% of your scheduled
+        # metformin doses" over a whole month. Read as an accusation, and it may only
+        # mean the reader never opened the app to tick them off — which is the more
+        # likely reading of a round zero, and the one the number cannot distinguish.
+        return (
+            f"{window}, none of the scheduled doses of {name} are logged as taken "
+            "— 0.0%. A dose taken without logging is recorded exactly like a missed "
+            "one, so this measures the record rather than the medicine. If you have "
+            "been taking it, the log is what needs catching up; if you have not, that "
+            "is worth raising with your prescriber — do not change a dose on your own."
+        )
     return (
-        f"Over {adherence.from_date} to {adherence.to_date} you took "
-        f"{adherence.percentage:.1f}% of the scheduled doses of {name}. "
-        "As-needed doses are not counted. If keeping up is difficult, that is "
+        f"{window}, {adherence.percentage:.1f}% of the scheduled doses of {name} "
+        "are logged as taken. As-needed doses are not counted, and a dose taken "
+        "without logging counts as missed here. If keeping up is difficult, that is "
         "worth raising with your prescriber — do not change a dose on your own."
     )
