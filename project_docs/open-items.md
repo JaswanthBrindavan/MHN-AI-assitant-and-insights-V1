@@ -535,3 +535,88 @@ concludes the post-restart behaviour is verified.
 would confirm it positively is still open, and needs one natural late-evening
 lifestyle entry to become testable.** Manufacturing one remains out of bounds
 for the reason recorded above.
+
+#### TZ1 part C, 2026-09-04: there IS post-restart data, and none of it discriminates
+
+| | |
+|---|---|
+| logs since the restart | 7 |
+| of those, in the discriminating band (>=18:30 UTC) | **0** |
+| newest `lifestyle_log` instant (UTC) | 2026-09-03 14:48:59 |
+| buckets dated 2026-09-02..04 | 21 |
+| newest `bucket_start` | 2026-09-03 |
+
+So the confirmatory half is not waiting on time, it is waiting on BEHAVIOUR.
+The newest entry is 14:48 UTC = 20:18 IST — evening in the reader's day, but
+still the same calendar date in both zones. The two anchors only separate at or
+after 18:30 UTC, i.e. after midnight IST. Nobody has logged in that band.
+
+The 21 buckets covering 2–4 Sep were rebuilt by this morning's 03:15 IST
+reconciler under the new zone, and they are identical under either anchor
+precisely because none of their underlying logs sits in the band. A rebuild
+that cannot change anything cannot demonstrate anything either.
+
+**Standing status, and it should not block anything.** The half that could have
+invalidated the merged anchor flip — did history outside the window move? — was
+tested and passed. What remains is positive confirmation of behaviour that
+Spring's own code already asserts (`ManualTrackingReconciler` resolves days
+through `TrackingZone`). It closes itself the first time anyone logs something
+after midnight IST in normal use. Nobody needs to watch for it, and
+manufacturing the entry stays out of bounds.
+
+Re-run part C first; only if it reports a non-zero discriminating count is
+there anything new to see in parts A and B.
+
+##### The queries, so they need not be reconstructed
+
+```sql
+-- PART A — which anchor is each bucket actually on? Attributes by RECOMPUTING
+-- both groupings and comparing to stored `entries`. Read-only.
+WITH l AS (
+    SELECT user_id, log_type::text AS metric,
+           (logged_at AT TIME ZONE 'UTC')::date          AS utc_day,
+           (logged_at AT TIME ZONE 'Asia/Kolkata')::date AS ist_day
+    FROM lifestyle_log WHERE logged_at IS NOT NULL),
+utc_g AS (SELECT user_id, metric, utc_day AS day, count(*)::int AS n FROM l GROUP BY 1,2,3),
+ist_g AS (SELECT user_id, metric, ist_day AS day, count(*)::int AS n FROM l GROUP BY 1,2,3)
+SELECT d.bucket_start, d.metric::text AS metric, d.entries AS stored_entries,
+       u.n AS if_utc_anchored, i.n AS if_ist_anchored,
+       CASE WHEN u.n IS NOT DISTINCT FROM i.n THEN 'ambiguous (cannot tell)'
+            WHEN d.entries = u.n THEN 'UTC'
+            WHEN d.entries = i.n THEN 'IST'
+            ELSE 'NEITHER  <-- investigate' END AS anchored_on
+FROM lifestyle_daily_total d
+LEFT JOIN utc_g u ON u.user_id=d.user_id AND u.metric=d.metric::text AND u.day=d.bucket_start
+LEFT JOIN ist_g i ON i.user_id=d.user_id AND i.metric=d.metric::text AND i.day=d.bucket_start
+WHERE u.n IS DISTINCT FROM i.n
+ORDER BY d.bucket_start DESC, d.metric;
+
+-- PART B — did a bucket VANISH? Part A drives from the rollup and cannot see
+-- a deletion. `EXISTS` here is for existence ONLY, never for attribution.
+SELECT g.logged_at, g.metric, g.utc_day, g.ist_day,
+       EXISTS (SELECT 1 FROM lifestyle_daily_total t WHERE t.user_id=g.user_id
+                 AND t.metric::text=g.metric AND t.bucket_start=g.utc_day) AS utc_bucket_exists,
+       EXISTS (SELECT 1 FROM lifestyle_daily_total t WHERE t.user_id=g.user_id
+                 AND t.metric::text=g.metric AND t.bucket_start=g.ist_day) AS ist_bucket_exists
+FROM (SELECT user_id, log_type::text AS metric, logged_at,
+             (logged_at AT TIME ZONE 'UTC')::date          AS utc_day,
+             (logged_at AT TIME ZONE 'Asia/Kolkata')::date AS ist_day
+      FROM lifestyle_log WHERE logged_at IS NOT NULL) g
+WHERE g.utc_day <> g.ist_day
+ORDER BY g.logged_at DESC;
+
+-- PART C — is there anything to test yet? Run this FIRST.
+SELECT 'logs since the restart' AS what, count(*)::text AS value
+FROM lifestyle_log WHERE logged_at >= TIMESTAMPTZ '2026-09-03 10:06:24+00'
+UNION ALL
+SELECT 'of those, in the discriminating band (>=18:30 UTC)', count(*)::text
+FROM lifestyle_log WHERE logged_at >= TIMESTAMPTZ '2026-09-03 10:06:24+00'
+  AND (logged_at AT TIME ZONE 'UTC')::date <> (logged_at AT TIME ZONE 'Asia/Kolkata')::date;
+```
+
+**Reading part B:** `ist_bucket_exists = true` is NOT evidence a row was
+bucketed there — a bucket exists whenever any entry fell on that day. On
+2026-09-04 it read true for water and false for alcohol and smoking, which
+looks like water moved to IST. Part A showed that bucket is UTC-anchored with
+one genuine 27-Aug-UTC entry. Attribute with part A; use part B only to detect
+a deletion.
