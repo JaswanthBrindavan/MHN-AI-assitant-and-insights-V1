@@ -1162,10 +1162,18 @@ def calendar_window(
 async def active_medications(
     db: AsyncSession, user_id: uuid.UUID, *, limit: int = 8
 ) -> list[str]:
-    """Current (non-stopped, non-private) medications as "Name Strength" strings.
+    """Medications the reader is actually on now, as "Name Strength" strings.
 
     Ordered by name for determinism. PRN ("as needed") meds are included and
     marked. Never returns private rows.
+
+    "Now" needs `effective_end`, not just `stopped_at`. A course that simply ran
+    out is neither stopped nor deleted, and without this the assistant reads back
+    medication somebody finished — on a real account, "Dolo 650 mg" and
+    "Telmisartan 40 mg" both ended on 02 Sep and were still being listed as
+    current on 04 Sep. Compared against the DATABASE's today rather than the
+    service's, so a clock or a timezone between them cannot expire a course a day
+    early or keep it a day late.
     """
     rows = (
         await db.execute(
@@ -1177,18 +1185,60 @@ async def active_medications(
                 # `stopped_at IS NULL`, so without this it reads as current.
                 MedicineTracking.deleted_at.is_(None),
                 MedicineTracking.private.is_(False),
+                sa.or_(
+                    MedicineTracking.effective_end.is_(None),
+                    MedicineTracking.effective_end >= sa.func.current_date(),
+                ),
             )
             .order_by(MedicineTracking.name.asc(), MedicineTracking.id.asc())
-            .limit(limit)
+            # Read past the limit so that collapsing duplicates below cannot
+            # return fewer than were asked for.
+            .limit(limit * 2)
         )
     ).scalars().all()
+
     out: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
     for r in rows:
-        label = r.name if not r.strength else f"{r.name} {r.strength}"
-        if r.is_prn:
-            label += " (as needed)"
+        label = _medication_label(r.name, r.strength, r.is_prn)
+        # Everything that could make two rows different prescriptions, not just
+        # the name. Same drug at a different dose, in a different form, or on a
+        # different schedule is a different course and belongs on the list twice;
+        # only rows that agree on all of it are one course entered twice.
+        key = (
+            _squash(label),
+            _squash(r.dosage_form or ""),
+            _squash(r.schedule_pattern or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
         out.append(label)
+        if len(out) == limit:
+            break
     return out
+
+
+def _squash(text: str) -> str:
+    """Lowercased, with runs of whitespace closed up — for comparing, not showing."""
+    return " ".join(text.lower().split())
+
+
+def _medication_label(name: str, strength: str | None, is_prn: bool) -> str:
+    """"Dolo 650 mg", and never "metformin 500 mg 500 mg".
+
+    The strength lives in its own column, but plenty of rows carry it in the name
+    as well — whoever typed "metformin 500 mg" then filled the strength box with
+    the same thing. Appending unconditionally read the dose back twice, which on a
+    medication list is the kind of stutter that makes a reader doubt the rest.
+    """
+    label = (name or "").strip()
+    dose = (strength or "").strip()
+    if dose and _squash(dose) not in _squash(label):
+        label = f"{label} {dose}".strip()
+    if is_prn:
+        label += " (as needed)"
+    return label
 
 
 # --------------------------------------------------------------------------- #

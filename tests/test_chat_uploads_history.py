@@ -1112,3 +1112,60 @@ async def test_ai_result_name_mismatch_explains_not_retry(
     assert "Ramesh Kumar" in r["reply"]
     assert "retried" not in r["reply"]  # retry is the WRONG guidance here
     assert r["provenance"]["name_check"] == "mismatch"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_report_is_not_tagged_to_take_to_a_doctor(
+    db_session, monkeypatch
+):
+    """Reported from the deployed app: a report with 0 flags and 4 stable values
+    still came back recommending a clinician.
+
+    The action defaulted to "review_with_clinician" before any branch ran and
+    nothing lowered it again, so it fired on good news too. A prompt that fires
+    either way carries no information.
+    """
+    await _seed_upload(db_session)
+
+    async def _done(document_id, client=None):
+        return AiResultFetch(ok=True, status="completed",
+            document_type="reports", result={
+                "classification": {"title": "Laboratory Test Report"},
+                "extraction": {"results": [
+                    {"test_name": "Haemoglobin", "value": "13.4",
+                     "unit": "g/dL", "abnormal_flag": "normal"},
+                    {"test_name": "Platelet Count", "value": "245000",
+                     "unit": "/uL", "abnormal_flag": "normal"},
+                ]},
+            })
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _done)
+    out = await handle_ai_result_query(
+        db_session, USER, "get insights for this report"
+    )
+    assert out is not None
+    assert out["action"] == "none", "nothing is flagged, so nothing is recommended"
+    assert "within" in out["reply"] or "sit within" in out["reply"]
+
+
+@pytest.mark.asyncio
+async def test_a_flagged_value_still_recommends_a_clinician(db_session, monkeypatch):
+    """The other half: quieting the clean case must not quiet the real one."""
+    await _seed_upload(db_session)
+
+    async def _done(document_id, client=None):
+        return AiResultFetch(ok=True, status="completed",
+            document_type="reports", result={
+                "classification": {"title": "Laboratory Test Report"},
+                "extraction": {"results": [
+                    {"test_name": "Haemoglobin", "value": "9.1",
+                     "unit": "g/dL", "abnormal_flag": "low"},
+                ]},
+            })
+
+    monkeypatch.setattr("app.documents.service.fetch_ai_result", _done)
+    out = await handle_ai_result_query(
+        db_session, USER, "get insights for this report"
+    )
+    assert out is not None
+    assert out["action"] == "discuss_with_clinician"
