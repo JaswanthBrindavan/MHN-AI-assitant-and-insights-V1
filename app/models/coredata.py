@@ -344,10 +344,15 @@ class SahhaWeeklyTotal(Base, _SahhaRollup):
 class MedicineTracking(Base):
     """The user's tracked medications (core-app table). Read-only here.
 
-    Partial mapping — only the columns the health snapshot reads. Active =
-    ``stopped_at IS NULL``; private rows are never surfaced. The many
-    scheduling/enum columns (day_pattern, dosage_form, schedule_pattern, the
-    generated effective_end) are left unmapped since we only read names.
+    Partial mapping — only the columns the health snapshot reads. Private rows
+    are never surfaced.
+
+    "Active" is NOT ``stopped_at IS NULL`` alone, which is what this said and what
+    the reader was told. A course with an end date that has passed is neither
+    stopped nor deleted, so it stayed on the list: on a real account "Dolo 650 mg"
+    and "Telmisartan 40 mg" both finished on 02 Sep and were still being read back
+    as current two days later. ``effective_end`` is the column that knows, and it
+    is mapped for exactly that.
     """
 
     __tablename__ = "medicine_tracking"
@@ -366,6 +371,16 @@ class MedicineTracking(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         sa.DateTime(timezone=True), nullable=True
     )
+    # What tells two courses of the same drug apart: 650 mg at night is not the
+    # same prescription as 650 mg in the morning, and neither is a tablet the same
+    # as a syrup. Read so that collapsing duplicates can require them to agree.
+    dosage_form: Mapped[str | None] = mapped_column(sa.String(50), nullable=True)
+    schedule_pattern: Mapped[str | None] = mapped_column(sa.String(50), nullable=True)
+    # GENERATED ALWAYS in production — `ends_at IS NULL ? NULL : GREATEST(ends_at,
+    # extended_till)`. Mapped as a plain column because this service only ever
+    # reads this table; declaring the expression would make it undeclarable in the
+    # sqlite schema the tests build (no GREATEST).
+    effective_end: Mapped[date | None] = mapped_column(sa.Date, nullable=True)
 
 
 class FamilyConnect(Base):

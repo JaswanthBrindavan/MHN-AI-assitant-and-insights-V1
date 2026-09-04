@@ -571,3 +571,107 @@ async def test_a_stale_reading_is_nothing_recent_never_not_on_record(db_session)
     assert "vitals" not in out["provenance"]["missing"]
     assert "Vitals: nothing logged in the past week" in out["reply"]
     assert "your most recent is a blood pressure of 128/84 mmHg from" in out["reply"]
+
+
+# --------------------------------------------------------------------------- #
+# What "current" means, and what counts as the same course
+# --------------------------------------------------------------------------- #
+async def test_a_course_that_has_ended_is_not_current(db_session):
+    """Found on a real account: "Dolo 650 mg" and "Telmisartan 40 mg" both ended
+    on 02 Sep and were still being read back as current on 04 Sep.
+
+    Neither is stopped and neither is deleted — they simply ran out, which only
+    `effective_end` knows.
+    """
+    db_session.add(MedicineTracking(
+        id=1, user_id=USER, name="Dolo", strength="650 mg",
+        private=False, is_prn=False,
+        starts_at=date.today() - timedelta(days=10),
+        ends_at=date.today() - timedelta(days=2),
+        effective_end=date.today() - timedelta(days=2),
+    ))
+    db_session.add(MedicineTracking(
+        id=2, user_id=USER, name="Vitamin D3", strength="60000 IU",
+        private=False, is_prn=False,
+        ends_at=date.today() + timedelta(days=5),
+        effective_end=date.today() + timedelta(days=5),
+    ))
+    db_session.add(MedicineTracking(
+        id=3, user_id=USER, name="Amlodipine", strength="5 mg",
+        private=False, is_prn=False,
+    ))
+    await db_session.flush()
+
+    assert await coredata.active_medications(db_session, USER) == [
+        "Amlodipine 5 mg", "Vitamin D3 60000 IU",
+    ]
+
+
+async def test_a_course_ending_today_is_still_current(db_session):
+    """The boundary belongs to the reader: a course runs through its last day."""
+    db_session.add(MedicineTracking(
+        id=1, user_id=USER, name="Azithromycin", strength="500 mg",
+        private=False, is_prn=False,
+        ends_at=date.today(), effective_end=date.today(),
+    ))
+    await db_session.flush()
+
+    assert await coredata.active_medications(db_session, USER) == ["Azithromycin 500 mg"]
+
+
+async def test_a_strength_already_in_the_name_is_not_repeated(db_session):
+    """Read back as "metformin 500 mg 500 mg" on a real account: whoever typed the
+    name included the dose, and the strength column was filled in with it too."""
+    db_session.add(MedicineTracking(
+        id=1, user_id=USER, name="metformin 500 mg", strength="500 mg",
+        private=False, is_prn=False,
+    ))
+    await db_session.flush()
+
+    assert await coredata.active_medications(db_session, USER) == ["metformin 500 mg"]
+
+
+async def test_the_same_course_entered_twice_is_listed_once(db_session):
+    db_session.add(MedicineTracking(
+        id=1, user_id=USER, name="Telmisartan", strength="40 mg",
+        private=False, is_prn=False, dosage_form="tablet", schedule_pattern="M",
+    ))
+    db_session.add(MedicineTracking(
+        id=2, user_id=USER, name="telmisartan", strength="40 MG",
+        private=False, is_prn=False, dosage_form="Tablet", schedule_pattern="M",
+    ))
+    await db_session.flush()
+
+    assert await coredata.active_medications(db_session, USER) == ["Telmisartan 40 mg"]
+
+
+async def test_the_same_drug_on_different_terms_is_listed_twice(db_session):
+    """The half worth being careful about.
+
+    A different dose, a different form or a different schedule is a different
+    prescription — 650 mg at night is not 650 mg in the morning — and collapsing
+    them would hide a medication the reader is actually taking.
+    """
+    db_session.add(MedicineTracking(
+        id=1, user_id=USER, name="Dolo", strength="650 mg",
+        private=False, is_prn=False, schedule_pattern="M",
+    ))
+    db_session.add(MedicineTracking(
+        id=2, user_id=USER, name="Dolo", strength="650 mg",
+        private=False, is_prn=False, schedule_pattern="N",
+    ))
+    db_session.add(MedicineTracking(
+        id=3, user_id=USER, name="Dolo", strength="1000 mg",
+        private=False, is_prn=False, schedule_pattern="M",
+    ))
+    db_session.add(MedicineTracking(
+        id=4, user_id=USER, name="Dolo", strength="650 mg",
+        private=False, is_prn=False, dosage_form="syrup", schedule_pattern="M",
+    ))
+    await db_session.flush()
+
+    out = await coredata.active_medications(db_session, USER)
+    # Ordered by name then id, and every one of them is named "Dolo".
+    assert out == ["Dolo 650 mg", "Dolo 650 mg", "Dolo 1000 mg", "Dolo 650 mg"], (
+        "four different prescriptions, however alike they read"
+    )
