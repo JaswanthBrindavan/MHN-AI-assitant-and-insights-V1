@@ -37,6 +37,7 @@ from app.patterns.service import (
     gather_yesterday,
     tracking_today,
     trend,
+    yesterday_drivers,
 )
 from app.patterns.yesterday import summarise_yesterday
 
@@ -185,6 +186,19 @@ async def yesterday_at_a_glance(
     says so: "no major changes" and "nothing recorded" look identical on screen
     and mean opposite things.
 
+    THE HOME CARD SHOWS `heading`; THE FULL REVIEW SHOWS THE REST. `heading` is
+    the verdict alone, `reasoning` the sentences that say why it was reached,
+    and `drivers` the measures those sentences rest on — each a metric key the
+    daily series are already read under, so the client charts them with the
+    call it makes for every other chart. `headline` and `detail` are unchanged
+    and still complete on their own; a client that reads only those two shows
+    exactly what it showed before.
+
+    `drivers` is EMPTY, never absent, when the card rests on nothing anybody
+    can plot — a day carried by a reported symptom, or one with no data at all.
+    A missing key would leave three clients each deciding what to draw, and the
+    honest answer is that there is nothing to draw.
+
     Owner-scoped, and only ever the caller's own row. There is no family path
     here on purpose: `symptom_logs` has no sharing model, and the other family
     reads honour `req_read`/`acc_read` and `file_access_exclusions` that this
@@ -200,10 +214,16 @@ async def yesterday_at_a_glance(
     day = (today - timedelta(days=1)).isoformat()
 
     if said is None:
-        return {"as_of": day, "has_data": False, "headline": None, "detail": None}
+        return {
+            "as_of": day, "has_data": False, "headline": None, "detail": None,
+            "heading": None, "reasoning": [], "drivers": [],
+        }
     return {
         "as_of": day,
         "has_data": True,
         "headline": said.headline,
         "detail": said.detail,
+        "heading": said.heading,
+        "reasoning": list(said.reasoning),
+        "drivers": yesterday_drivers(said.drivers),
     }

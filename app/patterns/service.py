@@ -31,6 +31,7 @@ import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.coredata.service import LIFESTYLE_UNITS
 from app.models.common import (
     tracking_day_bounds,
     tracking_today,
@@ -382,6 +383,43 @@ YESTERDAY_HABITS: dict[str, float] = {
 #: How far back the baseline looks. Two weeks is enough to survive a weekend
 #: and short enough to still describe how somebody is living now.
 YESTERDAY_BASELINE_DAYS = 14
+
+#: The reader-facing name for each manual tracker. `OUTCOMES` holds no row for
+#: these — there they are exposures, not outcomes — and the words here are the
+#: card's own on purpose: it writes "hydration" and "caffeine", and a chart
+#: headed "water" underneath a sentence about hydration reads as a second,
+#: different measure rather than the one being explained.
+YESTERDAY_HABIT_LABELS: dict[str, str] = {
+    "water": "hydration",
+    "coffee": "caffeine",
+    "alcohol": "alcohol",
+}
+
+
+def yesterday_drivers(metrics: tuple[str, ...]) -> list[dict]:
+    """Label the keys a card said it rested on, for the charts under its review.
+
+    Two tables because the card reads two kinds of series and neither name is
+    invented here: the wearable, vital and mood keys are `OUTCOMES` rows, the
+    same ones `/patterns/overview` labels its own chart from, and the manual
+    trackers are `lifestyle_daily_total.metric` values carrying the unit
+    `LIFESTYLE_UNITS` says each is stored in. The client charts by `metric` and
+    prints `label`, so it never has to hold a second copy of either table.
+
+    An unrecognised key can only be a typo in a rung, and it degrades to a bare
+    label rather than raising: a KeyError here would blank a home-screen card
+    over a chart heading.
+    """
+    out: list[dict] = []
+    for metric in metrics:
+        if metric in OUTCOMES:
+            _, label, unit = OUTCOMES[metric]
+        else:
+            label = YESTERDAY_HABIT_LABELS.get(metric, metric)
+            unit = LIFESTYLE_UNITS.get(metric, ("", ""))[1]
+        out.append({"metric": metric, "label": label, "unit": unit})
+    return out
+
 
 #: mhn-spring's `PeriodSymptom` entries carrying `redFlag = true`.
 #:
