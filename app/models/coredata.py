@@ -646,9 +646,11 @@ class MedicalCondition(Base):
     together and three tables would have meant three copies of the
     family-sharing switch.
 
-    Read-only here, and PARTIAL: only the columns Davi needs. Note ``private``,
-    which the owning service honours — anything Davi surfaces must honour it
-    too, or Davi shows what the app deliberately hides.
+    Read-only here, and PARTIAL: only the columns Davi needs. ``private`` is
+    the family-sharing switch — it decides what a CONNECTED RELATIVE may see,
+    not what the owner may. Filtering on it in an own-data read hid every
+    condition in production from its own owner, because the app defaults new
+    records to private; see ``medical_records``.
     """
 
     __tablename__ = "medical_condition"
@@ -679,9 +681,9 @@ class MedicalCondition(Base):
         _pg_enum("allergy_severity_enum", "mild", "medium", "severe"),
         nullable=True,
     )
-    # Nullable-with-fallback: the column is `bool DEFAULT false NULL`, so a row
-    # predating it reads NULL. NULL is treated as NOT private, matching the
-    # column default rather than inventing a stricter rule than the app's.
+    # The family-sharing switch, `bool DEFAULT false NULL`, so a row predating
+    # the column reads NULL. Only a family read may filter on it; the owner's
+    # own reads never do -- see `medical_records` for what happened when one did.
     private: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     # Soft delete. A row the reader deleted in the app keeps its `status` --
     # 'active' -- so a reader that ignores this column reports a DELETED
