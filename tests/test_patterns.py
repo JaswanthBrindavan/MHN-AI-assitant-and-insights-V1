@@ -14,7 +14,7 @@ Built to the owner's decisions on the design (`Insights-and-Correaltions.png`):
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from app.models.common import utcnow
 from app.models.coredata import (
@@ -431,6 +431,118 @@ def test_a_short_history_has_no_trend():
 
     d0 = date(2026, 8, 1)
     assert trend([DayValue(d0 + timedelta(days=i), 400.0) for i in range(4)]) is None
+
+
+# --------------------------------------------------------------------------- #
+# Screen 2 serves the charts the yesterday card asks for
+#
+# The card names the drivers its conclusion rested on and the client fetches
+# each one from `/patterns/summary`. While that route knew only the four
+# wearable series, a day explained by caffeine or hydration named those drivers
+# and then 400'd every request for them — the reader was told why yesterday was
+# like that and shown a chart of none of it.
+# --------------------------------------------------------------------------- #
+CHART_USER = uuid.UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
+CHART_HDR = {"X-User-Id": str(CHART_USER)}
+
+
+def test_the_weekly_chart_serves_every_driver_the_card_can_name():
+    """The two lists are written by hand in different sections of one module,
+    so nothing but this stops a tenth driver being added with no chart behind
+    it — which is the exact shape of the bug this section exists for."""
+    from app.patterns.service import (
+        TREND_METRICS,
+        YESTERDAY_HABITS,
+        YESTERDAY_METRICS,
+    )
+
+    nameable = set(YESTERDAY_METRICS) | set(YESTERDAY_HABITS)
+    assert nameable <= set(TREND_METRICS)
+
+
+async def _seed_drivers(db):
+    """One wearable, one vital and one manual tracker over the same days."""
+    from app.models.coredata import LifestyleDailyTotal
+    from app.patterns.service import tracking_today
+
+    end = tracking_today()
+    for i in range(1, 11):
+        day = end - timedelta(days=i)
+        db.add(SahhaDailyTotal(
+            user_id=CHART_USER, metric="steps", bucket_start=day,
+            total=8000.0, entries=1, days_counted=1,
+        ))
+        db.add(VitalReading(
+            user_id=CHART_USER, vital_type="spo2", value_primary=97,
+            recorded_at=datetime.combine(day, time(9, 0), tzinfo=UTC),
+        ))
+        # Two cups a day. Stored in cups, and that is what a chart must show.
+        db.add(LifestyleDailyTotal(
+            user_id=CHART_USER, metric="coffee", bucket_start=day,
+            total=2, entries=2, days_counted=1,
+        ))
+    await db.commit()
+
+
+async def _this_week(client, metric: str) -> dict:
+    resp = await client.get(
+        f"/api/v1/patterns/summary?metric={metric}", headers=CHART_HDR
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["this_week"]
+
+
+async def test_a_wearable_driver_charts_through_the_route_the_client_uses(
+    client, db_session,
+):
+    await _seed_drivers(db_session)
+    week = await _this_week(client, "steps")
+    assert week["metric"] == "steps"
+    assert len(week["series"]) == 7
+    assert {p["value"] for p in week["series"]} == {8000.0}
+
+
+async def test_a_vital_driver_charts_in_the_unit_it_is_recorded_in(
+    client, db_session,
+):
+    await _seed_drivers(db_session)
+    week = await _this_week(client, "spo2")
+    assert week["unit"] == "%"
+    assert {p["value"] for p in week["series"]} == {97.0}
+
+
+async def test_a_manual_tracker_charts_in_cups_rather_than_millilitres(
+    client, db_session,
+):
+    """Caffeine is the driver the feature was asked for, and the one whose unit
+    is easiest to lose: its sibling trackers are stored in ml, so a chart that
+    took the family's unit rather than the metric's would read 2 ml of coffee.
+    """
+    await _seed_drivers(db_session)
+    week = await _this_week(client, "coffee")
+    assert week["unit"] == "cup"
+    assert week["label"] == "caffeine"
+    assert len(week["series"]) == 7
+    assert {p["value"] for p in week["series"]} == {2.0}
+
+
+async def test_a_driver_with_no_readings_answers_empty_rather_than_failing(
+    client, db_session,
+):
+    """A reader who logs coffee but not water still gets a hydration chart
+    asked for, because the card names drivers per day. Refusing it would put an
+    error on a screen whose other charts drew fine."""
+    await _seed_drivers(db_session)
+    week = await _this_week(client, "water")
+    assert week["series"] == []
+    assert week["trend"] is None
+
+
+async def test_a_metric_nobody_records_is_still_refused(client):
+    resp = await client.get(
+        "/api/v1/patterns/summary?metric=vibes", headers=CHART_HDR
+    )
+    assert resp.status_code == 400
 
 
 # --------------------------------------------------------------------------- #

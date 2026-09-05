@@ -183,7 +183,37 @@ async def _low_days(
 async def _outcome_series(
     db: AsyncSession, user_id, outcome: str, start: date, end: date,
 ) -> list[DayValue]:
-    """One value per day for an outcome, from whichever table owns it."""
+    """One value per day for an outcome, from whichever table owns it.
+
+    A manual tracker is not an `OUTCOMES` row — in the pair catalogue those
+    keys are exposures, days a habit happened, not a series. They are read here
+    anyway because a review that rested on hydration has to be chartable as
+    hydration, and a second series builder would align its days differently
+    from this one the first time either was changed.
+    """
+    if outcome in LIFESTYLE_UNITS:
+        # The rollup rather than `lifestyle_log`, for the reason
+        # `_habit_totals` gives: `bucket_start` is the reader's day as Spring
+        # resolved it, the same boundary the wearable rollups carry, so a habit
+        # and a night's sleep land on the same date. It is also the table the
+        # yesterday card read to write its sentence, and a chart underneath
+        # that sentence disagreeing with it would look like a bug in whichever
+        # of the two the reader believed less.
+        rows = (
+            await db.execute(
+                select(LifestyleDailyTotal.bucket_start,
+                       LifestyleDailyTotal.total)
+                .where(
+                    LifestyleDailyTotal.user_id == user_id,
+                    LifestyleDailyTotal.metric == outcome,
+                    LifestyleDailyTotal.entries >= 1,
+                    LifestyleDailyTotal.bucket_start >= start,
+                    LifestyleDailyTotal.bucket_start < end,
+                )
+            )
+        ).all()
+        return [DayValue(r.bucket_start, float(r.total)) for r in rows]
+
     source = OUTCOMES[outcome][0]
 
     if source == "wearable":
@@ -280,9 +310,22 @@ async def compute(
 # --------------------------------------------------------------------------- #
 #: What the weekly chart can show. Each is a daily series the reader already
 #: has; nothing here is derived or modelled.
+#:
+#: EVERY KEY `yesterday_drivers` CAN NAME IS HERE, and that is the point of the
+#: list being this long. The yesterday card names the drivers its conclusion
+#: rested on so the client can chart them, and the client asks for each one
+#: through `/patterns/summary`. While this held only the four wearable series,
+#: a day explained by caffeine or hydration named those drivers and then 400'd
+#: every request for them — the feature was asked for as "the manual trackers
+#: mentioned in the reasoning AND THEIR GRAPHS", and half of it refused.
+#:
+#: `test_the_weekly_chart_serves_every_driver_the_card_can_name` fails if a new
+#: driver is added to either yesterday table without a line here.
 TREND_METRICS = (
     "sleep_duration", "steps", "heart_rate_resting",
     "heart_rate_variability_sdnn",
+    "spo2", "mood",
+    "water", "coffee", "alcohol",
 )
 
 
