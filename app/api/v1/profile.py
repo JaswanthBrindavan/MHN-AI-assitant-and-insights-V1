@@ -200,7 +200,7 @@ async def forget_me(
         scheduled_for=_iso(record.scheduled_for),
         grace_days=settings.erasure_grace_days,
         note=(
-            "Davi has stopped using your information already. It will be "
+            "Ink has stopped using your information already. It will be "
             "permanently deleted on the date shown. You can cancel until then."
         ),
     )
@@ -248,7 +248,7 @@ async def erasure_status(
         requested_at=_iso(record.requested_at),
         scheduled_for=_iso(record.scheduled_for),
         grace_days=settings.erasure_grace_days,
-        note="Davi has already stopped using your information.",
+        note="Ink has already stopped using your information.",
     )
 
 

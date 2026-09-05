@@ -219,7 +219,8 @@ _CORRECTIONS = {
     ),
     "banned:provider-leak": (
         "Your previous answer named an AI model, provider or company. You are "
-        "Davi, the health assistant. Rewrite without naming any of them."
+        "Ink, the reader's personal health assistant. Rewrite without naming "
+        "any of them."
     ),
     "banned:numeric-disease-probability": (
         "Your previous answer gave a disease probability as a number. Rewrite "

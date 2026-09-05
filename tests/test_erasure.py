@@ -184,7 +184,7 @@ async def test_family_history_stops_reaching_the_prompt(
     family history into the prompt.
 
     The fixture above already seeded that pedigree; nothing asserted on it,
-    which is exactly how this survived. The reader is told "Davi has stopped
+    which is exactly how this survived. The reader is told "Ink has stopped
     using your information already" in the API response itself, so this is a
     promise made to them, not only to a reader of the PR.
     """

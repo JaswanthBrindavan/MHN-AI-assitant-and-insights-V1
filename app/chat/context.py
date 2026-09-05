@@ -40,7 +40,7 @@ from app.models.rules import InsightArtifact
 # sessions stayed forever (unbounded growth), and when CPython recycled a
 # freed session's address for the same user, build_patient_context served the
 # DEAD session's cached context without re-running the erasure gate — stale
-# PHI, after the reader was told "Davi has stopped using your information".
+# PHI, after the reader was told "Ink has stopped using your information".
 # db.info dies with the session, so neither failure mode exists.
 _MEMO_KEY = "davi_patient_context"
 
@@ -71,7 +71,7 @@ async def build_patient_context(
     **Returns nothing while an erasure is pending.** `pedigree_conditions` and
     `insight_artifacts` are two of the eleven tables the erasure destroys, and
     the reader has been told — in the API response, not just in a docstring —
-    "Davi has stopped using your information already". Gating only
+    "Ink has stopped using your information already". Gating only
     `memory_assembly` left this path open, so the turn after a "forget me"
     still carried the reader's family history, the most sensitive category
     here, into the model's prompt.
