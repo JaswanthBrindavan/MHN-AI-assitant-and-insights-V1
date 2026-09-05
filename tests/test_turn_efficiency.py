@@ -206,6 +206,10 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 # enough that adding a read trips it, loose enough not to be flaky. (It used to
 # say 27; the read that made it 28 was never accounted for. Re-measure and
 # re-comment when you change it, or the next person inherits the same lie.)
+#
+# A turn for a reader WITH family history on record is one more: the Family
+# Connect AI-context switch (context.py) is asked only once there is history
+# to withhold, so this figure — measured without a pedigree — never sees it.
 MAX_QUERIES_PER_TURN = 28
 
 # A HEALTH SUMMARY is the one turn that deliberately asks for everything:

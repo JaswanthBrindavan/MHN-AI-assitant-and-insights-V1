@@ -389,7 +389,15 @@ class FamilyConnect(Base):
     when the owner sent the request, ``acc_read`` when they accepted. The
     older ``req_file_share``/``acc_file_share`` columns remain in the baseline
     schema; production's ddl-auto added the new ones, so both are mapped
-    nullable and readers prefer new-with-fallback."""
+    nullable and readers prefer new-with-fallback.
+
+    ``req_ai_context_access``/``acc_ai_context_access`` (mhn-spring V27) are
+    the same shape for the AI-built family context: each is the grant over
+    its OWN side's context, written by that side from the Family Connect
+    page. Production has them ``NOT NULL DEFAULT false``; they are mapped
+    nullable because a database that predates V27 has no such column, and a
+    NULL there must read as the opt-in default (off) — there is no legacy
+    column to fall back to, unlike the read pair."""
 
     __tablename__ = "family_connect"
 
@@ -401,6 +409,12 @@ class FamilyConnect(Base):
     acc_file_share: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     req_read: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     acc_read: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    req_ai_context_access: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True
+    )
+    acc_ai_context_access: Mapped[bool | None] = mapped_column(
+        sa.Boolean, nullable=True
+    )
     relation_id: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
 
 
