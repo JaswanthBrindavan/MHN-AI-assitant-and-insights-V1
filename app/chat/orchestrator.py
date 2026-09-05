@@ -364,10 +364,10 @@ def _matching_visual(visuals: list[dict], asked: str) -> dict | None:
     and got a SLEEP graph. Several tools can run in one turn, each producing
     its own chart, and attaching `tool_visuals[0]` shipped whichever one
     happened to be called FIRST — with no regard for which tool answered the
-    question. A chart ships only when its own subject is named in the ask and
-    no OTHER chart's subject is too; ambiguous or unmatched charts are dropped
-    rather than guessed at, since a wrong chart under a health answer is worse
-    than no chart.
+    question. When several charts compete, one ships only if its own subject
+    is named in the ask and no OTHER chart's subject is too; an ambiguous
+    field is dropped rather than guessed at, since a wrong chart under a
+    health answer is worse than no chart.
 
     Held against the QUESTION, never the reply. The reply was tried first and
     is the wrong signal twice over: it paraphrases, so a weight chart under
@@ -378,11 +378,23 @@ def _matching_visual(visuals: list[dict], asked: str) -> dict | None:
     metric they want in the question. That is the only half that is about
     what they asked rather than about what was found.
 
-    The cost is a follow-up that names nothing — "what about last month?" —
-    losing its chart. That is the direction to fail in.
+    **One chart ships unconditionally**, and that is the whole of the fix for
+    what this rule cost when it first landed. The ambiguity it exists to
+    resolve is only possible with two: with one, the tool that drew it is the
+    tool the agent chose to answer with, and there is nothing for it to be
+    confused with. Demanding the subject be named as well dropped charts from
+    half of ordinary asking — "how am I doing?", "summarise my week", "and
+    last month?", and "am I drinking enough" (which names drinking, not
+    water) — each of which produced exactly one chart and showed none.
+
+    So the question is consulted only to break a tie, and an unbreakable tie
+    still ships nothing: a wrong chart under a health answer is worse than no
+    chart, which is the half of this worth keeping.
     """
     if not visuals:
         return None
+    if len(visuals) == 1:
+        return visuals[0]
     low = asked.lower()
     matches = [v for v in visuals if any(w in low for w in _visual_topic_words(v))]
     return matches[0] if len(matches) == 1 else None
