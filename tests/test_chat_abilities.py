@@ -720,3 +720,75 @@ def test_wider_framing_did_not_widen_into_other_paths(message):
     from app.chat.abilities import parse_tracker_query
 
     assert parse_tracker_query(message) is None
+
+
+# --------------------------------------------------------------------------- #
+# A relative's question, answered from the reader's own rows (audit H7)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Each of these satisfied every gate in its parser and came back with
+        # the READER's own value rendered as the relative's.
+        "what is my mother's blood pressure",
+        "what is my father's hba1c",
+        "what is my father's policy number",
+        "how much water did my father drink this week",
+        # No possessive at all -- find_relation matches "my father" alone.
+        "how much did my father sleep last night",
+        # A connected member named directly.
+        "what is bhargava's latest hba1c",
+        # Third-person framing with no "my" anywhere: "latest" alone satisfies
+        # the metric lookup gate.
+        "what is her latest blood pressure",
+        "show his last sugar reading",
+    ],
+)
+def test_a_relatives_question_is_not_answered_from_the_readers_own_rows(message):
+    from app.chat.abilities import (
+        parse_metric_query,
+        parse_section_detail_query,
+        parse_tracker_query,
+    )
+
+    assert parse_metric_query(message) is None
+    assert parse_section_detail_query(message) is None
+    assert parse_tracker_query(message) is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The guard must not eat the reader's own questions. Every one of these
+        # carries a possessive apostrophe or a relation word in a position the
+        # guard could over-read.
+        "what's my latest hba1c",
+        "what's my blood pressure",
+        "how's my sugar been this week",
+        "where's my last report",
+        "what's my weight today",
+    ],
+)
+def test_the_guard_does_not_eat_the_readers_own_contractions(message):
+    """A contracted "what is" is grammar, not somebody's name.
+
+    The first draft of this guard reused _POSSESSIVE_NAME_RE without extending
+    _POSSESSIVE_STOP, so it matched "what's" -> "what" and declined the single
+    most ordinary question in the app.
+    """
+    from app.chat.abilities import names_another_person
+
+    assert names_another_person(message) is False
+
+
+def test_the_readers_own_lookups_still_parse():
+    from app.chat.abilities import (
+        parse_metric_query,
+        parse_section_detail_query,
+        parse_tracker_query,
+    )
+
+    assert parse_metric_query("what's my latest hba1c") is not None
+    assert parse_metric_query("what is my blood pressure") is not None
+    assert parse_tracker_query("how much water did i drink today") is not None
+    assert parse_section_detail_query("what does my insurance policy say") is not None

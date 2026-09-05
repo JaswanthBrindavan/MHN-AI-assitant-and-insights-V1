@@ -112,8 +112,38 @@ _POSSESSIVE_STOP = frozenset(
     set(RELATION_TERMS)
     | {"today", "yesterday", "tomorrow", "doctor", "week", "month", "year",
        "one", "body", "who", "there", "let", "that", "child", "children",
-       "family", "everyone", "anyone"}
+       "family", "everyone", "anyone",
+       # Interrogative contractions. "what's my hba1c" is the most ordinary
+       # question in the app and its possessive is grammar, not a name.
+       "what", "how", "where", "when", "why", "here"}
 )
+
+
+# Third-person framing, which a possessive gate cannot see on its own:
+# "what is her latest blood pressure" carries "latest", so every lookup gate
+# below is satisfied without "my" appearing anywhere.
+_THIRD_PERSON_RE = re.compile(r"\b(?:his|her|hers|their|theirs)\b", re.IGNORECASE)
+
+
+def names_another_person(message: str) -> bool:
+    r"""True when the subject of the question is someone other than the reader.
+
+    "my" is first-person framing in "my mother's bp" too, so a parser that gates
+    on a bare "my" alone answers a relative's question from the READER's own rows --
+    the same harm _THIRD_PARTY_VALUE_RE was added to stop for stated values.
+
+    Declining is a fall-through, not an error. The message carries on down
+    _dispatch to the RAG path with the patient block and system prompt intact,
+    which is where a question about a relative belongs: handle_document_query
+    and handle_ai_result_query resolve the member properly, under the consent
+    gate. What must not happen is answering it from the reader's own rows.
+    """
+    if find_relation(message) is not None:
+        return True
+    if _THIRD_PERSON_RE.search(message):
+        return True
+    m = _POSSESSIVE_NAME_RE.search(message.lower())
+    return m is not None and m.group(1) not in _POSSESSIVE_STOP
 
 
 def normalize_document_kinds(values: object) -> tuple[str, ...]:
@@ -493,6 +523,13 @@ _METRIC_ADVICE_RE = re.compile(
 
 def parse_metric_query(message: str) -> MetricQuery | None:
     low = message.lower()
+    # Someone else's reading is not the reader's. "what is my mother's blood
+    # pressure" names a metric and contains "my", so every gate below passes,
+    # and staging answered it with the READER's own reading rendered as
+    # "Your most recent blood pressure is ...". A wrong-person number carries
+    # the full confidence of a record lookup, because it is one.
+    if names_another_person(message):
+        return None
     if not _METRIC_INTENT_RE.search(low):
         return None
     # Tracker adds ("I had 3 cups...") also contain "my"/"had" — the caller
@@ -990,6 +1027,10 @@ _SECTION_DETAIL_RE = re.compile(
 def parse_section_detail_query(message: str) -> str | None:
     """The section kind a detail question is about, or None."""
     low = message.lower()
+    # "what is my father's policy number" -> the reader's own insurance.
+    # See parse_metric_query.
+    if names_another_person(message):
+        return None
     if not re.search(r"\bmy\b|\bour\b|\bdo i have\b", low):
         return None
     if not _SECTION_DETAIL_RE.search(low):
@@ -1322,6 +1363,11 @@ def parse_tracker_query(message: str) -> TrackerQuery | None:
     much water did I drink" share every noun, and only the framing differs.
     """
     low = message.lower()
+    # "how much water did my father drink this week" -> the reader's own total.
+    # This parser does not even require "my"; the lookup framing alone carries
+    # it, so the guard matters more here than in the other two.
+    if names_another_person(message):
+        return None
     # A two-metric question is not a request for a total of either one.
     # "does coffee affect my sleep" satisfies every gate below and came back a
     # coffee total; declining here is what lets the co-occurrence handler above
