@@ -30,7 +30,6 @@ from app.db import get_db
 from app.patterns.core import MIN_DAYS_PER_GROUP, WINDOW_DAYS
 from app.patterns.engine import active_patterns, recompute_patterns
 from app.patterns.service import (
-    OUTCOMES,
     TREND_METRICS,
     attention,
     daily_series,
@@ -122,7 +121,13 @@ async def summary(
         )
 
     series = await daily_series(db, current_user, metric, days=14)
-    label, unit = OUTCOMES[metric][1], OUTCOMES[metric][2]
+    # `yesterday_drivers` rather than `OUTCOMES` directly: it is the one place
+    # that already knows both vocabularies, and a manual tracker has no
+    # `OUTCOMES` row at all — asking for one KeyError'd the whole screen. Its
+    # unit is the metric's own, so `coffee` charts in cups and never in the
+    # millilitres its sibling `water` is stored in.
+    driver = yesterday_drivers((metric,))[0]
+    label, unit = driver["label"], driver["unit"]
     return {
         "building_baseline": not ready,
         "days_needed": needed,
