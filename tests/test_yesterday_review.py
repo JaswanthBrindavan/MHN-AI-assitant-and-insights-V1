@@ -303,6 +303,157 @@ def test_every_rung_produces_two_finished_lines(facts):
 
 
 # --------------------------------------------------------------------------- #
+# Why it said that, and what the review screen charts
+# --------------------------------------------------------------------------- #
+#: Each driver key and the fact it can only have come from. A chart is drawn per
+#: key, so a key with no signal behind it is an empty chart under a sentence
+#: that claimed something about it — the invented figure again, in a graph.
+DRIVER_FIELDS = {
+    "sleep_duration": "sleep_minutes",
+    "steps": "steps",
+    "heart_rate_resting": "resting_heart_rate",
+    "heart_rate_variability_sdnn": "hrv",
+    "spo2": "spo2",
+    "mood": "mood",
+    "water": "water_ml",
+    "coffee": "caffeine_cups",
+    "alcohol": "alcohol_ml",
+}
+
+
+def test_a_day_that_turns_on_one_measure_charts_only_that_measure():
+    said = summarised(YesterdayFacts(sleep_minutes=below(320, 450), steps=usual(8200)))
+
+    assert said.headline == "Yesterday your sleep was shorter than usual."
+    # Steps were recorded and are even printed in the detail, and they are
+    # still not a driver: the headline is not about them.
+    assert said.drivers == ("sleep_duration",)
+
+
+def test_a_day_that_turns_on_two_measures_charts_both_in_the_order_said():
+    said = summarised(
+        YesterdayFacts(sleep_minutes=below(352, 450), steps=below(2100, 8000))
+    )
+
+    assert said.drivers == ("sleep_duration", "steps")
+
+
+def test_a_manual_tracker_in_the_reasoning_is_charted_like_any_other_series():
+    """The trackers a reader fills in themselves are half of what this card
+    talks about, and `lifestyle_daily_total.metric` is the key they are stored
+    under — the same one the client already charts water and coffee from."""
+    said = summarised(
+        YesterdayFacts(sleep_minutes=below(352, 450), caffeine_cups=above(3, 1))
+    )
+
+    assert said.drivers == ("sleep_duration", "coffee")
+
+
+def test_a_day_carried_by_a_symptom_alone_has_nothing_to_chart():
+    """There is no graph of a headache, and the step count printed for company
+    is not the reason the day went badly. An empty list is the answer."""
+    said = summarised(YesterdayFacts(symptoms=("headache",), steps=usual(8200)))
+
+    assert said.drivers == ()
+    assert "8,200 steps" in said.detail
+
+
+def test_a_symptom_day_charts_whatever_was_actually_low_beside_it():
+    said = summarised(
+        YesterdayFacts(
+            symptoms=("fatigue", "headache"),
+            sleep_minutes=below(330, 450),
+            steps=below(2100, 8000),
+            water_ml=below(700, 1900),
+        )
+    )
+
+    assert said.drivers == ("sleep_duration", "steps", "water")
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        YesterdayFacts(symptoms=("headache",)),
+        YesterdayFacts(symptoms=("headache",), sleep_minutes=below(320, 450)),
+        YesterdayFacts(spo2=below(93, 97)),
+        YesterdayFacts(hrv=above(88, 60), resting_heart_rate=below(48, 58)),
+        YesterdayFacts(hrv=below(40, 60)),
+        YesterdayFacts(sleep_minutes=below(352, 450), caffeine_cups=above(3, 1)),
+        YesterdayFacts(sleep_minutes=below(352, 450), alcohol_ml=above(53, 8)),
+        YesterdayFacts(sleep_minutes=below(352, 450), mood=below(3, 7)),
+        YesterdayFacts(sleep_minutes=below(352, 450), steps=below(2100, 8000)),
+        YesterdayFacts(water_ml=below(600, 1900), mood=below(3, 7)),
+        YesterdayFacts(sleep_minutes=above(485, 440), resting_heart_rate=usual(58)),
+        YesterdayFacts(sleep_minutes=above(485, 440)),
+        YesterdayFacts(steps=above(14000, 8000)),
+        YesterdayFacts(caffeine_cups=above(3, 1)),
+        YesterdayFacts(alcohol_ml=above(53, 8)),
+        YesterdayFacts(water_ml=below(600, 1900)),
+        YesterdayFacts(sleep_minutes=usual(452), steps=usual(8420), hrv=usual(60)),
+        YesterdayFacts(mood=usual(7)),
+    ],
+)
+def test_no_rung_ever_names_a_measure_it_has_no_reading_for(facts):
+    said = summarised(facts)
+
+    for key in said.drivers:
+        assert key in DRIVER_FIELDS, f"{key!r} is not a key any series is read under"
+        assert getattr(facts, DRIVER_FIELDS[key]) is not None
+
+
+def test_a_heart_rate_with_no_baseline_is_not_charted_either():
+    """It is dropped from the sentence for being unjudgeable, and a chart of it
+    beside the sleep it was never compared to says the thing the words refused
+    to."""
+    said = summarised(
+        YesterdayFacts(
+            sleep_minutes=above(485, 440),
+            resting_heart_rate=DaySignal(58, None, Trend.USUAL),
+        )
+    )
+
+    assert said.drivers == ("sleep_duration",)
+
+
+def test_every_driver_key_carries_a_label_the_review_can_print():
+    """The two vocabularies the keys come from, both already on the wire
+    elsewhere. A key labelled from neither would reach a chart heading empty."""
+    from app.patterns.service import (
+        YESTERDAY_HABITS,
+        YESTERDAY_METRICS,
+        yesterday_drivers,
+    )
+
+    keys = tuple(YESTERDAY_METRICS) + tuple(YESTERDAY_HABITS)
+    assert set(keys) == set(DRIVER_FIELDS)
+
+    for card in yesterday_drivers(keys):
+        assert card["label"], f"{card['metric']} has no label"
+        assert card["metric"] in DRIVER_FIELDS
+
+
+def test_the_review_repeats_the_card_rather_than_wording_it_again():
+    """`heading` plus `reasoning` IS `headline` plus `detail`, to the word. Two
+    authored versions of the same finding would drift the first time a rung was
+    reworded, and the screen showing the charts would then disagree with the
+    card the reader tapped."""
+    said = summarised(
+        YesterdayFacts(sleep_minutes=below(352, 450), caffeine_cups=above(3, 1))
+    )
+
+    assert said.heading == "Yesterday was a little off."
+    assert " ".join((said.heading, *said.reasoning)) == f"{said.headline} {said.detail}"
+
+
+def test_a_one_sentence_headline_is_all_heading_and_the_detail_is_the_why():
+    said = summarised(YesterdayFacts(steps=above(14000, 8000)))
+
+    assert said.heading == said.headline
+    assert said.reasoning == (said.detail,)
+
+
+# --------------------------------------------------------------------------- #
 # The two symptom sources
 # --------------------------------------------------------------------------- #
 

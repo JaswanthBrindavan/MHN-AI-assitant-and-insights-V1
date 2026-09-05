@@ -44,10 +44,27 @@ it joins them with "and", "after" or "alongside" — never "because". Higher
 caffeine and shorter sleep on one day is a coincidence worth noticing and
 nothing more; ``/patterns/correlations`` exists precisely because answering
 that question takes weeks of days rather than one.
+
+Saying which measures it rested on
+----------------------------------
+
+The home card shows the verdict; tapping through opens the review, which
+repeats the reasoning and then draws a chart per measure behind it. Only the
+ladder knows which those are — the rung that fired consulted them — and a
+client cannot recover them from the copy without reading the wording back out
+of it, which breaks the first time a sentence here is reworded. So each
+summary carries :attr:`YesterdaySummary.drivers`, the metric keys themselves,
+in the vocabulary the daily series already use.
+
+Empty is a real answer there. A day carried by a reported symptom rests on
+nothing anybody can plot — there is no chart of a headache — and a review
+screen filled with charts of whatever else happened to be recorded would
+answer a question the reader did not ask.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -167,10 +184,39 @@ class YesterdayFacts:
 
 @dataclass(frozen=True)
 class YesterdaySummary:
-    """The two lines. ``headline`` says what kind of day; ``detail`` the figures."""
+    """The two lines. ``headline`` says what kind of day; ``detail`` the figures.
+
+    ``drivers`` names the measures the headline rests on, as the metric keys of
+    ``service.YESTERDAY_METRICS`` and ``service.YESTERDAY_HABITS`` — the same
+    keys the daily series are read under, so a client can map one to a chart it
+    already draws. Only what the sentences actually rest on is listed: a figure
+    printed for context is not a reason, and charting it would answer a
+    question the card did not raise.
+    """
 
     headline: str
     detail: str
+    #: Empty means nothing behind this headline can be plotted, which is a
+    #: finding rather than a gap — see the module docstring.
+    drivers: tuple[str, ...] = ()
+
+    @property
+    def heading(self) -> str:
+        """The verdict on its own — the one line the home card shows."""
+        return _sentences(self.headline)[0]
+
+    @property
+    def reasoning(self) -> tuple[str, ...]:
+        """The sentences that belong under that heading, in reading order.
+
+        Derived rather than written a second time. Everything after the verdict
+        is already the why, so a separately authored reasoning string would be
+        the same copy maintained twice, and it would drift the day somebody
+        reworded a rung and edited only one of them. It also inherits the
+        no-cause rule for free: these are the very sentences the suite already
+        reads when it checks that no rung says "because".
+        """
+        return (*_sentences(self.headline)[1:], self.detail)
 
 
 def summarise_yesterday(facts: YesterdayFacts) -> YesterdaySummary | None:
@@ -202,30 +248,41 @@ def _symptom_rung(f: YesterdayFacts) -> YesterdaySummary | None:
         headline = f"Yesterday was mostly stable, but you reported {named}."
     else:
         headline = f"Yesterday was a tougher day. You reported {named}."
-    return YesterdaySummary(headline, _symptom_context(f))
+    detail, drivers = _symptom_context(f)
+    return YesterdaySummary(headline, detail, drivers)
 
 
-def _symptom_context(f: YesterdayFacts) -> str:
-    """What else was low on a day somebody felt unwell.
+def _symptom_context(f: YesterdayFacts) -> tuple[str, tuple[str, ...]]:
+    """What else was low on a day somebody felt unwell, and what that charts as.
 
     Only what actually was low. The temptation is to explain the symptom, and
     the honest line is narrower: these were also below their usual, said next
     to each other, with no arrow drawn between them.
-    """
-    low: list[str] = []
-    if f.sleep_minutes is not None and f.sleep_minutes.trend is Trend.BELOW:
-        low.append("sleep")
-    if f.steps is not None and f.steps.trend is Trend.BELOW:
-        low.append("activity")
-    if f.water_ml is not None and f.water_ml.trend is Trend.BELOW:
-        low.append("hydration")
 
+    The drivers are those same measures and nothing else. The fallback clause
+    prints yesterday's figures to avoid an empty line, but a figure shown for
+    company is not a reason the day went the way it did, and the symptom itself
+    is not a series anybody can draw — so that day charts nothing.
+    """
+    low: list[tuple[str, str]] = []
+    if f.sleep_minutes is not None and f.sleep_minutes.trend is Trend.BELOW:
+        low.append(("sleep", "sleep_duration"))
+    if f.steps is not None and f.steps.trend is Trend.BELOW:
+        low.append(("activity", "steps"))
+    if f.water_ml is not None and f.water_ml.trend is Trend.BELOW:
+        low.append(("hydration", "water"))
+
+    named = [word for word, _ in low]
+    drivers = tuple(key for _, key in low)
     if len(low) >= 2:
-        return f"Your {_join(low)} were all below your usual levels."
+        return f"Your {_join(named)} were all below your usual levels.", drivers
     if len(low) == 1:
-        return f"Your {low[0]} was also below your usual level."
+        return f"Your {named[0]} was also below your usual level.", drivers
     figures = _figures(f)
-    return f"{_sentence_case(figures)}." if figures else "Nothing else you track looked unusual."
+    return (
+        f"{_sentence_case(figures)}." if figures
+        else "Nothing else you track looked unusual."
+    ), ()
 
 
 # --------------------------------------------------------------------------- #
@@ -248,20 +305,23 @@ def _vital_rung(f: YesterdayFacts) -> YesterdaySummary | None:
         return YesterdaySummary(
             "Yesterday your oxygen saturation read lower than your recent average.",
             f"It averaged {round(f.spo2.value)}%{rest}.",
+            ("spo2",),
         )
 
     better = [
-        phrase for phrase, ok in (
-            ("HRV was higher", f.hrv is not None and f.hrv.trend is Trend.ABOVE),
-            ("resting heart rate was lower",
+        (phrase, key) for phrase, key, ok in (
+            ("HRV was higher", "heart_rate_variability_sdnn",
+             f.hrv is not None and f.hrv.trend is Trend.ABOVE),
+            ("resting heart rate was lower", "heart_rate_resting",
              f.resting_heart_rate is not None
              and f.resting_heart_rate.trend is Trend.BELOW),
         ) if ok
     ]
     worse = [
-        phrase for phrase, ok in (
-            ("HRV was lower", f.hrv is not None and f.hrv.trend is Trend.BELOW),
-            ("resting heart rate was higher",
+        (phrase, key) for phrase, key, ok in (
+            ("HRV was lower", "heart_rate_variability_sdnn",
+             f.hrv is not None and f.hrv.trend is Trend.BELOW),
+            ("resting heart rate was higher", "heart_rate_resting",
              f.resting_heart_rate is not None
              and f.resting_heart_rate.trend is Trend.ABOVE),
         ) if ok
@@ -274,17 +334,23 @@ def _vital_rung(f: YesterdayFacts) -> YesterdaySummary | None:
     figures = _figures(f)
     detail = f"{_sentence_case(figures)}." if figures else "Everything else looked usual."
 
+    moved = better or worse
+    said = _join([phrase for phrase, _ in moved])
+    drivers = tuple(key for _, key in moved)
+
     if better:
         return YesterdaySummary(
-            f"Your recovery looked better yesterday. {_sentence_case(_join(better))} "
+            f"Your recovery looked better yesterday. {_sentence_case(said)} "
             "than your recent baseline.",
             detail,
+            drivers,
         )
     if worse:
         return YesterdaySummary(
             "Yesterday looked like a harder day for recovery. "
-            f"{_sentence_case(_join(worse))} than your recent baseline.",
+            f"{_sentence_case(said)} than your recent baseline.",
             detail,
+            drivers,
         )
     return None
 
@@ -312,6 +378,7 @@ def _together_rung(f: YesterdayFacts) -> YesterdaySummary | None:
                 "and you had more caffeine than your typical intake.",
                 f"You slept {_duration(sleep.value)} after "
                 f"{_cups(f.caffeine_cups.value)}.",
+                ("sleep_duration", "coffee"),
             )
 
         if f.alcohol_ml is not None and f.alcohol_ml.trend is Trend.ABOVE:
@@ -320,6 +387,7 @@ def _together_rung(f: YesterdayFacts) -> YesterdaySummary | None:
                 "more alcohol than you typically log.",
                 f"You slept {_duration(sleep.value)} after "
                 f"{_drinks(f.alcohol_ml.value)}.",
+                ("sleep_duration", "alcohol"),
             )
 
         if f.mood is not None and f.mood.trend is Trend.BELOW:
@@ -328,6 +396,7 @@ def _together_rung(f: YesterdayFacts) -> YesterdaySummary | None:
                 "Yesterday looked like a flat day. Your sleep was shorter than usual "
                 "and your mood was lower than you usually log.",
                 f"You slept {_duration(sleep.value)}{walked}.",
+                ("sleep_duration", "mood"),
             )
 
         if f.steps is not None and f.steps.trend is Trend.BELOW:
@@ -337,6 +406,7 @@ def _together_rung(f: YesterdayFacts) -> YesterdaySummary | None:
                 "less than usual too.",
                 f"{_sentence_case(figures)}." if figures
                 else f"You slept {_duration(sleep.value)}.",
+                ("sleep_duration", "steps"),
             )
 
     if (
@@ -351,6 +421,7 @@ def _together_rung(f: YesterdayFacts) -> YesterdaySummary | None:
             "Yesterday was a little off. Your hydration and your mood were both "
             "below your usual levels.",
             f"You logged {_litres(f.water_ml.value)} of water{slept}.",
+            ("water", "mood"),
         )
 
     return None
@@ -372,14 +443,22 @@ def _sleep_rung(f: YesterdayFacts) -> YesterdaySummary | None:
         by = f", about {_about_minutes(gap)} {way} your recent average"
 
     if sleep.trend is Trend.ABOVE:
+        # The heart-rate clause is claimed as a driver only when it was
+        # actually written. It is dropped whenever there is nothing to compare
+        # against, and a chart of a reading the sentence never mentioned is the
+        # same overclaim in a second medium.
+        steady = _steady_heart_rate(f)
         return YesterdaySummary(
             f"Yesterday was a good recovery day. You slept better than usual"
-            f"{_steady_heart_rate(f)}.",
+            f"{steady}.",
             f"You got {_duration(sleep.value)} of sleep{by}.",
+            ("sleep_duration", "heart_rate_resting") if steady
+            else ("sleep_duration",),
         )
     return YesterdaySummary(
         "Yesterday your sleep was shorter than usual.",
         f"You got {_duration(sleep.value)} of sleep{by}.",
+        ("sleep_duration",),
     )
 
 
@@ -410,6 +489,7 @@ def _activity_rung(f: YesterdayFacts) -> YesterdaySummary | None:
         else "Yesterday was a quieter day for movement than usual.",
         f"{_sentence_case(figures)}." if figures
         else f"You walked {_steps(steps.value)}.",
+        ("steps",),
     )
 
 
@@ -431,6 +511,7 @@ def _lifestyle_rung(f: YesterdayFacts) -> YesterdaySummary | None:
         return YesterdaySummary(
             f"Yesterday you had {more} caffeine than your typical intake.",
             f"That was {_cups(caffeine.value)}{slept}.",
+            ("coffee",),
         )
 
     alcohol = f.alcohol_ml if (
@@ -441,6 +522,7 @@ def _lifestyle_rung(f: YesterdayFacts) -> YesterdaySummary | None:
         return YesterdaySummary(
             f"Yesterday you logged {more} alcohol than usual.",
             f"That was {_drinks(alcohol.value)}{slept}.",
+            ("alcohol",),
         )
 
     water = f.water_ml if (f.water_ml is not None and f.water_ml.notable) else None
@@ -449,6 +531,7 @@ def _lifestyle_rung(f: YesterdayFacts) -> YesterdaySummary | None:
         return YesterdaySummary(
             f"Your hydration was {way} your usual level yesterday.",
             f"You logged {_litres(water.value)} of water.",
+            ("water",),
         )
 
     return None
@@ -477,22 +560,50 @@ def _steady_day(f: YesterdayFacts) -> YesterdaySummary:
     way to catch.
     """
     recorded: list[str] = []
+    # A group is named as one word and charts as every series under it: "your
+    # recorded vitals were close to usual" is a claim about each of them, and
+    # the reader who wants to see that gets the flat lines rather than one
+    # arbitrary member of the group.
+    drivers: list[str] = []
     if f.sleep_minutes is not None:
         recorded.append("sleep")
+        drivers.append("sleep_duration")
     if f.steps is not None:
         recorded.append("activity")
-    if any(s is not None for s in (f.resting_heart_rate, f.hrv, f.spo2)):
+        drivers.append("steps")
+    vitals = [
+        key for key, signal in (
+            ("heart_rate_resting", f.resting_heart_rate),
+            ("heart_rate_variability_sdnn", f.hrv),
+            ("spo2", f.spo2),
+        ) if signal is not None
+    ]
+    if vitals:
         recorded.append("recorded vitals")
-    if any(s is not None for s in (f.water_ml, f.caffeine_cups, f.alcohol_ml)):
+        drivers.extend(vitals)
+    logs = [
+        key for key, signal in (
+            ("water", f.water_ml),
+            ("coffee", f.caffeine_cups),
+            ("alcohol", f.alcohol_ml),
+        ) if signal is not None
+    ]
+    if logs:
         recorded.append("daily logs")
+        drivers.extend(logs)
 
     if len(recorded) >= 2:
         detail = f"Your {_join(recorded)} were all close to your usual levels."
     elif len(recorded) == 1:
         detail = f"Your {recorded[0]} stayed close to your usual level."
     else:
+        # Nothing was named, so nothing is charted — a mood score on its own
+        # reaches here, and the line does not claim to be about it.
         detail = "Nothing you track moved much."
-    return YesterdaySummary("Yesterday was a steady day with no major changes.", detail)
+        drivers = []
+    return YesterdaySummary(
+        "Yesterday was a steady day with no major changes.", detail, tuple(drivers)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -594,3 +705,13 @@ def _join(items: list[str]) -> str:
 
 def _sentence_case(text: str) -> str:
     return text[:1].upper() + text[1:] if text else text
+
+
+def _sentences(text: str) -> list[str]:
+    """Split a written line into its sentences.
+
+    The whitespace after the full stop is required, so "1.8 L" and "8.5 h" stay
+    whole: a split inside a figure would put half a number in the heading and
+    the other half in the reasoning.
+    """
+    return re.split(r"(?<=\.)\s+", text.strip())
