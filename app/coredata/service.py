@@ -1818,17 +1818,25 @@ async def medical_records(
 ) -> list[MedicalCondition]:
     """The reader's own conditions / surgeries / allergies — one table, one read.
 
-    THE single place the two invisibility rules are applied, because both are
-    columns a reader can easily forget:
+    THE single place the invisibility rule is applied, because it is a column a
+    reader can easily forget:
 
-    * ``private`` — the owning app hides these; NULL means not private (the
-      column's own default), so a pre-column row stays visible.
     * ``deleted_at`` — a SOFT delete. A condition the reader deleted in the app
       keeps ``status = 'active'`` forever, so a query that filters on status
       alone reports a deleted condition as a current one.
 
-    Own data only; there is no family path into it. Callers split by ``type``
-    in Python rather than issuing one query per type.
+    ``private`` is deliberately NOT a filter here. It is the FAMILY-sharing
+    switch: mhn-spring's own record list applies no ``private`` predicate and
+    only its family path does (``getByUserIdAndIsPrivateFalse``), and the app
+    defaults every new record to private. This read used to honour the flag on
+    the reasoning that "the owning app honours it", and the measured result on
+    the deployed app was that EVERY condition in production was invisible to
+    its own owner — "what health issues do I have?" was answered "There are no
+    conditions on your record" for a reader with two. The flag belongs on a
+    family read, and there is no family path into this table.
+
+    Own data only. Callers split by ``type`` in Python rather than issuing one
+    query per type.
     """
     return list(
         (
@@ -1837,10 +1845,6 @@ async def medical_records(
                 .where(
                     MedicalCondition.user_id == user_id,
                     MedicalCondition.deleted_at.is_(None),
-                    sa.or_(
-                        MedicalCondition.private.is_(False),
-                        MedicalCondition.private.is_(None),
-                    ),
                     *([MedicalCondition.type == type_] if type_ else []),
                 )
                 .order_by(MedicalCondition.id)

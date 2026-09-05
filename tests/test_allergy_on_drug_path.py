@@ -124,14 +124,18 @@ async def test_a_mild_allergy_does_not_warn(db_session):
     assert "Penicillin" not in result.response_message
 
 
-async def test_a_private_allergy_is_not_surfaced(db_session):
-    """`medical_condition.private` is honoured by the owning app.
+async def test_a_private_allergy_is_still_the_readers_own_allergy(db_session):
+    """`medical_condition.private` is the FAMILY-sharing switch.
 
-    Davi reading past it would show what the app deliberately hides.
+    This test used to assert the allergy was hidden, on the reading that "the
+    owning app honours private". It does -- for connected relatives; Spring's
+    own record list applies no such predicate. The app also defaults every new
+    record to private, so the old rule silently switched the drug-path warning
+    off for exactly the readers who had bothered to record an allergy.
     """
     await _seed_allergy(db_session, private=True)
     allergies = await medication_allergies(db_session, USER)
-    assert allergies == []
+    assert [a.name for a in allergies] == ["Penicillin"]
 
 
 async def test_a_food_allergy_is_not_a_medication_warning(db_session):
