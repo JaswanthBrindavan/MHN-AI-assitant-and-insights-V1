@@ -32,7 +32,9 @@ async def test_chat_identity(client):
     resp = await client.post("/api/v1/chat", headers=HDR, json={"message": "who are you?"})
     body = resp.json()
     assert body["provenance"]["path"] == "conversational"
-    assert "davi" in body["response_message"].lower()
+    # Case-sensitive on purpose: "ink" lowercased also matches "think",
+    # which every one of these replies happens to contain.
+    assert "Ink" in body["response_message"]
 
 
 @pytest.mark.asyncio

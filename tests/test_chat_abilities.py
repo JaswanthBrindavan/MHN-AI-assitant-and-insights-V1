@@ -345,7 +345,7 @@ def test_pleasantry_tails_stay_conversational():
     # "thank you so much" etc. must not burn an LLM call.
     from app.chat.router import route
 
-    for msg in ("thank you so much", "thanks a lot!", "good night davi",
+    for msg in ("thank you so much", "thanks a lot!", "good night ink",
                 "take care", "ok thanks again"):
         assert route(msg, False) == "conversational", msg
 

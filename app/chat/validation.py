@@ -341,8 +341,8 @@ _PERSONAL_CLEARANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# The underlying model/provider must never be named to the user — Davi answers
-# identity questions deterministically as "Davi" (router + canned reply), and
+# The underlying model/provider must never be named to the user — Ink answers
+# identity questions deterministically as "Ink" (router + canned reply), and
 # this is the last line of defense if a leak slips into generated text.
 # Word-boundaried: "SGPT" (liver enzyme) and "claudication" must never match.
 _PROVIDER_LEAK_RE = re.compile(

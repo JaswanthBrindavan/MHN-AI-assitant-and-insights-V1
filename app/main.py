@@ -26,7 +26,7 @@ _UI_INDEX = Path(__file__).resolve().parent.parent / "ui" / "index.html"
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title="Davi Health AI",
+        title="Ink Health AI",
         version="0.1.0",
         summary="Decision-support backend — never diagnosis.",
     )
