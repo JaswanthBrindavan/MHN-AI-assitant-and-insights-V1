@@ -341,21 +341,26 @@ class AnthropicProvider:
         *,
         system: str | Sequence[str],
         messages: Sequence[Message],
-    ) -> AsyncIterator[str]:
-        """Yield text deltas. Tools are NOT offered here.
+        tools: Sequence[ToolSpec] = (),
+    ) -> AsyncIterator[str | LLMTurn]:
+        """Yield text deltas as they arrive, then the completed turn last.
 
-        Streaming happens after the tool rounds are done — an answer being
-        composed from tool results is the only thing worth streaming, and
-        interleaving tool calls into a token stream buys nothing.
+        The same request as ``generate_turn`` — same budget rule, same tools —
+        over the streaming transport. Tools ARE offered: the agent loop cannot
+        know a round is the answer until it ends without a tool call, so the
+        text of every round streams and the caller retracts a preamble.
         """
         payload: dict = {
             "model": self.model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": self._tool_max_tokens if tools else self._max_tokens,
             "system": _to_system_blocks(system),
             "messages": _to_anthropic_messages(messages),
         }
         if self._thinking == "adaptive":
             payload["thinking"] = _THINKING_ADAPTIVE
+        if tools:
+            payload["tools"] = _to_anthropic_tools(tools)
         async with self._client.messages.stream(**payload) as stream:
             async for text in stream.text_stream:
                 yield text
+            yield _from_anthropic_response(await stream.get_final_message())

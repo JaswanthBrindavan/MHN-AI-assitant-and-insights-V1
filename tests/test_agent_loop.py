@@ -293,3 +293,66 @@ async def test_results_line_up_with_their_calls_when_one_fails():
     results = [m for m in out.messages if isinstance(m, ToolResultMessage)][0]
     assert [r.call_id for r in results.results] == ["c1", "c2", "c3"]
     assert [r.is_error for r in results.results] == [False, True, False]
+
+
+# --------------------------------------------------------------------------- #
+# Streaming: the sink is a side channel, the outcome is unchanged
+# --------------------------------------------------------------------------- #
+def _armed_sink(events: list[dict]):
+    from app.chat.streaming import AnswerSink
+
+    sink = AnswerSink(events.append)
+    sink.arm(risk="none", sources=[])
+    return sink
+
+
+async def test_a_streamed_answer_arrives_as_deltas_and_the_outcome_is_the_same():
+    script = [LLMTurn(text="Sleep matters. Try a routine.", stop_reason="end_turn")]
+    buffered = await run_agent(
+        FakeProvider(turns=list(script)), "sys", [UserMessage("hi")], [SPEC], _echo
+    )
+    events: list[dict] = []
+    streamed = await run_agent(
+        FakeProvider(turns=list(script)), "sys", [UserMessage("hi")], [SPEC], _echo,
+        stream=_armed_sink(events),
+    )
+    assert streamed.text == buffered.text
+    assert streamed.rounds == buffered.rounds
+    assert [e["type"] for e in events] == ["delta", "delta"]
+    assert "".join(e["text"] for e in events) == "Sleep matters. Try a routine."
+
+
+async def test_a_tool_round_preamble_is_retracted_before_the_answer():
+    async def _hba1c(call: ToolCall) -> ToolResult:
+        return ToolResult(call_id=call.id, content='{"hba1c": "6.1%"}')
+
+    provider = FakeProvider(turns=[
+        LLMTurn(text="Let me check. One moment.",
+                tool_calls=_tool_turn("c1").tool_calls, stop_reason="tool_use"),
+        LLMTurn(text="Your HbA1c was 6.1%."),
+    ])
+    events: list[dict] = []
+    out = await run_agent(
+        provider, "sys", [UserMessage("value?")], [SPEC], _hba1c,
+        stream=_armed_sink(events),
+    )
+    assert out.text == "Your HbA1c was 6.1%."
+    kinds = [e["type"] for e in events]
+    assert kinds == ["delta", "replace", "delta"]
+    assert events[0]["text"] == "Let me check. "
+    assert events[1]["text"] == ""
+    # The tool result became a source, so the quoted value streamed.
+    assert events[2]["text"] == "Your HbA1c was 6.1%."
+
+
+async def test_the_forced_final_answer_streams_too():
+    provider = FakeProvider(turns=[_tool_turn("c1"), LLMTurn(text="Forced answer.")])
+    events: list[dict] = []
+    out = await run_agent(
+        provider, "sys", [UserMessage("q")], [SPEC], _echo, max_rounds=1,
+        stream=_armed_sink(events),
+    )
+    assert out.forced
+    assert [e["text"] for e in events] == ["Forced answer."]
+    # The forced call offered no tools, streamed or not.
+    assert provider.calls[-1]["tools"] == []

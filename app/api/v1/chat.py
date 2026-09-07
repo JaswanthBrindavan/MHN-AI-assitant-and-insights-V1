@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
-import re
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -32,7 +32,7 @@ from app.chat.replies import (
     SELF_HARM_REPLY,
     safe_reply,
 )
-from app.chat.streaming import validated_stream
+from app.chat.streaming import AnswerSink
 from app.chat.validation import validate_reply
 from app.db import get_db
 from app.documents.service import (
@@ -293,9 +293,11 @@ async def chat_stream(
     """Streamed chat.
 
     The reply is produced by the SAME pipeline as POST /chat — triage floor,
-    emergency directive, tools, guards — and then delivered incrementally.
-    Nothing is streamed that has not passed the banned-phrase check, and the
-    whole-answer guards can still retract with a `replace` event.
+    emergency directive, tools, guards — with the model's text released as it
+    is generated, one guarded sentence at a time (app/chat/streaming.py).
+    Nothing reaches the client that the whole-answer guards could reject, and
+    the answer the pipeline finally settles on is reconciled with a `replace`
+    when it differs from what was shown.
 
     Deterministic paths (emergency, scope decline, greeting) arrive as a single
     delta: there is nothing to gain from typing out an emergency directive one
@@ -313,33 +315,29 @@ async def chat_stream(
     # endpoint while working on the plain one.
     set_current_user_jwt(authorization)
 
-    result = await handle_chat(
-        db, user_id, payload.message, provider, session_id=payload.session_id
-    )
-    await db.commit()
+    # The turn runs as a task and hands events to the response through a
+    # queue; None marks the end. The request's session stays open for the
+    # whole response (FastAPI closes generator dependencies after the body).
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    sink = AnswerSink(queue.put_nowait)
+
+    async def _turn():
+        try:
+            result = await handle_chat(
+                db, user_id, payload.message, provider,
+                session_id=payload.session_id, stream=sink,
+            )
+            await db.commit()
+            return result
+        finally:
+            queue.put_nowait(None)
 
     async def _events():
+        task = asyncio.create_task(_turn())
         try:
-            # The answer is already fully guarded; stream it sentence by
-            # sentence so the client can render progressively.
-            replaced = False
-            async for event in validated_stream(
-                _sentences_of(result.response_message),
-                risk_level=result.risk_level,
-                safe_fallback=safe_reply(result.risk_level, result.session_id),
-            ):
-                replaced = replaced or event.get("type") == "replace"
+            while (event := await queue.get()) is not None:
                 yield _sse(event)
-            if replaced:
-                # The text was retracted mid-stream; its provenance goes
-                # with it. Shipping the discarded answer's citations beside
-                # a canned safe reply is the same defect the engines had.
-                result.citations = None
-                result.provenance = {
-                    **result.provenance,
-                    "used_chunks": [],
-                    "degraded": "stream_replaced",
-                }
+            result = await task
             yield _sse(
                 {
                     "type": "done",
@@ -359,23 +357,22 @@ async def chat_stream(
             yield _sse(
                 {
                     "type": "replace",
-                    "text": safe_reply(result.risk_level, result.session_id),
+                    "text": safe_reply(triage(payload.message).level, payload.session_id),
                     "reason": "stream_error",
                 }
             )
+        finally:
+            if not task.done():
+                # The reader left mid-turn. Their message is already committed
+                # (the provider releases the session before each model call);
+                # the answer is not, and the session is about to close.
+                task.cancel()
 
     return StreamingResponse(
         _events(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-def _sentences_of(text: str):
-    """Chunk a finished reply for progressive delivery."""
-    for piece in re.split(r"(?<=[.!?])(\s+)", text):
-        if piece:
-            yield piece
 
 
 class ChatVoiceRequest(BaseModel):

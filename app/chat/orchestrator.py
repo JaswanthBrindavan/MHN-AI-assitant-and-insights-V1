@@ -32,7 +32,7 @@ from app.chat.abilities import (
     parse_tracker_add,
     parse_tracker_query,
 )
-from app.chat.agent import append_directive, recover, run_agent
+from app.chat.agent import append_directive, recover, run_agent, stream_turn
 from app.chat.context import (
     build_health_snapshot,
     build_patient_context,
@@ -84,6 +84,7 @@ from app.chat.router import (
     route,
 )
 from app.chat.scope import is_off_topic
+from app.chat.streaming import AnswerSink
 from app.chat.tools.definitions import TOOL_SPECS
 from app.chat.tools.registry import execute_tool
 from app.chat.validation import redact_reason, validate_reply
@@ -515,6 +516,67 @@ async def _apply_grounding(
         return retry_report, retry
     logger.warning("grounding still failing after retry; degrading to safe reply")
     return retry_report, None
+
+
+async def _diagnostic_terms(db: AsyncSession) -> tuple[str, ...] | None:
+    """The registry's condition names for the diagnostic-assertion rule.
+    Fail-open: no index, no extra terms."""
+    try:
+        index = await load_condition_index(db)
+        return index.diagnostic_terms() if index is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fidelity_sources(chunks: Sequence[RetrievedChunk], patient_text: str) -> list[str]:
+    """What a stated value may be traced to before any tool has run."""
+    sources = [c.content for c in chunks]
+    if patient_text:
+        sources.append(patient_text)
+    return sources
+
+
+async def _generate_streamed(
+    db: AsyncSession,
+    stream: AnswerSink,
+    provider: LLMProvider,
+    system: str | Sequence[str],
+    message: str,
+    chunks: list[RetrievedChunk],
+    patient_text: str,
+    *,
+    risk: str,
+    escalation: str,
+) -> str:
+    """The legacy engine's one model call, through the stream gate.
+
+    Same prompt and budget as ``provider.generate``; only the transport
+    differs. The gate is armed with exactly what the guards below will use —
+    and in enforce mode with the grounding analysis too, so an uncited
+    factual sentence that ``_apply_grounding`` would send back for rewriting
+    is never shown first.
+    """
+    def _grounded(raw: str) -> bool:
+        return analyze_grounding(
+            raw,
+            num_chunks=len(chunks),
+            has_patient_context=bool(patient_text),
+            retrieval_happened=bool(chunks),
+            chunk_texts=[c.content for c in chunks],
+            patient_text=patient_text,
+        ).status == "grounded"
+
+    extra_check = _grounded if get_settings().grounding_mode == "enforce" else None
+    stream.arm(
+        risk=risk,
+        sources=_fidelity_sources(chunks, patient_text),
+        extra_conditions=await _diagnostic_terms(db),
+        lead=f"{escalation} " if risk == HIGH else "",
+        extra_check=extra_check,
+    )
+    turn = await stream_turn(provider, system, [UserMessage(message)], (), stream)
+    stream.flush()
+    return turn.text
 
 
 async def _data_query_reply(db: AsyncSession, user_id: uuid.UUID) -> str:
@@ -1009,6 +1071,7 @@ async def _dispatch(
     pivot: InboundPivot | None = None,
     pending_med: dict | None = None,
     original_message: str | None = None,
+    stream: AnswerSink | None = None,
 ) -> ChatResult:
     tr = triage(message)
     # With an ACTIVE pivot, `message` is the MT English and the floor would
@@ -1348,6 +1411,7 @@ async def _dispatch(
         return await _dispatch_agentic(
             db, user_id, message, provider, session_id, tr, risk, lang,
             trace, t, pivot=pivot, episodes=_open, escalation=escalation,
+            stream=stream,
         )
 
     # 4) Deterministic data abilities — documents, tracker adds, metric
@@ -1674,7 +1738,13 @@ async def _dispatch(
     # validator enforces that) and not here in the user-visible trace either.
     t("Generate", "asking the assistant")
     try:
-        answer = await provider.generate(system=system, user=message)
+        if stream is not None:
+            answer = await _generate_streamed(
+                db, stream, provider, system, message, chunks, patient_text,
+                risk=risk, escalation=escalation,
+            )
+        else:
+            answer = await provider.generate(system=system, user=message)
     except Exception:  # noqa: BLE001 — fail open
         logger.warning("LLM provider failed; safe reply", exc_info=True)
         record_fail_open("provider")
@@ -1886,8 +1956,13 @@ async def handle_chat(
     provider: LLMProvider,
     session_id: uuid.UUID | None = None,
     translator: SidecarTranslator | None = None,
+    stream: AnswerSink | None = None,
 ) -> ChatResult:
     """Persist the turn, dispatch, then run deterministic compaction.
+
+    ``stream`` (the /chat/stream endpoint) receives the model's text as it is
+    generated, gated sentence by sentence — see app/chat/streaming.py. The
+    result is identical with or without it.
 
     Compaction fires after the assistant message and never raises. When the
     translation sidecar is configured, non-English messages are pivoted
@@ -1926,6 +2001,10 @@ async def handle_chat(
             db, user_id, work, provider, session_id, pivot=pivot,
             pending_med=pending_med,
             original_message=message if pivot.active else None,
+            # With a pivot the reader sees a TRANSLATION of the validated
+            # English, never the English itself: the engines get no sink and
+            # `finish` below delivers the translated reply whole.
+            stream=None if pivot.active else stream,
         )
 
     chat_turns.inc(engine=engine, risk=result.risk_level)
@@ -1959,6 +2038,8 @@ async def handle_chat(
         result.provenance["translation"] = {
             "language": lang_hint(pivot, message), "status": "english_notice",
         }
+        if stream is not None:
+            stream.feed(f"\n\n{notice}")
     if pivot.active and result.response_message:
         translated = await pivot_outbound(
             result.response_message, pivot, translator
@@ -1973,6 +2054,10 @@ async def handle_chat(
             result.provenance["translation"] = {
                 "language": pivot.display_language, "status": "fallback_english",
             }
+    if stream is not None:
+        # The text is final here. Whatever was streamed is reconciled with it
+        # BEFORE compaction, which may call the model again.
+        stream.finish(result.response_message)
     # Persist the reply's structured extras alongside the text so a restored
     # conversation keeps its document cards (and action line) after a reload —
     # the extracted_intent JSON column already exists for exactly this kind of
@@ -2013,6 +2098,7 @@ async def _dispatch_agentic(
     pivot: InboundPivot | None = None,
     episodes: list | None = None,
     escalation: str = HIGH_ESCALATION,
+    stream: AnswerSink | None = None,
 ) -> ChatResult:
     """The tool-driven path.
 
@@ -2195,10 +2281,22 @@ async def _dispatch_agentic(
     t("Generate",
       "asking the assistant, with access to your records" if offered
       else "asking the assistant — no records access on a red-flag turn")
+    # The registry's diagnostic terms, loaded before generation because the
+    # stream gate needs them; the buffered validator below uses the same ones.
+    extra_terms = await _diagnostic_terms(db)
+    if stream is not None:
+        # Same sources the fidelity ladder below checks against; the tool
+        # results join them round by round inside run_agent.
+        stream.arm(
+            risk=risk,
+            sources=_fidelity_sources(chunks, patient_text),
+            extra_conditions=extra_terms,
+            lead=f"{escalation} " if risk == HIGH else "",
+        )
     try:
         outcome = await run_agent(
             provider, system, [UserMessage(message)], offered, _executor,
-            max_rounds=settings.llm_max_tool_rounds,
+            max_rounds=settings.llm_max_tool_rounds, stream=stream,
         )
     except Exception:  # noqa: BLE001 — fail open, never crash the endpoint
         logger.warning("agent loop failed; safe reply", exc_info=True)
@@ -2268,15 +2366,11 @@ async def _dispatch_agentic(
         _menu = disclosure_menu(_shown)
         if _menu:
             display = display + "\n\n" + _menu
+            if stream is not None:
+                stream.feed(f"\n\n{_menu}")
     display = _lead(escalation, risk, display)
 
     degraded: str | None = None
-
-    try:
-        index = await load_condition_index(db)
-        extra_terms = index.diagnostic_terms() if index is not None else None
-    except Exception:  # noqa: BLE001
-        extra_terms = None
 
     async def _try_recover(reason: str, detail: str = "") -> bool:
         """One corrective retry before falling back. True if it worked.

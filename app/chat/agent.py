@@ -8,7 +8,9 @@ is not an acceptable failure mode in a patient-facing path.
 This module owns control flow ONLY. Every safety property — the triage floor,
 output validation, grounding, numeric fidelity — lives in the orchestrator,
 before and after this runs. Keep it that way: safety that is spread across a
-loop is safety nobody can audit.
+loop is safety nobody can audit. The optional stream sink is no exception: the
+loop hands it raw text and round boundaries, and the sink (armed by the
+orchestrator) decides what a reader may see.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 
+from app.chat.streaming import AnswerSink
 from app.llm.tools import (
     AssistantMessage,
     LLMTurn,
@@ -107,6 +110,42 @@ def append_directive(system: str | Sequence[str], extra: str) -> str | list[str]
     return parts
 
 
+async def stream_turn(
+    provider,
+    system: str | Sequence[str],
+    messages: Sequence[Message],
+    tools: Sequence[ToolSpec],
+    sink: AnswerSink,
+) -> LLMTurn:
+    """One model call over the streaming transport.
+
+    Text deltas go to the sink as they arrive; the completed turn — the same
+    object ``generate_turn`` would have returned — comes back to the caller.
+    The sink decides what the reader sees; this function decides nothing.
+    """
+    turn: LLMTurn | None = None
+    async for item in provider.generate_stream(
+        system=system, messages=messages, tools=tools
+    ):
+        if isinstance(item, LLMTurn):
+            turn = item
+        else:
+            sink.feed(item)
+    if turn is None:
+        raise RuntimeError("provider stream ended without a completed turn")
+    return turn
+
+
+async def _model_turn(
+    provider, system, history, tools, stream: AnswerSink | None
+) -> LLMTurn:
+    if stream is None:
+        return await provider.generate_turn(
+            system=system, messages=history, tools=tools
+        )
+    return await stream_turn(provider, system, history, tools, stream)
+
+
 async def run_agent(
     provider,
     system: str | Sequence[str],
@@ -114,22 +153,30 @@ async def run_agent(
     tools: Sequence[ToolSpec],
     executor: Executor,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
+    stream: AnswerSink | None = None,
 ) -> AgentOutcome:
     """Drive the tool loop to a text answer.
 
     Raises only what the provider raises — the caller treats that as a
     guardrail failure and degrades to a safe reply.
+
+    With a ``stream``, every round's text is fed to it as it is generated and
+    the sink is told when a new round starts (so a tool-round preamble is
+    retracted) and which tool results are now sources. The outcome is the
+    same either way; the sink is a side channel, not a second path.
     """
     history: list[Message] = list(messages)
     outcome = AgentOutcome()
 
     for round_index in range(max_rounds):
-        turn = await provider.generate_turn(
-            system=system, messages=history, tools=tools
-        )
+        if stream is not None:
+            stream.new_round(outcome.source_texts)
+        turn = await _model_turn(provider, system, history, tools, stream)
         _accumulate_usage(outcome.usage, turn)
 
         if not turn.wants_tools:
+            if stream is not None:
+                stream.flush()
             outcome.text = turn.text
             outcome.rounds = round_index
             outcome.stop_reason = turn.stop_reason
@@ -186,11 +233,13 @@ async def run_agent(
         max_rounds,
         ", ".join(sorted(set(outcome.tool_names))),
     )
-    final = await provider.generate_turn(
-        system=append_directive(system, _FORCE_ANSWER),
-        messages=history,
-        tools=(),
+    if stream is not None:
+        stream.new_round(outcome.source_texts)
+    final = await _model_turn(
+        provider, append_directive(system, _FORCE_ANSWER), history, (), stream
     )
+    if stream is not None:
+        stream.flush()
     _accumulate_usage(outcome.usage, final)
     outcome.text = final.text
     outcome.rounds = max_rounds

@@ -249,8 +249,11 @@ class OpenAICompatibleProvider:
         *,
         system: str | Sequence[str],
         messages: Sequence[Message],
-    ) -> AsyncIterator[str]:
-        """Yield text deltas from an SSE /chat/completions stream."""
+        tools: Sequence[ToolSpec] = (),
+    ) -> AsyncIterator[str | LLMTurn]:
+        """Yield text deltas from an SSE /chat/completions stream, then the
+        completed turn last — tool calls arrive as fragments keyed by index
+        and are reassembled here."""
         payload: dict = {
             "model": self.model,
             "messages": [
@@ -259,7 +262,13 @@ class OpenAICompatibleProvider:
             ],
             "temperature": 0,
             "stream": True,
+            "max_tokens": self._max_tokens,
         }
+        if tools:
+            payload["tools"] = _to_openai_tools(tools)
+        text_parts: list[str] = []
+        calls: dict[int, dict] = {}
+        finish_reason = "stop"
         client = self._client_factory(self._timeout)
         async with client.stream(
             "POST",
@@ -281,7 +290,32 @@ class OpenAICompatibleProvider:
                     # A malformed frame is not worth killing a reply over.
                     logger.warning("unparseable SSE frame; skipping")
                     continue
-                choices = chunk.get("choices") or [{}]
-                delta = (choices[0].get("delta") or {}).get("content")
-                if delta:
-                    yield delta
+                choice = (chunk.get("choices") or [{}])[0]
+                finish_reason = choice.get("finish_reason") or finish_reason
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    text_parts.append(delta["content"])
+                    yield delta["content"]
+                for raw in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(
+                        raw.get("index", 0), {"id": "", "name": "", "arguments": ""}
+                    )
+                    fn = raw.get("function") or {}
+                    slot["id"] = raw.get("id") or slot["id"]
+                    slot["name"] = fn.get("name") or slot["name"]
+                    slot["arguments"] += fn.get("arguments") or ""
+        # No usage: OpenAI only reports it on a stream when asked via
+        # `stream_options`, which not every compatible server accepts.
+        # ponytail: token telemetry undercounts streamed turns on this
+        # adapter; add stream_options once the live target is known to take it.
+        yield LLMTurn(
+            text="".join(text_parts).strip(),
+            tool_calls=tuple(
+                ToolCall(
+                    id=c["id"], name=c["name"],
+                    arguments=_parse_arguments(c["arguments"]),
+                )
+                for _, c in sorted(calls.items())
+            ),
+            stop_reason=_FINISH_MAP.get(finish_reason, "end_turn"),
+        )

@@ -136,17 +136,15 @@ class ReleasingProvider:
         )
 
     async def generate_stream(
-        self, *, system, messages: Sequence[Message]
-    ) -> AsyncIterator[str]:
-        """Unused today — /chat/stream chunks an already-finished reply.
-
-        Kept because deleting it would be worse than useless: `__getattr__`
-        would then forward `generate_stream` straight to the wrapped provider
-        and silently skip the release. Note that as an async GENERATOR the
+        self, *, system, messages: Sequence[Message], tools: Sequence[ToolSpec] = ()
+    ) -> AsyncIterator[str | LLMTurn]:
+        """The /chat/stream model call. Without this override `__getattr__`
+        would forward `generate_stream` straight to the wrapped provider and
+        silently skip the release. Note that as an async GENERATOR the
         release happens on first iteration, not at call time.
         """
         await self._release()
         async for chunk in self._provider.generate_stream(
-            system=system, messages=messages
+            system=system, messages=messages, tools=tools
         ):
             yield chunk
