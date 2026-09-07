@@ -191,11 +191,17 @@ async def add_course(
     return MedResult(ok=True, course=_course(body))
 
 
-async def _resolve(
+async def matching_courses(
     user_id: uuid.UUID, name: str, client: httpx.AsyncClient | None = None,
     *, active_only: bool = True,
 ) -> MedResult:
-    """Find the course whose name matches ``name``. Reused by stop/remove.
+    """EVERY course whose name matches ``name``, in ``courses``.
+
+    ``ok`` with an empty tuple never happens: no match is ``not_found``, so
+    the caller can branch on ``reason`` the same way it does for a write.
+    ``_resolve`` narrows this to one for a single stop/remove; the
+    remove-all / stop-all sweep needs the whole set, and reading the
+    narrowed result there removed one "Dolo 650" and reported "all 1".
 
     ``active_only`` is True for STOP (you can only stop a running course) and
     False for REMOVE (a course you already stopped must still be removable —
@@ -230,9 +236,22 @@ async def _resolve(
         return all(any(ct.startswith(wt) for ct in ctoks)
                    for wt in want_tokens)
 
-    matches = [c for c in listed.courses if _matches(c)]
+    matches = tuple(c for c in listed.courses if _matches(c))
     if not matches:
         return MedResult(ok=False, reason="not_found")
+    return MedResult(ok=True, courses=matches)
+
+
+async def _resolve(
+    user_id: uuid.UUID, name: str, client: httpx.AsyncClient | None = None,
+    *, active_only: bool = True,
+) -> MedResult:
+    """Find THE course whose name matches ``name``. Reused by stop/remove."""
+    found = await matching_courses(user_id, name, client, active_only=active_only)
+    if not found.ok:
+        return found
+    matches = list(found.courses)
+    want = name.strip().lower()
     if len(matches) > 1:
         # Prefer an exact name hit; otherwise it is genuinely ambiguous.
         exact = [c for c in matches if c.name.lower() == want]

@@ -9,7 +9,7 @@ and no chart — every later report on file was read and thrown away.
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import date, timedelta
 
 from app.chat.data_handlers import handle_report_param_ask
 from app.models.common import utcnow
@@ -315,3 +315,28 @@ async def test_corpuscular_indices_are_not_folded_into_hemoglobin(db_session):
     assert out["visual"]["values"] == [16.2, 16.6], (
         "an index that merely mentions hemoglobin is not a hemoglobin reading"
     )
+
+
+async def test_the_dedupe_reckons_the_report_day_in_the_tracking_zone(db_session):
+    """The series dates a reading by the tracking-zone day; the walk dated the
+    report row by its UTC upload day. A report uploaded at 01:30 IST is the
+    previous UTC day, so the same reading failed the dedupe and plotted twice."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models.common import tracking_day_bounds
+
+    day = date(2026, 9, 7)
+    db_session.add(_series([_reading("2026-09-07", 88.0)]))
+    # 01:30 IST on the 7th == 20:00Z on the 6th.
+    uploaded = tracking_day_bounds(day)[0] + timedelta(hours=1, minutes=30)
+    assert uploaded.astimezone(UTC).date() == date(2026, 9, 6)
+    assert uploaded == datetime(2026, 9, 6, 20, 0, tzinfo=UTC)
+    report = _report(0, 88.0)
+    report.created_at = uploaded
+    db_session.add(report)
+    await db_session.flush()
+
+    out = await handle_report_param_ask(db_session, USER, "what is my ferritin")
+    assert out is not None
+    assert out["provenance"]["results"] == 1, out["reply"]
+    assert out.get("visual") is None
