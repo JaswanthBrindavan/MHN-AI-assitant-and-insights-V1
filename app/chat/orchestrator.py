@@ -74,6 +74,7 @@ from app.chat.replies import (
     IDENTITY_REPLIES,
     SCOPE_DECLINES,
     SELF_HARM_REPLY,
+    UNCHECKED_ESCALATION,
     pick,
     safe_reply,
 )
@@ -445,21 +446,26 @@ async def _write_receipt(
     """Write an auditable receipt (hashes only, never raw text). Fail-open."""
     settings = get_settings()
     try:
-        db.add(
-            RagTurnReceipt(
-                user_id=user_id,
-                session_id=session_id,
-                query_hash=_hash(message),
-                model_name=model_name,
-                prompt_version=settings.llm_prompt_version,
-                retrieved=retrieved,
-                grounding=grounding,
-                grounding_mode=settings.grounding_mode,
-                grounding_status=grounding_status,
-                used_rag=used_rag,
+        # SAVEPOINT: a failed flush leaves the session needing a rollback (on
+        # every dialect) and the pending row still in it, so without this the
+        # memory write that follows fails too. Rolling back the savepoint
+        # expunges the receipt and leaves the rest of the turn usable.
+        async with db.begin_nested():
+            db.add(
+                RagTurnReceipt(
+                    user_id=user_id,
+                    session_id=session_id,
+                    query_hash=_hash(message),
+                    model_name=model_name,
+                    prompt_version=settings.llm_prompt_version,
+                    retrieved=retrieved,
+                    grounding=grounding,
+                    grounding_mode=settings.grounding_mode,
+                    grounding_status=grounding_status,
+                    used_rag=used_rag,
+                )
             )
-        )
-        await db.flush()
+            await db.flush()
     except Exception:  # noqa: BLE001 — receipts must never break a reply
         logger.warning("receipt write failed", exc_info=True)
         record_fail_open("receipts")
@@ -1097,24 +1103,48 @@ async def _dispatch(
     )
     try:
         _open = await open_episodes(db, user_id)
-        if (
-            not _corpus_lookup
-            and not _recovery
-            and not _unrelated_ask
-            and LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]
-        ):
-            episode_floor = HIGH
-    except Exception:  # noqa: BLE001 — memory must never break a reply
-        logger.warning("open-episode floor failed; using triage only", exc_info=True)
+        _carried_high = LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]
+    except Exception:  # noqa: BLE001 — a guard FAILS CLOSED
+        # This is a guard, not enrichment, so it cannot fail open. It used to:
+        # a failed read became "no episodes" and the floor dropped, so a reader
+        # who described chest pain yesterday and never said it settled lost
+        # the seek-care banner on the one day the episode table was unreadable
+        # — silently, because `open_episodes` swallowed the error and nothing
+        # scrapes the fail-open counter.
+        #
+        # "Keep the floor" when the episodes could not be read means: behave
+        # as if the worst were true. We do not know whether an unresolved HIGH
+        # is on file, and the two ways of being wrong are not symmetric — a
+        # banner shown to someone with nothing open is one sentence of noise;
+        # a banner dropped for someone with an unresolved red flag is the
+        # failure this floor exists to prevent. The message-shape gates below
+        # still apply exactly as they do on a successful read: they are about
+        # THIS message, not the table, so a corpus lookup or a recovery report
+        # is not escalated either way.
+        #
+        # `_open` stays None so the prompt does not claim to know what is open,
+        # and the banner says the check could not be made (UNCHECKED_ESCALATION)
+        # rather than asserting the reader mentioned something.
+        logger.error("open-episode read failed; keeping a HIGH floor", exc_info=True)
         record_fail_open("episode_floor")
+        _open = None
+        _carried_high = True
+    if (
+        not _corpus_lookup
+        and not _recovery
+        and not _unrelated_ask
+        and _carried_high
+    ):
+        episode_floor = HIGH
     # Which banner the reply leads with. When the floor comes from an
     # unresolved EARLIER episode and this message raised nothing itself,
-    # "some of what you describe" is false — see CARRIED_ESCALATION.
-    escalation = (
-        CARRIED_ESCALATION
-        if episode_floor == HIGH and LEVEL_ORDER[risk] < LEVEL_ORDER[HIGH]
-        else HIGH_ESCALATION
-    )
+    # "some of what you describe" is false — see CARRIED_ESCALATION. And when
+    # the episodes could not be READ, "you mentioned something earlier" is a
+    # claim we cannot make — see UNCHECKED_ESCALATION.
+    if episode_floor == HIGH and LEVEL_ORDER[risk] < LEVEL_ORDER[HIGH]:
+        escalation = CARRIED_ESCALATION if _open is not None else UNCHECKED_ESCALATION
+    else:
+        escalation = HIGH_ESCALATION
     risk = max_level(risk, episode_floor)
     # Every reply composes in English; when the pivot is active the sidecar
     # translates the final text into the user's language and script. lang is
@@ -1139,6 +1169,10 @@ async def _dispatch(
     if tr.matched:
         t("Safety triage",
           f"{risk.upper()} — matched: {', '.join(repr(m) for m in tr.matched_terms[:4])}")
+    elif episode_floor != NONE and _open is None:
+        t("Safety triage",
+          f"{risk.upper()} — nothing in this message; earlier symptoms could "
+          "not be checked, so erring on the side of care")
     elif episode_floor != NONE:
         # Saying "no red flags detected" beside a seek-care banner reads as a
         # contradiction and hides WHY the turn escalated. This message raised
@@ -1490,9 +1524,12 @@ async def _dispatch(
     # enforce that). General education questions stay lean (no private data).
     if is_personal_health_query(message):
         try:
-            snapshot = await _stage(
-                "health_snapshot", build_health_snapshot(db, user_id)
-            )
+            # SAVEPOINT: on PostgreSQL a failed read aborts the transaction;
+            # without this the memory read and the receipt after it fail too.
+            async with db.begin_nested():
+                snapshot = await _stage(
+                    "health_snapshot", build_health_snapshot(db, user_id)
+                )
             if snapshot:
                 patient_text = (
                     f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
@@ -2025,7 +2062,8 @@ async def _dispatch_agentic(
     patient_text, user_codes = await build_patient_context(db, user_id)
     if is_personal_health_query(message):
         try:
-            snapshot = await build_health_snapshot(db, user_id)
+            async with db.begin_nested():  # see the legacy path's note
+                snapshot = await build_health_snapshot(db, user_id)
             if snapshot:
                 patient_text = (
                     f"{patient_text}\n\n{snapshot}" if patient_text else snapshot

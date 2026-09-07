@@ -210,7 +210,15 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 # A turn for a reader WITH family history on record is one more: the Family
 # Connect AI-context switch (context.py) is asked only once there is history
 # to withhold, so this figure — measured without a pedigree — never sees it.
-MAX_QUERIES_PER_TURN = 28
+#
+#   28 -> 36  Four SAVEPOINT/RELEASE pairs, no new SELECTs: the open-episode
+#             floor read, the health snapshot, the condition-registry load
+#             and the receipt write. Each was a fail-open read with no
+#             savepoint, and on PostgreSQL a failed statement aborts the
+#             whole transaction, so one broken read took every later read
+#             in the turn with it (audit H8). Bought knowingly: the pairs are
+#             what makes "this read failed" cost only this read.
+MAX_QUERIES_PER_TURN = 36
 
 # A HEALTH SUMMARY is the one turn that deliberately asks for everything:
 # lifestyle logs, the wearable rollups, conditions, allergies, medications,
@@ -226,10 +234,12 @@ MAX_QUERIES_PER_TURN = 28
 # a budget to spend, not a law — but it is spent knowingly and it is guarded.
 # A CO-OCCURRENCE readout ("does coffee affect my sleep") answers in the shared
 # prologue from two rollup scans and never reaches the ability chain, retrieval
-# or the model. 14: 12 measured for a plain pair, 13 when the asked-for HRV
-# measure is missing and its sibling is probed, and one spare. It costs an
-# ORDINARY turn nothing -- both parsers run before any query and decline.
-MAX_QUERIES_PER_CORRELATION_TURN = 14
+# or the model. 19: 17 measured for a plain pair (was 12 before the prologue's
+# open-episode read and the receipt write each got a savepoint pair — see the
+# ordinary budget above), one more when the asked-for HRV measure is missing
+# and its sibling is probed, and one spare. It costs an ORDINARY turn nothing
+# -- both parsers run before any query and decline.
+MAX_QUERIES_PER_CORRELATION_TURN = 19
 
 # 38. Measured each time it moved, never guessed:
 #
@@ -255,10 +265,14 @@ MAX_QUERIES_PER_CORRELATION_TURN = 14
 #             merging them would let a `period_day_log` failure hide the
 #             reader's chat-reported symptoms entirely.
 #
+#   41 -> 45  Two savepoint pairs in the shared prologue, not in the handler:
+#             the open-episode floor read and the receipt write (see the
+#             ordinary budget above). The summary's own reads are unchanged.
+#
 # Still spent knowingly. These reads fire only behind the summary parse, so an
 # ordinary turn pays nothing; the turn makes ZERO model calls; and it replaces
 # an LLM answer that runs a median of 8.6s.
-MAX_QUERIES_PER_SUMMARY_TURN = 41
+MAX_QUERIES_PER_SUMMARY_TURN = 45
 
 
 async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):
