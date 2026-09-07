@@ -34,29 +34,29 @@ SCOPE_DECLINES: tuple[str, ...] = (
 )
 
 IDENTITY_REPLIES: tuple[str, ...] = (
-    "I'm Davi, a health assistant. I offer general, educational health "
-    "information and decision support — I'm not a doctor and I don't diagnose. "
+    "I'm Ink, your personal health assistant. I offer general, educational "
+    "health information and decision support — I'm not a doctor and I don't diagnose. "
     "For anything specific to you, please check with a clinician.",
-    "I'm Davi — a health assistant, not a doctor. I can explain things and "
-    "help you work out what's worth raising with a clinician, but I don't "
-    "diagnose and I won't pretend to.",
-    "Davi here. Think of me as a well-read companion for health questions: I "
+    "I'm Ink — your personal health assistant, not a doctor. I can explain "
+    "things and help you work out what's worth raising with a clinician, but "
+    "I don't diagnose and I won't pretend to.",
+    "Ink here. Think of me as a well-read companion for health questions: I "
     "can give you general information and help you prepare for a "
     "consultation, but a clinician is the one who can actually assess you.",
 )
 
 GREETING_REPLIES: tuple[str, ...] = (
-    "Hello! I'm Davi, your health assistant. I can share general health "
+    "Hello! I'm Ink, your personal health assistant. I can share general health "
     "information and help you think through what to discuss with a clinician. "
     "What would you like to know?",
-    "Hi there — I'm Davi. Ask me anything about health and I'll explain what "
+    "Hi there — I'm Ink. Ask me anything about health and I'll explain what "
     "I can, and help you work out what's worth taking to a clinician. What's "
     "on your mind?",
-    "Hello — Davi here. I can talk through health questions with you and help "
+    "Hello — Ink here. I can talk through health questions with you and help "
     "you make sense of your own records. Where would you like to start?",
-    "Hi! I'm Davi, your health assistant. Whether it's a symptom, a report, or "
-    "just something you've been wondering about, I'm happy to help. What "
-    "brings you here today?",
+    "Hi! I'm Ink, your personal health assistant. Whether it's a symptom, a "
+    "report, or just something you've been wondering about, I'm happy to help. "
+    "What brings you here today?",
 )
 
 

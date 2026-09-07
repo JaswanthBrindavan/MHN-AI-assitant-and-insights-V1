@@ -47,7 +47,7 @@ _SYSTEM = (
 def _render_transcript(messages: list[dict], limit: int = 40) -> str:
     lines = []
     for m in messages[-limit:]:
-        who = "User" if m.get("role") == "user" else "Davi"
+        who = "User" if m.get("role") == "user" else "Ink"
         text = (m.get("message") or "").strip().replace("\n", " ")
         if text:
             lines.append(f"{who}: {text[:400]}")

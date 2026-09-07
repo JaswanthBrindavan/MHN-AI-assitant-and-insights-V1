@@ -82,7 +82,7 @@ def _render(doc, resource_type: str) -> str:
 {table}
 <div class="note">Dev-console preview rendered from the document's extracted
 content (content.ai). In production the actual file opens via the app's
-existing viewer (Spring presigned URL — Davi holds no AWS credentials).</div>
+existing viewer (Spring presigned URL — Ink holds no AWS credentials).</div>
 """
 
 

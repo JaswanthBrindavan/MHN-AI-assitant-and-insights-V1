@@ -1077,7 +1077,7 @@
   "category": "polite-noise-prefixes",
   "cases": [
    {
-    "input": "hi Davi, please could you add dolo 650 to my list, thanks a lot",
+    "input": "hi Ink, please could you add dolo 650 to my list, thanks a lot",
     "kind": "intent",
     "expect": "add",
     "name_contains": "dolo",
@@ -1109,7 +1109,7 @@
     "why": "A tag-question 'ok?' on the end of an explicit imperative seeks acknowledgment, not information. The trailing-'?' rule question-shapes the whole message, so a thyroid-medication stop is released to generic chat instead of the stop-confirm flow."
    },
    {
-    "input": "hey Davi, quick one - stop metoprolol please",
+    "input": "hey Ink, quick one - stop metoprolol please",
     "kind": "intent",
     "expect": "stop",
     "name_contains": "metoprolol",

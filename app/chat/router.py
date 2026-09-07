@@ -22,7 +22,7 @@ CONVERSATIONAL = "conversational"
 _GREETING_RE = re.compile(
     r"^\s*(?:(?:hi|hii+|hello|hey|namaste|good\s+(?:morning|afternoon|evening|"
     r"night)|thanks|thank\s+you|ok(?:ay)?|bye|goodbye|take\s+care|see\s+you)"
-    r"(?:\s+(?:there|everyone|davi|doctor|doc|ji|so\s+much|a\s+lot|again|"
+    r"(?:\s+(?:there|everyone|ink|doctor|doc|ji|so\s+much|a\s+lot|again|"
     r"for\s+(?:the|your)\s+help))?[\s!,.?]*)+$",
     re.IGNORECASE,
 )

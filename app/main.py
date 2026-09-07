@@ -36,7 +36,7 @@ def create_app() -> FastAPI:
     get_settings()
 
     app = FastAPI(
-        title="Davi Health AI",
+        title="Ink Health AI",
         version="0.1.0",
         summary="Decision-support backend — never diagnosis.",
     )

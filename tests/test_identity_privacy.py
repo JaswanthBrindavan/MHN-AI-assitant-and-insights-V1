@@ -94,4 +94,4 @@ def test_clinical_terms_are_not_flagged_as_leaks(reply: str) -> None:
 )
 def test_canned_replies_pass_validation(canned: str) -> None:
     assert find_banned(canned) is None
-    assert "davi" in canned.lower() or canned == SCOPE_DECLINE
+    assert "Ink" in canned or canned == SCOPE_DECLINE
