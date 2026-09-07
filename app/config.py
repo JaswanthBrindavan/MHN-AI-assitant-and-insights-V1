@@ -58,9 +58,12 @@ class Settings(BaseSettings):
     llm_thinking: str = "off"
 
     # Chat engine: "legacy" (deterministic handler chain) | "agentic" (the LLM
-    # orchestrates the same abilities as tools). Both ship; legacy is the
-    # default until the agentic engine has proven itself in staging.
-    chat_engine: str = "legacy"
+    # orchestrates the same abilities as tools). Both ship. Agentic is the
+    # default because it is what Railway runs (CHAT_ENGINE=agentic): while the
+    # default was legacy the suite exercised an engine no user was on, and
+    # agentic-only bugs reached production behind a green build. Tests that
+    # mean to pin the legacy chain set CHAT_ENGINE=legacy explicitly.
+    chat_engine: str = "agentic"
     # Tool-call rounds before the agent is forced to answer in text. A bound,
     # not a target — the loop must always terminate.
     # 3 -> 2. Each round is a SEQUENTIAL model call, and measured wall clock is

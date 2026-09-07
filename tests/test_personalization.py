@@ -193,17 +193,16 @@ async def test_personal_question_passes_snapshot_to_prompt(db_session, monkeypat
     await _seed_rich(db_session)
     await _seed_one_chunk(db_session)
 
-    captured = {}
-
-    class SpyProvider(FakeProvider):
-        async def generate(self, *, system, user: str) -> str:
-            captured["system"] = join_system(system)
-            return "Fatigue has many causes [1]. Discuss with your doctor."
-
-    await handle_chat(
-        db_session, USER, "why do I feel tired all the time?", SpyProvider()
+    # Read the prompt from `calls`, which both engines record. A spy on
+    # `generate` captures nothing on the agentic engine, and the "stays lean"
+    # twin below then passed vacuously against an empty string.
+    provider = FakeProvider(
+        responses=["Fatigue has many causes [1]. Discuss with your doctor."]
     )
-    sys = captured.get("system", "")
+    await handle_chat(
+        db_session, USER, "why do I feel tired all the time?", provider
+    )
+    sys = join_system(provider.calls[0]["system"])
     # The reader's own data reached the prompt as [P] context…
     assert "own recorded data" in sys
     assert "Metformin 500mg" in sys
@@ -218,18 +217,15 @@ async def test_educational_question_stays_lean(db_session, monkeypatch):
     await _seed_rich(db_session)
     await _seed_one_chunk(db_session)
 
-    captured = {}
-
-    class SpyProvider(FakeProvider):
-        async def generate(self, *, system, user: str) -> str:
-            captured["system"] = join_system(system)
-            return "Diabetes is a condition [1]."
-
+    provider = FakeProvider(responses=["Diabetes is a condition [1]."])
     await handle_chat(
-        db_session, USER, "what are the symptoms of diabetes?", SpyProvider()
+        db_session, USER, "what are the symptoms of diabetes?", provider
     )
-    sys = captured.get("system", "")
-    # No private data and no personalization directive on an educational query.
-    assert "own recorded data" not in sys
+    sys = join_system(provider.calls[0]["system"])
+    assert sys  # the prompt was actually captured — see the test above
+    # No private data on an educational query. (The personalization RULE is
+    # not probed: the agentic engine keeps it in its byte-identical cached
+    # prefix and lets the rule gate itself on the [P] block; legacy adds it
+    # only when the snapshot is present. What must stay out is the data.)
     assert "Metformin" not in sys
-    assert "Personalization:" not in sys
+    assert "blood sugar 142" not in sys

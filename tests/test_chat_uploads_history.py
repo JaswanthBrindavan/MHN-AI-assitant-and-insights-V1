@@ -410,6 +410,7 @@ def test_parse_document_query_plural_kinds(message, kind):
 # document parser tolerates spelling mistakes
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_history_meta_carries_document_cards(client, sessionmaker):
     from app.models.common import utcnow as _now
     from app.models.coredata import Report

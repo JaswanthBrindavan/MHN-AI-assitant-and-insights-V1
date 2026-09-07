@@ -52,6 +52,7 @@ async def test_followup_carries_topic_scope(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_followup_recent_turns_reach_prompt(db_session):
     await _seed_diabetes_chunk(db_session)
     provider = _SpyProvider()
@@ -67,6 +68,7 @@ async def test_followup_recent_turns_reach_prompt(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_first_turn_has_no_recent_block(db_session):
     await _seed_diabetes_chunk(db_session)
     provider = _SpyProvider()

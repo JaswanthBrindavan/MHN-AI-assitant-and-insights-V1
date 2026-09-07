@@ -39,6 +39,7 @@ async def _ingest(db):
 # Retrieval: keyword fallback when embeddings are NULL
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_keyword_fallback_retrieval(db_session):
     n = await _ingest(db_session)
     assert n == 9  # 3 conditions x 3 chunks
