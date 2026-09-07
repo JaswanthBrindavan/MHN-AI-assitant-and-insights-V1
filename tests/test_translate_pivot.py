@@ -22,6 +22,13 @@ from app.translate.service import (
 )
 from app.triage.red_flags import EMERGENCY_DIRECTIVE
 
+
+def _first_user_text(provider: FakeProvider) -> str:
+    """What the model was handed on its first call, whichever engine ran:
+    legacy records ``user``, the agentic loop records ``messages``."""
+    call = provider.calls[0]
+    return call["user"] if "user" in call else call["messages"][0].content
+
 TELUGU = "నాకు మోకాలి నొప్పి ఉంది"
 TELUGU_EN = "I have knee pain"
 HINDI_CHEST = "सीने में बहुत दर्द हो रहा है"
@@ -212,7 +219,7 @@ async def test_chat_pivots_telugu_through_english(db_session):
         db_session, uuid.uuid4(), TELUGU, provider, translator=fake
     )
     # The pipeline (and the LLM) saw English…
-    assert provider.calls and provider.calls[0]["user"] == TELUGU_EN
+    assert provider.calls and _first_user_text(provider) == TELUGU_EN
     # …and the reply was translated back (fake marks it visibly).
     assert r.response_message.startswith("[te/native]")
     assert r.language == "te"
@@ -295,7 +302,7 @@ async def test_chat_sidecar_down_gives_validated_english_plus_notice(
     r = await handle_chat(
         db_session, uuid.uuid4(), TELUGU, provider, translator=fake
     )
-    assert provider.calls and provider.calls[0]["user"] == TELUGU
+    assert provider.calls and _first_user_text(provider) == TELUGU
     # Generation is instructed in English, not Telugu.
     assert "Reply in Telugu" not in provider.calls[0]["system"]
     assert r.language == "te"

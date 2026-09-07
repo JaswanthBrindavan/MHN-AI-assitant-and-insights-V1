@@ -11,10 +11,11 @@ were split across the two engine branches:
 | discussed-topic recall          | read   | never   |
 | recording discussed topics      | written| never   |
 
-`CHAT_ENGINE` defaults to `legacy`, so in production the consent-gated profile
-a reader filled in was never read into the prompt at all, and no symptom
-episode was ever recorded. The whole suite passed both before and after the
-fix — nothing covered it. These are the tests that would have.
+Under `legacy` the consent-gated profile a reader filled in was never read
+into the prompt at all, and no symptom episode was ever recorded; under
+`agentic` (production) no topic was ever remembered. The whole suite passed
+both before and after the fix — nothing covered it. These are the tests that
+would have.
 """
 
 from __future__ import annotations
