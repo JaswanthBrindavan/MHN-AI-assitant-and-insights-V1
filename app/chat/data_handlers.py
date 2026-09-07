@@ -37,6 +37,7 @@ from app.chat.abilities import (
     is_about_me_query,
     is_family_vital_term,
     is_my_conditions_query,
+    names_another_person,
     param_aliases,
     param_tokens,
     parse_ai_result_query,
@@ -1031,6 +1032,17 @@ async def _latest_report_param(
 async def handle_metric_query(
     db: AsyncSession, user_id: uuid.UUID, message: str
 ) -> dict | None:
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     query: MetricQuery | None = parse_metric_query(message)
     if query is None:
         return None
@@ -1476,6 +1488,17 @@ async def handle_summary_query(
     period as structured data and passes it, rather than synthesising an English
     sentence for this parser to re-read.
     """
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     if query is None:
         query = parse_summary_query(message)
     if query is None:
@@ -2875,6 +2898,17 @@ async def handle_correlation_query(
     engines reach this from the message, so there is nothing for a tool to
     call and no English sentence for an executor to synthesise.
     """
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     from app.chat.abilities import CorrelationQuery
     from app.chat.abilities import medication_candidates as _med_cands
     from app.drugs.service import find_drug
@@ -3061,6 +3095,17 @@ async def handle_tracker_query(
     it must NOT synthesise an English sentence for this parser to re-read. That
     is the bug that made every document tool call return nothing.
     """
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     if query is None:
         query = parse_tracker_query(message)
     if query is None:
@@ -3537,6 +3582,33 @@ async def handle_about_me_query(
     condition is reported because it is written down, not because we agree
     with it.
     """
+    # Whose record? "what health issues does my father have" matches
+    # _MY_CONDITIONS_RE on the bare phrase "what health issues" -- the pattern
+    # never required first-person framing -- and this handler then answered it
+    # from the READER's own conditions, labelled "This is your own recorded
+    # data". Measured in production: a reader with "Short Term Memory Loss;
+    # Sugar" on file was told those were their father's.
+    #
+    # Audit H7 in a fourth place. The three parsers were guarded in #72 and the
+    # tool path in #83; this one is reached at step 3.49 of the shared
+    # prologue, BEFORE the family handler at 3.50, so it claimed the turn and
+    # the family read never ran. Declining hands it to that handler, which
+    # resolves the member under their sharing settings.
+    if names_another_person(message):
+        return None
+
+    # Whose record? "what health issues does my father have" matches
+    # _MY_CONDITIONS_RE on the bare phrase "what health issues" -- the pattern
+    # never required first-person framing -- and this handler then answered it
+    # from the READER's own conditions, labelled "This is your own recorded
+    # data". Measured in production: a reader with "Short Term Memory Loss;
+    # Sugar" on file was told those were their father's.
+    #
+    # Audit H7 in a fourth place. The three parsers were guarded in #72 and the
+    # tool path in #83; this one is reached at step 3.49 of the shared
+    # prologue, BEFORE the family handler at 3.50, so it claimed the turn and
+    # the family read never ran. Declining hands it to that handler, which
+    # resolves the member under their sharing settings.
     wants_profile = is_about_me_query(message)
     wants_conditions = is_my_conditions_query(message)
     if not (wants_profile or wants_conditions):

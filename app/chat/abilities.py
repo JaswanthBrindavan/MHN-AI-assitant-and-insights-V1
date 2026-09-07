@@ -19,13 +19,35 @@ from dataclasses import dataclass
 # --------------------------------------------------------------------------- #
 # Shared vocab
 # --------------------------------------------------------------------------- #
-# Longer terms first so "my grandson" is never read as "my son".
+# Longer terms first so "my grandson" is never read as "my son", and
+# "my parent-in-law" is never read as "my parent".
+#
+# Two vocabularies meet here and only one of them was represented. What a
+# reader TYPES is a colloquial word ("my dad"); what the app STORED is one of
+# the fifteen labels its Family Connect picker offers, and those are generic:
+# Parent, Child, Sibling, Spouse, the three in-laws, Guardian, Ward. Measured
+# against a real account, only "cousin" and "grandchild" appeared in both, so
+# a reader who labelled a connection "Parent" could not say "my parent" and be
+# understood -- it fell through and the assistant asked which parent they
+# meant, having just been told.
+#
+# The RESOLVER already handled this from the other side: _RELATION_ACCEPTS
+# maps "father" -> {"father", "parent"}, which is why "my dad" finds a Parent
+# row, and _relation_matches("parent", "Parent-in-law") is correctly False.
+# Only this list was missing them.
 RELATION_TERMS = (
-    "grandfather", "grandmother", "grandpa", "grandma",
+    # In-laws before the plain word they contain.
+    "parent-in-law", "child-in-law", "sibling-in-law",
+    "mother-in-law", "father-in-law", "brother-in-law", "sister-in-law",
+    "son-in-law", "daughter-in-law",
+    "grandfather", "grandmother", "grandparent", "grandpa", "grandma",
     "granddaughter", "grandson", "grandchild", "grandkid",
     "father", "mother", "dad", "mom", "mum", "papa", "amma", "appa",
     "husband", "wife", "brother", "sister", "son", "daughter",
     "uncle", "aunty", "auntie", "aunt", "cousin", "nephew", "niece",
+    # The app's own generic labels, which a reader may well echo back.
+    "parent", "child", "sibling", "spouse", "partner", "fiance", "fiancee",
+    "guardian", "ward",
 )
 _RELATION_CANON = {
     "dad": "father", "papa": "father", "appa": "father",
@@ -995,6 +1017,11 @@ _CHART_WORDS = frozenset({
 })
 
 
+#: Words that make a phrase a request for an OVERVIEW, never the name of a
+#: parameter printed on a report.
+_SUMMARY_WORDS = frozenset({"summary", "overview", "recap", "snapshot"})
+
+
 def parse_report_param_ask(message: str) -> str | None:
     """The parameter name the user asked about, or None.
 
@@ -1010,6 +1037,16 @@ def parse_report_param_ask(message: str) -> str | None:
         if w.lower().strip(".,?") not in _CHART_WORDS
     ).strip()
     if len(term) < 3:
+        return None
+    # A summary is not a lab analyte. "what's my health summary of last week?"
+    # matched the "my X of Y" shape and came back with the parameter name
+    # "health summary of last week", which then BLOCKED the deterministic
+    # summary step -- that step stands down whenever another parser claims the
+    # turn -- and sent a question with an exact answer on file to the model.
+    # It composed one, the numeric fidelity guard caught a value that did not
+    # match the record, and the reader got the safe reply instead of their
+    # summary. Measured in production.
+    if _SUMMARY_WORDS & {w.lower().strip(".,?!") for w in term.split()}:
         return None
     return term
 

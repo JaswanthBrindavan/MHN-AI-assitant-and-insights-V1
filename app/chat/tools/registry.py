@@ -78,6 +78,17 @@ READER_ONLY_TOOLS = frozenset({
     "get_section_details",
     "get_tracker_total",
     "get_health_summary",
+    # Found by tests/test_reader_scoped_reads_decline_family.py, which requires
+    # every tool to be classified. All four read the reader's own rows with no
+    # viewer path, and none of what they read is a shareable resource_type:
+    # medications, adherence, doctor consults and computed patterns are not in
+    # `resource_type_enum` at all. `get_doctor_consults` even synthesises "my
+    # recent doctor consultations", so "what doctors has my father seen"
+    # returned the READER's — the same defect #83 fixed for its five.
+    "list_medications",
+    "get_medication_adherence",
+    "get_doctor_consults",
+    "get_trends_and_patterns",
 })
 
 
