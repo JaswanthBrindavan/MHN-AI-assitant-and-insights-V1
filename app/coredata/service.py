@@ -110,6 +110,30 @@ def _owner_read_grant(fc: FamilyConnect, owner_is_requester: bool) -> bool:
     )
 
 
+def _member_ai_context_grant(fc: FamilyConnect, *, viewer_is_requester: bool) -> bool:
+    """Has the OTHER party granted this viewer AI context on this link?
+
+    ``req_ai_context_access`` / ``acc_ai_context_access`` (mhn-spring V27) are
+    OUTBOUND: each is written by its own side and means "this connected member
+    may use MY data for their own analysis" — ``editAccessControls`` sets the
+    caller's own column, and the Android permissions screen binds it under
+    "<name> can".
+
+    So the INBOUND grant — the one that says something about what the *viewer*
+    may do — is the flag on the side the viewer does NOT occupy: ``acc_*`` when
+    the viewer sent the request, ``req_*`` when the viewer accepted. Reading the
+    viewer's own side here would be exactly the mistake PR #93 removed: a reader
+    granting their data to a relative is not the relative granting theirs.
+
+    NULL reads as off. Unlike the read pair there is no legacy column to fall
+    back on: production has both ``NOT NULL DEFAULT false``, and a NULL can only
+    come from a database predating V27, where nobody has opted in to anything.
+    """
+    return bool(
+        fc.acc_ai_context_access if viewer_is_requester else fc.req_ai_context_access
+    )
+
+
 # Asked-for term → the relation-name words it accepts. Production relation
 # rows use both gendered and generic names ("Father"/"Child",
 # "Grandparent"/"Grandchild"), so "my grandson" must find a "Grandchild" row
@@ -236,9 +260,17 @@ NOT_CONNECTED = FamilyLookup(member_id=None, connected=False)
 
 async def _accepted_links(
     db: AsyncSession, user_id: uuid.UUID
-) -> list[tuple[uuid.UUID, bool, str | None]]:
-    """(other user id, owner shares, relation name from the viewer's side)
-    for every ACCEPTED link the viewer is on."""
+) -> list[tuple[uuid.UUID, bool, str | None, bool]]:
+    """(other user id, owner shares, relation name from the viewer's side,
+    other party granted the viewer AI context) for every ACCEPTED link the
+    viewer is on.
+
+    The last two are read from OPPOSITE sides of the row and that is the whole
+    point. ``shares`` is the owner-side FILE READ grant, which is what lets the
+    viewer pull the member's documents. The AI-context flag is the member's own
+    grant pointing at the viewer — see ``_member_ai_context_grant``. They are
+    independent switches and neither one gates the other.
+    """
     rows = (
         await db.execute(
             select(FamilyConnect, Relation)
@@ -251,9 +283,10 @@ async def _accepted_links(
             .order_by(FamilyConnect.id)
         )
     ).all()
-    out: list[tuple[uuid.UUID, bool, str | None]] = []
+    out: list[tuple[uuid.UUID, bool, str | None, bool]] = []
     for fc, rel in rows:
-        if fc.requester_id == user_id:
+        viewer_is_requester = fc.requester_id == user_id
+        if viewer_is_requester:
             # Viewer sent the request → owner is the acceptor → acc_read.
             other = fc.acceptor_id
             shares = _owner_read_grant(fc, owner_is_requester=False)
@@ -263,8 +296,30 @@ async def _accepted_links(
             other = fc.requester_id
             shares = _owner_read_grant(fc, owner_is_requester=True)
             name = rel.inverse if rel is not None else None
-        out.append((other, shares, name))
+        out.append((
+            other, shares, name,
+            _member_ai_context_grant(fc, viewer_is_requester=viewer_is_requester),
+        ))
     return out
+
+
+async def members_granting_ai_context(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[tuple[uuid.UUID, str | None]]:
+    """(member id, relation name) for every accepted link whose OTHER party
+    has granted this reader AI context. Empty when nobody has.
+
+    This is the per-relationship half of the family-context gate; the plan half
+    is ``app.entitlements.family_context_entitled``. It is deliberately NOT a
+    document read: what this consent buys is the member's data being usable as
+    context for the reader's analysis, and pulling their shared files stays
+    governed by the file read grant and ``file_access_exclusions``.
+    """
+    return [
+        (other, name)
+        for other, _shares, name, ai in await _accepted_links(db, user_id)
+        if ai
+    ]
 
 
 async def lookup_family_member(
@@ -278,7 +333,8 @@ async def lookup_family_member(
     """
     term = relation_term.strip().lower()
     matched = [
-        (other, shares) for other, shares, name in await _accepted_links(db, user_id)
+        (other, shares)
+        for other, shares, name, _ai in await _accepted_links(db, user_id)
         if name and _relation_matches(term, name)
     ]
     if not matched:
@@ -320,7 +376,10 @@ async def lookup_family_member_by_name(
     term = name_term.strip().lower()
     if len(term) < 3:
         return NOT_CONNECTED
-    links = {other: shares for other, shares, _name in await _accepted_links(db, user_id)}
+    links = {
+        other: shares
+        for other, shares, _name, _ai in await _accepted_links(db, user_id)
+    }
     if not links:
         return NOT_CONNECTED
     try:

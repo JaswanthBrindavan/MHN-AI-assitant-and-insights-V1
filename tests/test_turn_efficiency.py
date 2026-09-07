@@ -207,10 +207,6 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 # say 27; the read that made it 28 was never accounted for. Re-measure and
 # re-comment when you change it, or the next person inherits the same lie.)
 #
-# A turn for a reader WITH family history on record is one more: the Family
-# Connect AI-context switch (context.py) is asked only once there is history
-# to withhold, so this figure — measured without a pedigree — never sees it.
-#
 #   28 -> 36  Four SAVEPOINT/RELEASE pairs, no new SELECTs: the open-episode
 #             floor read, the health snapshot, the condition-registry load
 #             and the receipt write. Each was a fail-open read with no
@@ -218,7 +214,29 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 #             whole transaction, so one broken read took every later read
 #             in the turn with it (audit H8). Bought knowingly: the pairs are
 #             what makes "this read failed" cost only this read.
-MAX_QUERIES_PER_TURN = 36
+#
+#   36 -> 39  Family context: one `family_connect` SELECT asking which
+#             connected members have granted THIS reader AI context, plus the
+#             fifth SAVEPOINT/RELEASE pair, in `context.shared_family_history`.
+#             Measured, not guessed — 36 before, 39 after, on this same test.
+#
+#             The SELECT is unconditional and there is no cheaper predicate:
+#             the query IS the consent check, and a reader with no pedigree of
+#             their own can still have a member sharing theirs, so it cannot
+#             hide behind "only when there is history".
+#
+#             The pair is bought for the reason the four above were: this is a
+#             fail-open read, and without a savepoint one broken
+#             `family_connect` read would abort the transaction and take the
+#             memory read and the receipt write with it — audit H8, again.
+#
+#             What it does NOT cost: the mhn-spring entitlements call. That is
+#             an HTTP round trip, not a query, and it is asked only AFTER the
+#             SELECT returns at least one granting member — so a reader nobody
+#             has granted context to (every reader in this test, and most
+#             readers in production) never makes it. `build_patient_context`
+#             memoises, so even a reader who does pays it once per session.
+MAX_QUERIES_PER_TURN = 39
 
 # A HEALTH SUMMARY is the one turn that deliberately asks for everything:
 # lifestyle logs, the wearable rollups, conditions, allergies, medications,

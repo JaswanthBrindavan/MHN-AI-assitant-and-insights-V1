@@ -9,6 +9,7 @@ things to discuss with a clinician, never as a diagnosis or a stated cause.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 
@@ -25,11 +26,17 @@ from app.coredata.service import (
     latest_vitals,
     lifestyle_phrase,
     lifestyle_totals,
+    medical_records,
+    members_granting_ai_context,
     recent_lab_values,
     window_start,
 )
+from app.entitlements import family_context_entitled
 from app.models.core import PedigreeCondition
 from app.models.rules import InsightArtifact
+from app.telemetry import record_fail_open
+
+logger = logging.getLogger("davi.chat")
 
 # Per-session memo. build_patient_context is called up to twice per chat turn
 # (once for the [P] block, once for suggestion scoping) and its inputs change
@@ -76,18 +83,24 @@ async def build_patient_context(
     still carried the reader's family history, the most sensitive category
     here, into the model's prompt.
 
-    **The Family Connect AI-context switch is NOT a condition here.** That
-    switch (`family_connect.req_ai_context_access` / `acc_ai_context_access`)
-    is an OUTBOUND grant: the flag on the reader's side means a connected
-    member may use the READER's data for their own analysis — mhn-spring's
-    `editAccessControls` writes the caller's own side under "the recipient's
-    resulting grants on our files", and the Android Family Permissions screen
-    binds it under "<name> can". It says nothing about the reader's own chat.
-    Their pedigree is their own record, entered by them the way any clinician
-    takes a family history; what personalises their own answers is
-    personalization consent, checked where the profile is assembled. A gate
-    on the outbound grant here withheld a reader's own history from their
-    own answers until they had shared with some relative.
+    **The Family Connect AI-context switch does not gate this — it ADDS to
+    it.** That switch (`family_connect.req_ai_context_access` /
+    `acc_ai_context_access`) is an OUTBOUND grant: the flag on the reader's
+    side means a connected member may use the READER's data for their own
+    analysis — mhn-spring's `editAccessControls` writes the caller's own side
+    under "the recipient's resulting grants on our files", and the Android
+    Family Permissions screen binds it under "<name> can". It says nothing
+    about the reader's own chat. Their pedigree is their own record, entered
+    by them the way any clinician takes a family history; what personalises
+    their own answers is personalization consent, checked where the profile is
+    assembled. A gate on the outbound grant here withheld a reader's own
+    history from their own answers until they had shared with some relative.
+
+    Read the other way round the switch is real, and `shared_family_history`
+    (below) is what it buys: a member who granted THIS reader AI context has
+    their own recorded conditions appended here, on top of everything the
+    reader entered themselves. Additive, never subtractive — nothing that
+    reached this block before reaches it less often now.
 
     The suppression is memoised like any other result: within one session
     the pending state cannot change, because a forget-me request and a chat
@@ -124,10 +137,6 @@ async def build_patient_context(
     codes: set[str] = {c.condition_code for c in conditions}
     codes |= {a.condition_code for a in insights}
 
-    if not conditions and not insights:
-        memo[user_id] = ("", set(codes))
-        return "", codes
-
     displays = sorted({c.condition_display for c in conditions})
     lines: list[str] = []
     if displays:
@@ -135,9 +144,98 @@ async def build_patient_context(
     if insights:
         tiers = sorted({f"{a.condition_code} ({a.tier})" for a in insights})
         lines.append("Active family-history insights: " + ", ".join(tiers) + ".")
+    shared = await shared_family_history(db, user_id)
+    if shared:
+        lines.append(shared)
     result = (" ".join(lines), codes)
     memo[user_id] = (result[0], set(codes))
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Family context — what the Family Connect AI-context switch actually buys
+# --------------------------------------------------------------------------- #
+_SHARED_HISTORY_LEAD = (
+    "Family history from connected members' own records, shared by them for "
+    "this purpose: "
+)
+
+
+async def shared_family_history(db: AsyncSession, user_id: uuid.UUID) -> str:
+    """One [P] line: the recorded conditions of members who granted this
+    reader AI context. Empty string whenever any part of the gate says no.
+
+    THE CAPABILITY. Ink already knows the reader's family history as the
+    reader typed it — a pedigree slot with a condition code. When a connected
+    member has switched AI context ON for this reader, their *own* record can
+    stand in for that hearsay: "your mother — Hypothyroidism" out of the
+    mother's medical_condition rows, rather than only what the reader
+    remembered to enter. That is the smallest thing the switch can buy that is
+    genuinely analysis rather than a pull.
+
+    TWO GATES, cheap one first:
+
+    1. **Per-member consent**, from the shared database — the INBOUND grant
+       (``members_granting_ai_context``). No granting member, no Spring call:
+       most readers never pay a round trip to learn there is nothing to add.
+    2. **The plan**, from mhn-spring ``GET /entitlements/{userId}``. Ink does
+       not own subscriptions and does not reconstruct them.
+
+    NOT A PULL. This never touches the member's documents, lab values or THP
+    series; those are governed by the file read grant and
+    ``file_access_exclusions`` and work identically with this switch off, which
+    is what the owner asked for and what
+    ``test_a_family_read_does_not_depend_on_the_ai_context_switch`` pins.
+
+    ``shared_only=True`` is what keeps a PRIVATE condition out: it is
+    mhn-spring's own ``getByUserIdAndIsPrivateFalse``, and a NULL (a row that
+    predates the column) is not a decision to share.
+
+    Condition CODES are deliberately not extended from this. Pedigree rows
+    carry a registry code; ``medical_condition.name`` is free text, and
+    mapping it would be guessing which knowledge profile to retrieve on a
+    relative's behalf. The text reaches the model; retrieval scope stays the
+    reader's own.
+    """
+    parts: list[str] = []
+    try:
+        # SAVEPOINT: on PostgreSQL a failed statement aborts the whole
+        # transaction, so without this a broken family read would take the
+        # memory read and the receipt write after it down too (audit H8).
+        async with db.begin_nested():
+            members = await members_granting_ai_context(db, user_id)
+        if not members:
+            return ""
+        # Asked OUTSIDE the savepoint on purpose: this is a network call with
+        # a multi-second timeout, and there is no reason to hold a savepoint
+        # open across it.
+        if not await family_context_entitled(user_id):
+            return ""
+        async with db.begin_nested():
+            # ponytail: one medical_records call per granting member, bounded
+            # by how many relatives both connected AND flipped the switch (a
+            # handful), and paid only by readers who have one. Batch it into a
+            # single IN () read if that ever stops being true — but not by
+            # copying the deleted_at/private predicate, which lives in
+            # medical_records precisely so it is written once.
+            for member_id, relation in members:
+                rows = await medical_records(
+                    db, member_id, type_="condition", shared_only=True
+                )
+                names = sorted({r.name for r in rows if r.name})
+                if not names:
+                    continue
+                who = f"your {relation.lower()}" if relation else (
+                    "a connected family member"
+                )
+                parts.append(f"{who} — " + ", ".join(names))
+    except Exception:  # noqa: BLE001 — enrichment must never break a reply
+        logger.warning("shared family history failed; continuing", exc_info=True)
+        record_fail_open("shared_family_history")
+        return ""
+    if not parts:
+        return ""
+    return _SHARED_HISTORY_LEAD + "; ".join(parts) + "."
 
 
 # --------------------------------------------------------------------------- #
