@@ -550,3 +550,152 @@ def test_ordinary_prose_still_reads_as_one_sentence():
         "Caffeine is a stimulant that blocks adenosine receptors and can delay "
         "sleep onset when taken late in the day."
     )
+
+
+# --------------------------------------------------------------------------- #
+# "3 more days to unlock" — a countdown that has to actually count down
+# --------------------------------------------------------------------------- #
+async def test_an_unchanged_pattern_still_gets_todays_stamp(db_session):
+    """A steady reader must not be recomputed on every screen load.
+
+    The skip branch leaves the row alone, which is the point of the hash. It
+    still has to move `computed_for`, because that stamp is the only thing the
+    read path can ask "have I already computed for today?". Without it a
+    reader whose patterns never move carries an old stamp forever and pays a
+    full sweep on every load.
+    """
+    from app.models.common import tracking_today
+    from app.patterns.engine import active_patterns, recompute_patterns
+
+    await _seed(db_session)
+    await recompute_patterns(db_session, USER, reason="night-1")
+    for r in await active_patterns(db_session, USER):
+        r.computed_for = tracking_today() - timedelta(days=1)
+    await db_session.flush()
+
+    assert await recompute_patterns(db_session, USER, reason="night-2") == 0
+    rows = await active_patterns(db_session, USER)
+    assert rows
+    assert all(r.computed_for == tracking_today() for r in rows)
+
+
+async def test_the_counter_moves_when_the_reader_comes_back_tomorrow(db_session):
+    """The bug this file did not catch: the number was frozen, not counting.
+
+    `stored_cards` used to compute only for a reader with NO rows, so the very
+    first Insights load wrote a set of cards and every load afterwards, for
+    the life of the account, served those same cards. "3 more days to unlock"
+    was the shortfall on the day they first opened the screen — it stayed at 3
+    however many days they went on to log. Reported from a real account.
+    """
+    from app.models.common import tracking_today
+    from app.patterns.engine import active_patterns, stored_cards
+
+    await _seed(db_session)
+    before = {
+        c["key"]: (c["days_with"], c["days_without"])
+        for c in await stored_cards(db_session, USER)
+    }
+    assert before
+
+    # A day passes, and the reader logs four more nights with no late coffee.
+    for r in await active_patterns(db_session, USER):
+        r.computed_for = tracking_today() - timedelta(days=1)
+    start, end = window_bounds()
+    for i in range(26, 30):
+        db_session.add(SahhaDailyTotal(
+            user_id=USER, metric="sleep_duration", bucket_start=end - timedelta(days=i),
+            total=400.0, entries=1, days_counted=1,
+        ))
+    await db_session.flush()
+
+    after = {
+        c["key"]: (c["days_with"], c["days_without"])
+        for c in await stored_cards(db_session, USER)
+    }
+    assert after != before, "the stored cards never moved — the counter is frozen"
+
+
+async def test_a_second_read_the_same_day_does_not_recompute(db_session):
+    """The other half of the same rule. Once a day, not once per screen load."""
+    from app.patterns.engine import stored_cards
+
+    await _seed(db_session)
+    first = await stored_cards(db_session, USER)
+
+    start, end = window_bounds()
+    db_session.add(SahhaDailyTotal(
+        user_id=USER, metric="sleep_duration", bucket_start=end - timedelta(days=27),
+        total=400.0, entries=1, days_counted=1,
+    ))
+    await db_session.flush()
+
+    assert await stored_cards(db_session, USER) == first, "a read computed"
+
+
+def test_the_waiting_note_names_both_halves():
+    """"3 more days" with nothing else on the card is a countdown with no
+    instructions. The note says which two things have to land on the same day,
+    and in which form the app can accept them."""
+    from app.patterns.render import waiting_note
+
+    note = waiting_note("coffee", "sleep_duration", 25, 4)
+    assert "wear your watch overnight" in note      # the outcome half
+    assert "log your coffee" in note                # the exposure half
+    assert "25 with and 4 without" in note          # their own counts
+    assert "7 of each" in note
+
+
+def test_the_waiting_note_points_at_the_half_that_is_short():
+    """Telling somebody with 25 logged days to log more is the wrong advice."""
+    from app.patterns.render import waiting_note
+
+    assert "days without are the half" in waiting_note("coffee", "sleep_duration", 25, 4)
+    assert "days with are the half" in waiting_note("coffee", "sleep_duration", 2, 20)
+    # Neither side clearly ahead: no clause rather than a wrong one.
+    assert "half that is short" not in waiting_note("coffee", "sleep_duration", 3, 4)
+
+
+def test_the_waiting_note_never_tells_the_reader_to_change_the_habit():
+    """It asks for a RECORD. Nothing on this screen gives advice."""
+    from app.patterns.render import EXPOSURE_ASK, waiting_note
+
+    for exposure in EXPOSURE_ASK:
+        note = waiting_note(exposure, "sleep_duration", 3, 2).lower()
+        for advice in ("cut down", "less ", "avoid", "stop ", "try to", "should"):
+            assert advice not in note, f"{exposure}: {advice!r} is advice"
+
+
+async def test_the_summary_sends_the_note_beside_the_number(db_session):
+    """The apps draw the bar from `days_needed`. The line under it has to come
+    from here too — three clients draw this card, and wording that lives in a
+    client can only be changed by shipping an app-store release.
+
+    Seeded THIN on purpose. `_seed` gives a reader whose pairs have already
+    unlocked, and against that reader every assertion here would be skipped
+    rather than checked — this screen only exists for someone still short.
+    """
+    from app.api.v1.patterns import summary
+
+    # Eight nights of sleep, late coffee on six of them: nowhere near 7 and 7.
+    start, end = window_bounds()
+    for i in range(1, 9):
+        db_session.add(SahhaDailyTotal(
+            user_id=USER, metric="sleep_duration", bucket_start=end - timedelta(days=i),
+            total=380.0, entries=1, days_counted=1,
+        ))
+        if i <= 6:
+            db_session.add(LifestyleLog(
+                user_id=USER, log_type="coffee", quantity=1, unit="cup",
+                logged_at=utcnow().replace(hour=20) - timedelta(days=i),
+            ))
+    await db_session.flush()
+
+    body = await summary(metric="sleep_duration", current_user=USER, db=db_session)
+    assert body["building_baseline"] is True
+    assert body["days_needed"] == 5          # two nights without, seven wanted
+    note = body["days_needed_note"]
+    assert note, "a bare countdown, with no instructions"
+    assert "on the same day" in note
+    assert "log your coffee" in note and "wear your watch overnight" in note
+    assert note.startswith("Late caffeine and your sleep is the nearest one.")

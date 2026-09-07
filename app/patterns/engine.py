@@ -88,7 +88,14 @@ async def recompute_patterns(
 
         # Nothing changed: leave the row alone. This is the whole reason a
         # reader does not accumulate 7 rows a night.
+        #
+        # The stamp still moves. `computed_for` is what the read path checks
+        # to decide whether this reader has already been computed for today,
+        # and a reader whose patterns are steady would otherwise carry
+        # yesterday's stamp forever and be recomputed on every screen load.
+        # The row is not new; the answer for today genuinely is this row.
         if existing is not None and existing.content_hash == digest:
+            existing.computed_for = stamp
             continue
 
         fact = None
@@ -148,18 +155,32 @@ async def active_patterns(db: AsyncSession, user_id) -> list[PatternArtifact]:
 
 
 async def stored_cards(db: AsyncSession, user_id) -> list[dict]:
-    """Stored cards, computing ONCE for a reader who has never been swept.
+    """Stored cards, computing at most ONCE A DAY for an unswept reader.
 
     The one exception to "reads never compute", shared by the Insights route
     and the chat tool so the two cannot answer the same reader differently.
     It exists because the sweep has never actually run in this deployment —
     `job_runs` is empty — and without it both would be permanently blank
     rather than merely stale, which looks like a data problem instead of a job
-    nobody scheduled. The computed rows are STORED, so every later read is a
-    plain read.
+    nobody scheduled.
+
+    ONCE was not enough. The fallback used to fire only when a reader had no
+    rows at all, so the very first Insights load computed a set of cards and
+    every load after it, for the rest of that account's life, served those
+    same cards. "3 more days to unlock" was therefore not a countdown: it was
+    the shortfall on the day the reader first opened the screen, frozen, and
+    it stayed at 3 no matter how many days they went on to log. Recomputing
+    when the newest stored row was computed for a day before this one costs
+    one sweep's worth of queries on a reader's first read of the day and
+    leaves every later read a plain read, which is what the invariant is
+    actually protecting.
     """
     rows = await active_patterns(db, user_id)
+    today = tracking_today()
     if not rows:
         await recompute_patterns(db, user_id, reason="first_use")
+        rows = await active_patterns(db, user_id)
+    elif not any(r.computed_for == today for r in rows):
+        await recompute_patterns(db, user_id, reason="stale_read")
         rows = await active_patterns(db, user_id)
     return [r.card or {} for r in rows]
