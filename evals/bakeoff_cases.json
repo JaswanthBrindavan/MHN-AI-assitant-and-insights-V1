@@ -235,6 +235,20 @@
    "expects_tools": [
     "get_tracker_total"
    ]
+  },
+  {
+   "name": "trend_sleep_month",
+   "message": "how has my sleep been this month?",
+   "expects_tools": [
+    "get_trends_and_patterns"
+   ]
+  },
+  {
+   "name": "yesterday_review",
+   "message": "why was yesterday such a bad day for me?",
+   "expects_tools": [
+    "get_trends_and_patterns"
+   ]
   }
  ]
 }

@@ -687,6 +687,39 @@ def test_a_verdict_on_the_readers_own_wearable_figure_is_blocked(sentence):
 
 
 @pytest.mark.parametrize(
+    "sentence",
+    [
+        # The reader against THEMSELVES: two figures from their own record and
+        # no norm. This is the wording of the Insights cards and the yesterday
+        # review, which reach chat through get_trends_and_patterns.
+        "Your sleep has averaged 5.5 h over the last 3 days, below your usual "
+        "7.0 h.",
+        "Your resting heart rate has averaged 71 bpm over the last 3 days, "
+        "above your usual 62 bpm.",
+        "Yesterday your sleep was shorter than usual. You got 5h 0m of sleep, "
+        "about 1 hour 30m below your recent average.",
+        "You walked 4,100 steps yesterday, fewer than you usually do.",
+    ],
+)
+def test_a_comparison_against_the_readers_own_baseline_is_not_a_grade(sentence):
+    assert find_banned(sentence) is None, sentence
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        # A self-comparison does not launder a norm in the same sentence.
+        "Your sleep averaged 5.5 h over the last 3 days, below your usual "
+        "7.0 h and below the recommended 8 h.",
+        "Your sleep of 5 h was shorter than usual, which is concerning.",
+        "Your 4,100 steps were below your usual and well below your target.",
+    ],
+)
+def test_a_norm_beside_a_self_comparison_is_still_a_grade(sentence):
+    assert find_banned(sentence) == "wearable-grading", sentence
+
+
+@pytest.mark.parametrize(
     ("sentence", "reason"),
     [
         # `_PERSONAL_CLEARANCE_RE` required the adjective to follow "you"

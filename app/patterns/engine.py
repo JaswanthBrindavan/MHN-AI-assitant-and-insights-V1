@@ -145,3 +145,21 @@ async def active_patterns(db: AsyncSession, user_id) -> list[PatternArtifact]:
             )
         ).scalars().all()
     )
+
+
+async def stored_cards(db: AsyncSession, user_id) -> list[dict]:
+    """Stored cards, computing ONCE for a reader who has never been swept.
+
+    The one exception to "reads never compute", shared by the Insights route
+    and the chat tool so the two cannot answer the same reader differently.
+    It exists because the sweep has never actually run in this deployment —
+    `job_runs` is empty — and without it both would be permanently blank
+    rather than merely stale, which looks like a data problem instead of a job
+    nobody scheduled. The computed rows are STORED, so every later read is a
+    plain read.
+    """
+    rows = await active_patterns(db, user_id)
+    if not rows:
+        await recompute_patterns(db, user_id, reason="first_use")
+        rows = await active_patterns(db, user_id)
+    return [r.card or {} for r in rows]

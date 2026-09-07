@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user_id
 from app.db import get_db
 from app.patterns.core import MIN_DAYS_PER_GROUP, WINDOW_DAYS
-from app.patterns.engine import active_patterns, recompute_patterns
+from app.patterns.engine import stored_cards
 from app.patterns.service import (
     OUTCOMES,
     TREND_METRICS,
@@ -49,15 +49,6 @@ SUBTITLE = (
 )
 
 
-async def _cards(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
-    """Stored cards, computing once if this reader has never been swept."""
-    rows = await active_patterns(db, user_id)
-    if not rows:
-        await recompute_patterns(db, user_id, reason="first_use")
-        rows = await active_patterns(db, user_id)
-    return [r.card or {} for r in rows]
-
-
 @router.get("/correlations")
 async def list_correlations(
     current_user: uuid.UUID = Depends(get_current_user_id),
@@ -69,7 +60,7 @@ async def list_correlations(
     nights to unlock" is built from their counts, and a reader who can see
     what is coming is better served than one shown an empty list.
     """
-    cards = await _cards(db, current_user)
+    cards = await stored_cards(db, current_user)
     return {
         "window_days": WINDOW_DAYS,
         "min_days_per_group": MIN_DAYS_PER_GROUP,
@@ -86,7 +77,7 @@ async def correlation_detail(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Screen 4 — one pair, as stored."""
-    for card in await _cards(db, current_user):
+    for card in await stored_cards(db, current_user):
         if card.get("key") == key:
             return card
     raise HTTPException(status_code=404, detail="No such pattern")
@@ -107,7 +98,7 @@ async def summary(
     if metric not in TREND_METRICS:
         raise HTTPException(status_code=400, detail="Unknown metric")
 
-    cards = await _cards(db, current_user)
+    cards = await stored_cards(db, current_user)
     ready = [c for c in cards if c.get("enough_data")]
     waiting = [c for c in cards if not c.get("enough_data")]
 
