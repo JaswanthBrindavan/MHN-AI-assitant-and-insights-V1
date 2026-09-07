@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -23,6 +25,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401 — register all tables
 from app.chat.orchestrator import handle_chat
+from app.config import get_settings
 from app.db import Base
 from app.knowledge.registry import reset_index_cache
 from app.llm.fake import FakeProvider
@@ -30,8 +33,6 @@ from app.llm.tools import LLMTurn, ToolCall
 
 
 def _agentic() -> bool:
-    from app.config import get_settings
-
     return get_settings().chat_engine == "agentic"
 
 
@@ -127,9 +128,19 @@ async def run(path: Path) -> int:
         else:
             provider = FakeProvider()
 
-        async with sm() as db:
-            result = await handle_chat(db, EVAL_USER, scenario["message"], provider)
-            await db.commit()
+        # A scenario may pin GROUNDING_MODE: production runs `enforce`, the
+        # code default is `log`, and a grounding invariant only exists in the
+        # former. Scoped to the one scenario.
+        pinned = (
+            {"GROUNDING_MODE": scenario["grounding_mode"]}
+            if "grounding_mode" in scenario else {}
+        )
+        with patch.dict(os.environ, pinned):
+            get_settings.cache_clear()
+            async with sm() as db:
+                result = await handle_chat(db, EVAL_USER, scenario["message"], provider)
+                await db.commit()
+        get_settings.cache_clear()
         await engine.dispose()  # type: ignore[attr-defined]
 
         failures = _check(scenario.get("expect", {}), result)

@@ -292,6 +292,9 @@ _CORRECTIONS = {
         "support it: {detail}. Remove the number, or say plainly that you do "
         "not have that figure."
     ),
+    # The grounding directive is built by the orchestrator from the actual
+    # violations (see build_correction_directive) and arrives whole.
+    "grounding": "{detail}",
 }
 
 _GENERIC_CORRECTION = (

@@ -15,7 +15,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -485,16 +485,7 @@ async def _apply_grounding(
     if mode == "off":
         return None, answer
 
-    report = analyze_grounding(
-        answer,
-        num_chunks=len(chunks),
-        has_patient_context=bool(patient_text),
-        retrieval_happened=bool(chunks),
-        # Content-verified citations: a cited sentence's values must appear
-        # in the cited chunk, not merely cite an existing number.
-        chunk_texts=[c.content for c in chunks],
-        patient_text=patient_text,
-    )
+    report = _grounding_report(answer, chunks, patient_text)
     if mode == "log" or report.status == "grounded":
         if report.status == "violations":
             kinds = sorted({v.get("type", "?") for v in report.violations})
@@ -512,16 +503,60 @@ async def _apply_grounding(
     retry = await provider.generate(
         system=append_directive(system, "\n\n" + directive), user=message
     )
-    retry_report = analyze_grounding(
-        retry,
-        num_chunks=len(chunks),
-        has_patient_context=bool(patient_text),
-        retrieval_happened=bool(chunks),
-    )
+    # Graded by the SAME check as the first pass: the retry used to skip the
+    # content verification, so a value cited to the wrong block was written
+    # to the receipt as grounded.
+    retry_report = _grounding_report(retry, chunks, patient_text)
     if retry_report.status == "grounded":
         return retry_report, retry
     logger.warning("grounding still failing after retry; degrading to safe reply")
     return retry_report, None
+
+
+def _grounding_report(
+    raw: str,
+    chunks: Sequence[RetrievedChunk],
+    patient_text: str,
+    tool_texts: Sequence[str] = (),
+) -> GroundingReport:
+    """The claim-grounding analysis, with ONE source model on both engines.
+
+    [n] is retrieved block n and [GK] is allowed only when nothing was
+    retrieved, exactly as the prompt says. [P] is the reader's own records:
+    the patient-context block plus — on the agentic engine — every trusted
+    tool result of the turn, which fetches the same records on demand. The
+    tool results are also the one source with no marker of its own, so a
+    sentence that states nothing but values traceable to them needs none —
+    the same texts the fidelity guard has already checked it against.
+    """
+    records = "\n".join(t for t in (patient_text, *tool_texts) if t)
+    return analyze_grounding(
+        raw,
+        num_chunks=len(chunks),
+        has_patient_context=bool(records),
+        retrieval_happened=bool(chunks),
+        # Content-verified citations: a cited sentence's values must appear
+        # in the cited source, not merely cite an existing number.
+        chunk_texts=[c.content for c in chunks],
+        patient_text=records,
+        tool_texts=list(tool_texts),
+    )
+
+
+def _stream_grounding_check(
+    chunks: Sequence[RetrievedChunk], patient_text: str
+) -> Callable[[str, Sequence[str]], bool] | None:
+    """The stream gate's grounding rung — enforce mode only, so an uncited
+    factual sentence the buffered ladder would send back for rewriting is
+    never shown first. The sink hands over the round's tool results."""
+    if get_settings().grounding_mode != "enforce":
+        return None
+
+    def _grounded(raw: str, tool_texts: Sequence[str]) -> bool:
+        report = _grounding_report(raw, chunks, patient_text, tool_texts)
+        return report.status == "grounded"
+
+    return _grounded
 
 
 async def _diagnostic_terms(db: AsyncSession) -> tuple[str, ...] | None:
@@ -562,23 +597,12 @@ async def _generate_streamed(
     factual sentence that ``_apply_grounding`` would send back for rewriting
     is never shown first.
     """
-    def _grounded(raw: str) -> bool:
-        return analyze_grounding(
-            raw,
-            num_chunks=len(chunks),
-            has_patient_context=bool(patient_text),
-            retrieval_happened=bool(chunks),
-            chunk_texts=[c.content for c in chunks],
-            patient_text=patient_text,
-        ).status == "grounded"
-
-    extra_check = _grounded if get_settings().grounding_mode == "enforce" else None
     stream.arm(
         risk=risk,
         sources=_fidelity_sources(chunks, patient_text),
         extra_conditions=await _diagnostic_terms(db),
         lead=f"{escalation} " if risk == HIGH else "",
-        extra_check=extra_check,
+        extra_check=_stream_grounding_check(chunks, patient_text),
     )
     turn = await stream_turn(provider, system, [UserMessage(message)], (), stream)
     stream.flush()
@@ -2328,12 +2352,14 @@ async def _dispatch_agentic(
     extra_terms = await _diagnostic_terms(db)
     if stream is not None:
         # Same sources the fidelity ladder below checks against; the tool
-        # results join them round by round inside run_agent.
+        # results join them round by round inside run_agent. In enforce mode
+        # the grounding rung rides along, as on the legacy engine.
         stream.arm(
             risk=risk,
             sources=_fidelity_sources(chunks, patient_text),
             extra_conditions=extra_terms,
             lead=f"{escalation} " if risk == HIGH else "",
+            extra_check=_stream_grounding_check(chunks, patient_text),
         )
     try:
         outcome = await run_agent(
@@ -2413,6 +2439,16 @@ async def _dispatch_agentic(
     display = _lead(escalation, risk, display)
 
     degraded: str | None = None
+    # The marker-bearing text behind `display`: claim grounding reads the
+    # markers, the other guards read the display form — the same two forms
+    # the legacy ladder checks.
+    raw = outcome.text
+    grounding_mode = settings.grounding_mode
+
+    def _grounding(text: str) -> GroundingReport | None:
+        if grounding_mode == "off":
+            return None
+        return _grounding_report(text, chunks, patient_text, outcome.source_texts)
 
     async def _try_recover(reason: str, detail: str = "") -> bool:
         """One corrective retry before falling back. True if it worked.
@@ -2422,7 +2458,7 @@ async def _dispatch_agentic(
         explanation and no path forward, and two in a row look like a broken
         bot. The floor is unchanged; it is just reached less often.
         """
-        nonlocal display, used
+        nonlocal display, used, raw
         rewritten = await recover(
             provider, system, outcome.messages, reason, detail
         )
@@ -2436,7 +2472,12 @@ async def _dispatch_agentic(
             return False
         if not validate_reply(candidate, risk, extra_terms).ok:
             return False
+        if grounding_mode == "enforce":
+            retry_report = _grounding(rewritten)
+            if retry_report is not None and retry_report.status != "grounded":
+                return False
         display = candidate
+        raw = rewritten
         used = used_plus(
             used_cited(rewritten, chunks, patient_text), tool_sources
         )
@@ -2476,6 +2517,40 @@ async def _dispatch_agentic(
     elif sources:
         t("Value check", "every value matches your records")
 
+    # Claim grounding, on the engine production actually runs. This rung was
+    # only ever reached on the legacy engine: `_dispatch` returns into this
+    # function above the one `_apply_grounding` call, so GROUNDING_MODE=enforce
+    # was live in production and did nothing. Same analysis, same
+    # enforce/log meanings, same one-retry-then-safe-reply ladder as legacy;
+    # the retry goes through `recover` so the model keeps the tool results it
+    # is being asked to cite.
+    # Analysed even after a fidelity degrade — the receipt records what the
+    # model said, as on legacy — but acted on only while the answer stands.
+    report = _grounding(raw)
+    if degraded is None and report is not None and report.status == "violations":
+        kinds = sorted({v.get("type", "?") for v in report.violations})
+        if grounding_mode == "enforce":
+            t("Claim grounding",
+              f"{len(report.violations)} violation(s) found (enforce mode)")
+            directive = build_correction_directive(report.violations, raw)
+            if await _try_recover("grounding", directive):
+                report = _grounding(raw)
+                t("Claim grounding", "the rewrite cites every clinical claim")
+            else:
+                t("Safety net",
+                  "grounding could not be repaired — safe reply instead")
+                display, degraded = safe_reply(risk, session_id), "grounding"
+        else:
+            logger.warning(
+                "grounding violations (log mode): %d violation(s) [%s]",
+                len(report.violations), ", ".join(kinds),
+            )
+            t("Claim grounding",
+              f"{len(report.violations)} violation(s) found (log mode)")
+    elif report is not None:
+        t("Claim grounding",
+          f"every clinical claim is cited ({len(report.cited)} sources)")
+
     if degraded is None:
         verdict = validate_reply(display, risk, extra_terms)
         if not verdict.ok:
@@ -2494,7 +2569,11 @@ async def _dispatch_agentic(
         db, user_id=user_id, session_id=session_id, message=message,
         model_name=provider.model_name,
         retrieved=[c.to_dict() for c in chunks] if chunks else None,
-        grounding_status="agentic", used_rag=bool(chunks),
+        grounding=report.to_dict() if report else None,
+        # A real pass/fail, as on legacy — "agentic" was a path label an
+        # auditor could not tell a clean turn from a degraded one by.
+        grounding_status=report.status if report else "off",
+        used_rag=bool(chunks),
     )
 
     provenance: dict = {
@@ -2524,6 +2603,7 @@ async def _dispatch_agentic(
             risk, cited=bool(used.markers), degraded=degraded
         ),
         provenance=provenance,
+        grounding=report.to_dict() if report else None,
         used=used,
         visual=None if degraded else _matching_visual(tool_visuals, message),
         documents=None if degraded else (tool_documents or None),
