@@ -46,6 +46,7 @@ EXECUTORS = {
     "get_tracker_total": executors.get_tracker_total,
     "get_trends_and_patterns": executors.get_trends_and_patterns,
     "get_family_members": executors.get_family_members,
+    "get_family_member_record": executors.get_family_member_record,
     "get_condition_guidance": executors.get_condition_guidance,
     "lookup_medicine": executors.lookup_medicine,
     "get_document_ai_result": executors.get_document_ai_result,
@@ -61,14 +62,16 @@ EXECUTORS = {
 
 #: Tools that answer ONLY from the reader's own rows. Each one's handler
 #: filters hard on ``user_id``, and there is no family-scoped read behind any
-#: of them: ``latest_documents`` and ``can_view_document`` are the ONLY reads
-#: in ``app/coredata/service.py`` that take a ``viewer_id`` at all. Asked about
-#: a relative these return the READER's figure, and the model then presents it
-#: as the relative's.
+#: of them: the only reads in ``app/coredata/service.py`` that take a
+#: ``viewer_id`` are ``latest_documents``, ``can_view_document`` and
+#: ``shared_report_contents`` (plus ``medical_records(shared_only=True)``),
+#: and none of these tools use them. Asked about a relative these return the
+#: READER's figure, and the model then presents it as the relative's.
 #:
-#: ``get_documents`` and ``get_document_ai_result`` are deliberately absent:
-#: their handlers resolve a relation or a named member and read under the
-#: sharing gate, which is the right answer to the same question.
+#: ``get_documents``, ``get_document_ai_result`` and
+#: ``get_family_member_record`` are deliberately absent: their handlers
+#: resolve a relation or a named member and read under the sharing gate,
+#: which is the right answer to the same question.
 READER_ONLY_TOOLS = frozenset({
     "get_latest_metric",
     "get_report_parameter",
@@ -108,9 +111,10 @@ async def _about_someone_else(
     )
     if member is not None:
         nxt = (
-            "They ARE connected in Family Connect and sharing. Their "
-            "documents can be fetched with get_documents — offer that. "
-            "Readings, trackers and section fields are not shared for "
+            "They ARE connected in Family Connect and sharing. Their shared "
+            "lab values and conditions come from get_family_member_record "
+            "and their documents from get_documents — call one of those "
+            "instead. Vitals, trackers and section fields are not shared for "
             "anyone but the reader, so those you cannot show."
         )
     elif who:

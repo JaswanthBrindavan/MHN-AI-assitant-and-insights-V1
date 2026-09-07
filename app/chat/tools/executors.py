@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.charts.svg import chart_payload
 from app.chat.abilities import (
     DocumentQuery,
+    FamilyRecordQuery,
     StatedValue,
     SummaryQuery,
     find_relation,
@@ -40,6 +41,7 @@ from app.chat.data_handlers import (
     handle_doctor_consult_query,
     handle_document_query,
     handle_family_list_query,
+    handle_family_record_query,
     handle_metric_query,
     handle_report_param_ask,
     handle_section_detail_query,
@@ -510,6 +512,38 @@ async def get_family_members(
 ) -> dict | None:
     ability = await handle_family_list_query(db, user_id, "who is in my family")
     return _unwrap(ability)
+
+
+async def get_family_member_record(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, session_id
+) -> dict | None:
+    # Structured arguments straight through, exactly as get_documents does.
+    who = str(args.get("relation") or "").strip().lower()
+    named = str(args.get("owner_name") or "").strip()
+    relation = find_relation(f"my {who}") if who else None
+    ask = {"latest_document_values": "parameters"}.get(
+        str(args.get("ask") or "parameter"), str(args.get("ask") or "parameter")
+    )
+    if ask not in ("parameter", "parameters", "conditions"):
+        ask = "parameter"
+    query = FamilyRecordQuery(
+        ask=ask,
+        relation=relation,
+        # An unrecognised relation word is treated as a name, so the lookup
+        # answers "no such connected member" rather than reading anyone.
+        owner_name=named or (who if who and relation is None else None),
+        parameter=str(args.get("parameter") or "").strip() or None,
+    )
+    if query.relation is None and query.owner_name is None:
+        return {
+            "found": False,
+            "note": "No family member was named. Ask the reader which relative "
+                    "they mean (a relation like 'mother', or a name).",
+        }
+    ability = await handle_family_record_query(
+        db, user_id, "", session_id, query=query
+    )
+    return _unwrap(ability, about=who or named)
 
 
 # A natural phrasing per section, so the ONE section-intent table in

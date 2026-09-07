@@ -249,6 +249,20 @@
    "expects_tools": [
     "get_trends_and_patterns"
    ]
+  },
+  {
+   "name": "family_lab_value_paraphrase",
+   "message": "could you tell me how my mum's sugar control has been lately",
+   "expects_tools": [
+    "get_family_member_record"
+   ]
+  },
+  {
+   "name": "family_conditions_paraphrase",
+   "message": "is my dad diabetic according to his records",
+   "expects_tools": [
+    "get_family_member_record"
+   ]
   }
  ]
 }

@@ -237,6 +237,45 @@ GET_FAMILY_MEMBERS = ToolSpec(
     input_schema=_obj({}, []),
 )
 
+GET_FAMILY_MEMBER_RECORD = ToolSpec(
+    name="get_family_member_record",
+    description=(
+        "A connected family member's SHARED record: one lab value from their "
+        "shared reports ('my mother's hba1c', 'mom's sugar'), every value in "
+        "their latest shared report ('any THP in dad's latest doc'), or their "
+        "conditions ('what conditions does my father have'). Use it for ANY "
+        "question about a relative's lab values or conditions, however it is "
+        "phrased; resolve 'her'/'his'/'their' from the conversation into the "
+        "relation. Consent is enforced inside — the member must be connected "
+        "and sharing, and private records and excluded files are never "
+        "returned — and the result says which of those applies: repeat that "
+        "plainly. Vitals, trackers and lifestyle logs are NEVER shared for "
+        "anyone but the reader; asked for one, this says so and offers what "
+        "is shared — never answer such a question from the reader's own data."
+    ),
+    input_schema=_obj(
+        {
+            "relation": {
+                "type": "string",
+                "description": "A relation, e.g. 'mother'. Omit when a name is used.",
+            },
+            "owner_name": {
+                "type": "string",
+                "description": "A connected member's name, when they use one.",
+            },
+            "ask": {
+                "type": "string",
+                "enum": ["parameter", "latest_document_values", "conditions"],
+            },
+            "parameter": {
+                "type": "string",
+                "description": "For 'parameter': the test name as the reader said it.",
+            },
+        },
+        ["ask"],
+    ),
+)
+
 GET_CONDITION_GUIDANCE = ToolSpec(
     name="get_condition_guidance",
     description=(
@@ -524,6 +563,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     GET_TRACKER_TOTAL,
     GET_TRENDS_AND_PATTERNS,
     GET_FAMILY_MEMBERS,
+    GET_FAMILY_MEMBER_RECORD,
     GET_CONDITION_GUIDANCE,
     LOOKUP_MEDICINE,
     GET_DOCUMENT_AI_RESULT,
