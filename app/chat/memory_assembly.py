@@ -11,10 +11,10 @@ each engine used only about half of them:
 | discussed-topic recall          | read   | never   |
 | recording discussed topics      | written| never   |
 
-`CHAT_ENGINE` defaults to `legacy`, so in production today the consent-gated
-profile a reader filled in is **never read into the prompt**, and no symptom
-episode is ever recorded. Under `agentic`, long-term memory never accumulates
-at all. Two shipped features that do not reach anyone.
+Under `legacy` the consent-gated profile a reader filled in was **never read
+into the prompt**, and no symptom episode was ever recorded. Under `agentic`
+(what production runs), long-term memory never accumulated at all. Two
+shipped features that did not reach anyone.
 
 This is the same failure the drug-interaction refusal had in Phase 4: a
 capability sitting inside one engine's branch instead of above the fork. The

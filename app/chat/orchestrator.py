@@ -2426,7 +2426,12 @@ async def _dispatch_agentic(
         )
     except Exception:  # noqa: BLE001 — fail open, never crash the endpoint
         logger.warning("agent loop failed; safe reply", exc_info=True)
-        record_fail_open("agent")
+        # "provider", as on legacy: run_agent raises only what the provider
+        # raises (executors never raise), and this block already labels the
+        # degradation "provider_error". Recorded as "agent", the counter an
+        # on-call engineer watches for a provider outage stayed at zero on the
+        # engine production runs.
+        record_fail_open("provider")
         t("Generate", "provider failed — degrading to the deterministic safe reply")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,

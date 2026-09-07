@@ -326,8 +326,10 @@ four.
 
 ### Two chat engines
 
-`CHAT_ENGINE=legacy|agentic`, defaulting to **legacy**. Legacy is the regex
-handler chain; agentic lets the model orchestrate the same abilities as tools.
+`CHAT_ENGINE=legacy|agentic`, defaulting to **agentic** — the engine Railway
+runs, so the suite exercises it by default. Legacy is the regex handler chain;
+agentic lets the model orchestrate the same abilities as tools. A test that
+asserts on legacy's path names uses the `legacy_engine` fixture.
 The triage floor, scope guard, emergency directive, canned conversational
 replies and the drug-combination refusal all run in a **shared prologue** ahead
 of the engine branch, and validation/grounding run behind both.

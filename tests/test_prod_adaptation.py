@@ -240,6 +240,7 @@ async def test_ai_classification_title_used(db_session):
 # Document cards + dev-only consent-gated preview
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_document_reply_carries_cards(db_session):
     from app.chat.orchestrator import handle_chat
     from app.llm.fake import FakeProvider

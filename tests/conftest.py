@@ -99,6 +99,22 @@ def _reset_condition_index():
 
 
 @pytest.fixture
+def legacy_engine(monkeypatch):
+    """Pin the deterministic handler chain for one test.
+
+    The default engine is agentic — what Railway runs — so a test that asserts
+    on legacy's path names ("symptom_rag", "document_query", ...) or on the
+    text-only `generate` call must say so, rather than inherit an engine no
+    user is on."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("CHAT_ENGINE", "legacy")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
 def set_grounding_mode(monkeypatch):
     """Set GROUNDING_MODE for a test and refresh the settings cache."""
     from app.config import get_settings

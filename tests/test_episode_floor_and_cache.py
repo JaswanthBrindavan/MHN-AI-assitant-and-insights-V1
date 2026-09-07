@@ -313,7 +313,9 @@ async def test_the_full_staging_sequence_ends_calm(db_session):
         "after the reader says they are better, an unrelated question must "
         f"not still carry the escalation; got {third.risk_level}"
     )
-    assert third.recommended_action == "discuss_with_clinician"
+    # "Calm" is the absence of the escalation: an uncited answer carries no
+    # pointer on the agentic engine (see `_answer_action`), a cited one does.
+    assert third.recommended_action in ("none", "discuss_with_clinician")
 
 
 async def test_a_carried_escalation_does_not_claim_the_reader_described_it(

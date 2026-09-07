@@ -511,3 +511,39 @@ async def test_the_reader_only_decline_now_points_here(db_session, mother_sharin
     )
     assert body["found"] is False
     assert "get_family_member_record" in body["note"]
+
+
+# --------------------------------------------------------------------------- #
+# The AI-context switch is not a condition on any of this
+# --------------------------------------------------------------------------- #
+async def test_a_family_read_does_not_depend_on_the_ai_context_switch(db_session):
+    """`req_ai_context_access`/`acc_ai_context_access` means "a connected
+    member may use my data for their own analysis" and nothing more. With it
+    off on both sides, a member who shares files must still be able to pull
+    the reader's documents, values and conditions -- the FILE READ grant
+    (plus `file_access_exclusions`) is what governs that, and only that."""
+    db_session.add(User(
+        id=MOTHER, name="Lakshmi Rao", email="l@example.com", user_name="lakshmi",
+        health_card_number="HC-L", hashcode="x", gender="female",
+    ))
+    rel = Relation(name="Mother", inverse="Child")
+    db_session.add(rel)
+    await db_session.flush()
+    db_session.add(FamilyConnect(
+        requester_id=VIEWER, acceptor_id=MOTHER, accepted=True,
+        relation_id=rel.id, req_read=True, acc_read=True,
+        req_ai_context_access=False, acc_ai_context_access=False,
+    ))
+    db_session.add(_report(MOTHER, 501, "Full body checkup", [_hba1c("6.8")]))
+    db_session.add(MedicalCondition(
+        user_id=MOTHER, name="Hypothyroidism", type="condition", private=False,
+    ))
+    await db_session.flush()
+
+    r = await handle_family_record_query(db_session, VIEWER, "what is my mother's hba1c?")
+    assert r is not None and r["provenance"]["resolved"] is True
+    assert "6.8" in r["reply"]
+    r = await handle_family_record_query(
+        db_session, VIEWER, "what medical conditions does my mother have?"
+    )
+    assert r is not None and "Hypothyroidism" in r["reply"]

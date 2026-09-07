@@ -1,5 +1,5 @@
-"""Medication CRUD via chat: parsing, the mhn-spring write client (forwarded
-JWT), and the handler's honest confirm/decline behavior.
+"""Medication CRUD via chat: the mhn-spring write client (forwarded JWT) and
+the write entry point's honest confirm/decline behavior.
 
 The write is Spring's — Davi calls MedicineController as the reader. A write
 that does not land must NEVER read back as a success.
@@ -13,8 +13,7 @@ import httpx
 import pytest
 
 from app.auth import set_current_user_jwt
-from app.chat.abilities import parse_medication_command
-from app.chat.data_handlers import handle_medication_command
+from app.chat.data_handlers import perform_medication_write
 from app.medicines import service as med
 
 USER = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -35,45 +34,6 @@ def _spring_configured(monkeypatch):
 
 def _client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
-
-
-# --------------------------------------------------------------------------- #
-# Parser
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(
-    ("msg", "action", "name", "strength"),
-    [
-        ("add metformin 500mg tablet twice daily", "add", "metformin", "500 mg"),
-        ("start me on amlodipine 5 mg", "add", "amlodipine", "5 mg"),
-        ("I stopped my amoxicillin tablets", "stop", "amoxicillin", None),
-        ("completed my augmentin course", "stop", "augmentin", None),
-        ("remove atorvastatin from my meds", "remove", "atorvastatin", None),
-        ("delete the metformin pill", "remove", "metformin", None),
-    ],
-)
-def test_parse(msg, action, name, strength):
-    cmd = parse_medication_command(msg)
-    assert cmd is not None
-    assert (cmd.action, cmd.name, cmd.strength) == (action, name, strength)
-
-
-@pytest.mark.parametrize(
-    "msg",
-    [
-        "tell me about metformin",
-        "what is metformin used for",
-        "stop worrying so much",
-        "add 2 glasses of water",
-        "I take metformin every day",  # a statement, not a command
-    ],
-)
-def test_parse_rejects_non_commands(msg):
-    assert parse_medication_command(msg) is None
-
-
-def test_parse_prn():
-    cmd = parse_medication_command("add paracetamol tablet as needed")
-    assert cmd is not None and cmd.is_prn is True
 
 
 # --------------------------------------------------------------------------- #
@@ -192,8 +152,8 @@ async def test_handler_confirms_add(db_session, monkeypatch):
         return med.MedResult(ok=True, course=med.Course(tracking_id=5, name="Metformin"))
 
     monkeypatch.setattr(med, "add_course", _ok)
-    r = await handle_medication_command(db_session, USER, "add metformin 500mg tablet")
-    assert r is not None
+    r = await perform_medication_write(
+        db_session, USER, "add", "metformin", strength="500 mg", is_prn=True)
     assert r["action"] == "medication_updated"
     assert "Added" in r["reply"] and "Metformin" in r["reply"]
     assert r["provenance"]["ok"] is True
@@ -206,8 +166,7 @@ async def test_handler_declines_when_unavailable_never_false_success(
         return med.MedResult(ok=False, reason="not_configured")
 
     monkeypatch.setattr(med, "add_course", _down)
-    r = await handle_medication_command(db_session, USER, "add metformin tablet")
-    assert r is not None
+    r = await perform_medication_write(db_session, USER, "add", "metformin")
     assert r["action"] == "none"
     assert r["provenance"]["ok"] is False
     # The reply must NOT claim it was added.
@@ -220,14 +179,9 @@ async def test_handler_not_found_is_honest(db_session, monkeypatch):
         return med.MedResult(ok=False, reason="not_found")
 
     monkeypatch.setattr(med, "stop_course", _missing)
-    r = await handle_medication_command(db_session, USER, "stopped my amoxicillin tablets")
-    assert r is not None
+    r = await perform_medication_write(db_session, USER, "stop", "amoxicillin")
     assert "couldn't find" in r["reply"].lower()
     assert "marked" not in r["reply"].lower()
-
-
-async def test_handler_none_for_non_command(db_session):
-    assert await handle_medication_command(db_session, USER, "tell me about metformin") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -328,3 +282,78 @@ async def test_add_reply_never_doubles_a_bare_number_strength(
     r2 = await perform_medication_write(
         db_session, USER, "add", "metformin", strength="500 mg", is_prn=True)
     assert "Metformin 500 mg" in r2["reply"]
+
+
+# --------------------------------------------------------------------------- #
+# remove_all / stop_all — EVERY matching course, and honest when there is none
+# --------------------------------------------------------------------------- #
+def _sweep_transport(monkeypatch, courses: list[dict], hit: list[str]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=courses)
+        hit.append(f"{request.method} {request.url.path}")
+        return httpx.Response(204)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx, "AsyncClient",
+        lambda *a, **kw: real_client(
+            transport=transport,
+            **{k: v for k, v in kw.items() if k != "transport"}),
+    )
+
+
+async def test_remove_all_sweeps_every_match_not_the_exact_name_hit(
+    db_session, monkeypatch,
+):
+    """"dolo" matches both "dolo" and "Dolo 650". The resolver narrows to the
+    exact-name hit — right for a single stop, wrong for a sweep, which used
+    to report "Removed all 1" while Dolo 650 survived."""
+    hit: list[str] = []
+    _sweep_transport(monkeypatch, [
+        {"id": 1, "name": "dolo"},
+        {"id": 2, "name": "Dolo 650"},
+        {"id": 3, "name": "Metformin"},
+    ], hit)
+    r = await perform_medication_write(db_session, USER, "remove_all", "dolo")
+    assert sorted(hit) == ["DELETE /medicine/courses/1",
+                           "DELETE /medicine/courses/2"]
+    assert r["action"] == "medication_updated"
+    assert "Removed all 2" in r["reply"]
+    assert r["provenance"]["ok"] is True
+
+
+async def test_stop_all_only_sweeps_active_courses(db_session, monkeypatch):
+    hit: list[str] = []
+    _sweep_transport(monkeypatch, [
+        {"id": 1, "name": "Dolo 650", "stoppedAt": None},
+        {"id": 2, "name": "Dolo 650", "stoppedAt": None},
+    ], hit)
+    r = await perform_medication_write(db_session, USER, "stop_all", "dolo")
+    assert sorted(hit) == ["POST /medicine/courses/1/stop",
+                           "POST /medicine/courses/2/stop"]
+    assert "Stopped all 2" in r["reply"]
+
+
+async def test_remove_all_of_a_drug_not_on_the_list_says_so(
+    db_session, monkeypatch,
+):
+    """Not on the list is not a transient failure: "try again in a moment"
+    for a drug the reader never added sends them round in a loop."""
+    hit: list[str] = []
+    _sweep_transport(monkeypatch, [{"id": 1, "name": "Metformin"}], hit)
+    r = await perform_medication_write(db_session, USER, "remove_all", "dolo")
+    assert hit == []
+    assert r["action"] == "none"
+    assert "couldn't find" in r["reply"].lower()
+    assert "try again" not in r["reply"].lower()
+    assert r["provenance"]["reason"] == "not_found"
+
+
+async def test_remove_all_unavailable_never_claims_a_removal(db_session):
+    set_current_user_jwt(None)
+    r = await perform_medication_write(db_session, USER, "remove_all", "dolo")
+    assert r["action"] == "none"
+    assert "removed" not in r["reply"].lower()
+    assert "can't update your medications" in r["reply"].lower()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 
+import pytest
 from sqlalchemy import select
 
 from app.chat.orchestrator import handle_chat
@@ -384,6 +385,7 @@ def test_strip_markers_idempotent():
 # --------------------------------------------------------------------------- #
 # Orchestrator — provider failure paths (fail open, never crash)
 # --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("legacy_engine")
 async def test_provider_error_degrades_to_safe_reply(db_session, set_grounding_mode):
     set_grounding_mode("log")
     provider = FakeProvider(raises=RuntimeError("provider down"))
@@ -426,6 +428,7 @@ async def test_provider_error_at_high_risk_keeps_escalation(
     assert result.provenance["degraded"] == "provider_error"
 
 
+@pytest.mark.usefixtures("legacy_engine")
 async def test_provider_error_on_enforce_retry_degrades_not_crashes(
     db_session, set_grounding_mode
 ):
@@ -480,6 +483,7 @@ async def test_high_risk_reply_gets_escalation_prefix_and_passes_validation(
     assert result.grounding["status"] == "grounded"
 
 
+@pytest.mark.usefixtures("legacy_engine")
 async def test_validator_failure_substitutes_safe_reply(db_session, set_grounding_mode):
     set_grounding_mode("log")
     provider = FakeProvider(responses=["You probably have diabetes [1]."])
@@ -498,6 +502,7 @@ async def test_validator_failure_substitutes_safe_reply(db_session, set_groundin
     assert receipts[0].grounding_status == "violations"
 
 
+@pytest.mark.usefixtures("legacy_engine")
 async def test_validator_failure_even_when_grounding_clean(
     db_session, set_grounding_mode
 ):
@@ -591,6 +596,7 @@ async def test_session_id_returned_on_emergency_and_scope_decline(db_session):
 # --------------------------------------------------------------------------- #
 # Orchestrator — a receipt row for EVERY path, hashes only
 # --------------------------------------------------------------------------- #
+@pytest.mark.usefixtures("legacy_engine")
 async def test_receipt_written_for_every_path(db_session, set_grounding_mode):
     set_grounding_mode("log")
     provider = FakeProvider()

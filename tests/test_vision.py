@@ -209,13 +209,22 @@ async def test_the_readers_question_reaches_the_model(vision_on):
 # The analyze_image tool inherits the consent gate
 # --------------------------------------------------------------------------- #
 async def test_the_tool_is_off_when_vision_is_off(db_session):
-    """No flag, no image reading — regardless of what the model asks for."""
+    """No flag, no image reading — regardless of what the model asks for.
+
+    This is the PRODUCTION configuration: ``vision_enabled`` defaults to
+    False and railway.toml does not set it. The tool is still offered (the
+    spec list is a cached, byte-identical prefix), so what it returns here is
+    what every reader who asks about a picture gets. It used to return None,
+    which the registry rendered as "Nothing on file for that" -- and the model
+    denied the document the reader had just asked about existed.
+    """
     import json
     import uuid as _uuid
 
     from app.chat.tools.registry import execute_tool
     from app.llm.tools import ToolCall
 
+    assert not vision_enabled()
     result = await execute_tool(
         db_session,
         _uuid.uuid4(),
@@ -224,7 +233,11 @@ async def test_the_tool_is_off_when_vision_is_off(db_session):
         None,
     )
     assert not result.is_error
-    assert json.loads(result.content)["found"] is False
+    payload = json.loads(result.content)
+    assert payload["analyzed"] is False
+    assert "not enabled" in payload["note"]
+    assert "found" not in payload
+    assert "Nothing on file" not in result.content
 
 
 async def test_the_tool_refuses_a_document_the_reader_cannot_see(

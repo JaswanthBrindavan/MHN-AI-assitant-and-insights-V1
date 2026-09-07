@@ -168,6 +168,7 @@ async def test_doctor_consult_handler_empty(db_session):
 # Routing precedence: a precise metric parse beats the generic data path
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_show_me_my_bp_hits_metric_not_insights(db_session):
     result = await handle_chat(
         db_session, USER, "Show me my last BP reading.", FakeProvider()
@@ -176,6 +177,7 @@ async def test_show_me_my_bp_hits_metric_not_insights(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_generic_data_query_still_served(db_session):
     result = await handle_chat(
         db_session, USER, "show me my insights", FakeProvider()

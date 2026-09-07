@@ -41,7 +41,10 @@ async def test_a_normal_turn_is_counted(client):
         json={"message": "how does sleep work?"},
     )
     body = (await client.get("/api/v1/metrics")).text
-    assert 'davi_chat_turns_total{engine="legacy",risk="none"} 1' in body
+    # Labelled with whichever engine ran it — the suite runs on both.
+    from app.config import get_settings
+    engine = get_settings().chat_engine
+    assert f'davi_chat_turns_total{{engine="{engine}",risk="none"}} 1' in body
     assert "davi_chat_turn_seconds_count" in body
 
 
@@ -59,7 +62,9 @@ async def test_a_degraded_reply_is_countable_by_reason(db_session):
     """THE metric. Without it, the six fail-open paths degrade silently."""
     from app.chat.orchestrator import handle_chat
 
-    provider = FakeProvider(responses=["You probably have diabetes."])
+    # Twice: the engine makes ONE corrective retry before it degrades, and a
+    # fake that only misbehaves once would be "recovered" and never counted.
+    provider = FakeProvider(responses=["You probably have diabetes."] * 2)
     await handle_chat(
         db_session, uuid.uuid4(), "tell me about blood sugar", provider
     )

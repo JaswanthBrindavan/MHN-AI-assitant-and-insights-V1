@@ -25,12 +25,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.charts.svg import chart_payload
 from app.chat.abilities import (
+    TOOL_MAX_DAYS_AGO,
     DocumentQuery,
     FamilyRecordQuery,
     StatedValue,
     SummaryQuery,
     find_relation,
+    metric_query_for,
     normalize_document_kinds,
+    tracker_add_for,
     tracker_query_for,
 )
 from app.chat.context import build_patient_context
@@ -129,12 +132,13 @@ async def get_latest_metric(
     metric = str(args.get("metric", "")).strip()
     if not metric:
         return None
-    # The tool description tells the model to send underscore keys
-    # ("blood_pressure"), and this parser reads English. Without the swap a
-    # reader WITH a reading on file was told there was none -- the same bug
-    # already fixed in check_value_against_range, left standing in its sibling.
-    spoken = metric.replace("_", " ")
-    ability = await handle_metric_query(db, user_id, f"what is my latest {spoken}")
+    # Structured, as every other handler entry point: the registry key the
+    # tool description asks for, or a spoken name resolved against the same
+    # term table the free-text parser uses. No synthesised sentence.
+    query = metric_query_for(metric)
+    if query is None:
+        return None
+    ability = await handle_metric_query(db, user_id, "", query=query)
     if ability is None:
         return None
     prov = ability.get("provenance", {})
@@ -154,7 +158,7 @@ async def get_report_parameter(
     param = str(args.get("parameter", "")).strip()
     if not param:
         return None
-    ability = await handle_report_param_ask(db, user_id, f"what is my {param}")
+    ability = await handle_report_param_ask(db, user_id, "", term=param)
     return _unwrap(ability, parameter=param)
 
 
@@ -227,12 +231,29 @@ async def log_lifestyle_entry(
     quantity = args.get("quantity")
     if not kind or quantity is None:
         return None
-    days = int(args.get("days_ago") or 0)
-    when = "today" if days == 0 else "yesterday" if days == 1 else f"{days} days ago"
-    ability = await handle_tracker_add(
-        db, user_id, f"I had {quantity} {kind} {when}"
-    )
-    return _unwrap(ability, kind=kind, quantity=quantity, days_ago=days)
+    try:
+        qty = float(quantity)
+        days = int(args.get("days_ago") or 0)
+    except (TypeError, ValueError):
+        return None
+    # STRUCTURED. The synthesised "I had 3 coffee 3 days ago" was re-read by a
+    # parser that knew no "N days ago": the row went in TODAY, the reply said
+    # "for today", and the model was told days_ago=3. A backfilled week got
+    # silently wrong dates in the reader's own tracker.
+    add = tracker_add_for(kind, qty, days)
+    if add is None:
+        return {
+            "ok": False,
+            "note": (
+                f"Nothing was logged: kind={kind!r}, quantity={qty:g}, "
+                f"days_ago={days} could not be recorded. kind must be one of "
+                f"water, coffee, tea, alcohol, smoking; days_ago 0-{TOOL_MAX_DAYS_AGO}; "
+                "quantity above 0 and at most 100. Tell the reader plainly "
+                "it was NOT saved."
+            ),
+        }
+    ability = await handle_tracker_add(db, user_id, "", add=add)
+    return _unwrap(ability, kind=kind, quantity=qty, days_ago=days)
 
 
 async def get_health_summary(
@@ -685,7 +706,18 @@ async def analyze_image(
     )
 
     if not vision_enabled():
-        return None
+        # Not None: the registry renders None as "Nothing on file for that",
+        # and the model then told the reader the picture they had just asked
+        # about did not exist. VISION_ENABLED is off by default.
+        return {
+            "analyzed": False,
+            "note": (
+                "Image analysis is not enabled on this deployment, so the "
+                "picture could not be looked at. Tell the reader that plainly. "
+                "This is NOT a statement that the document is missing or that "
+                "there is nothing on file."
+            ),
+        }
 
     kind = str(args.get("kind", "")).strip()
     raw_id = args.get("document_id")

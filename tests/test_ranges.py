@@ -121,6 +121,7 @@ async def test_value_check_none_when_no_value(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_clarification_recalls_value_deterministically(db_session):
     """"my sugar is 117" then "fasting glucose" → re-evaluate 117 vs fasting."""
     from app.chat.orchestrator import handle_chat

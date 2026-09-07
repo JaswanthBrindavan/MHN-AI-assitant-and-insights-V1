@@ -667,6 +667,7 @@ async def test_orchestrator_drug_query_via_prefix_match(db_session):
     assert provider.calls == []
 
 
+@pytest.mark.usefixtures("legacy_engine")
 async def test_orchestrator_unknown_drug_falls_through_to_rag(
     db_session, set_grounding_mode
 ):
@@ -682,6 +683,7 @@ async def test_orchestrator_unknown_drug_falls_through_to_rag(
     assert result.response_message == FakeProvider.DEFAULT
 
 
+@pytest.mark.usefixtures("legacy_engine")
 async def test_orchestrator_red_flag_overrides_drug_path_high(
     db_session, set_grounding_mode
 ):
@@ -713,6 +715,7 @@ async def test_orchestrator_red_flag_overrides_drug_path_emergency(db_session):
     assert provider.calls == []
 
 
+@pytest.mark.usefixtures("legacy_engine")
 async def test_orchestrator_drug_lookup_failure_fails_open_to_rag(
     db_session, set_grounding_mode, monkeypatch
 ):
@@ -865,6 +868,7 @@ async def test_orchestrator_interaction_with_alcohol(db_session):
     assert provider.calls == []
 
 
+@pytest.mark.usefixtures("legacy_engine")
 async def test_orchestrator_interaction_unknown_terms_fall_through(
     db_session, set_grounding_mode
 ):

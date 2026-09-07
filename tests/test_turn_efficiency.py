@@ -218,6 +218,11 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 #             whole transaction, so one broken read took every later read
 #             in the turn with it (audit H8). Bought knowingly: the pairs are
 #             what makes "this read failed" cost only this read.
+#   36 -> 36  Re-measured after `maybe_compact` grew a COUNT gate (audit M4).
+#             Unchanged: on an ordinary turn the COUNT REPLACES the read of
+#             every message body in the session, so the statement count is
+#             the same and only the bytes moved went down. The correlation
+#             (17) and summary (45) turns re-measured the same way.
 MAX_QUERIES_PER_TURN = 36
 
 # A HEALTH SUMMARY is the one turn that deliberately asks for everything:
@@ -473,3 +478,66 @@ async def test_the_wearable_answer_still_costs_two_reads(db_session, engine):
     )
     assert out is not None and out["visual"] is not None
     assert counter["n"] == 2, f"{counter['n']} reads for one wearable answer"
+
+
+async def test_maybe_compact_counts_before_it_reads(db_session, engine):
+    """It runs every turn and almost always has nothing to fold. Learning
+    that must not move the whole transcript (audit M4): a COUNT first, the
+    full read only once there is enough to compact."""
+    from app.chat.conversation import COMPACT_THRESHOLD, maybe_compact
+
+    session_id = await _seed_session(db_session, COMPACT_THRESHOLD // 2 - 1)
+
+    seen: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        seen.append(" ".join(statement.split()).upper())
+
+    assert await maybe_compact(db_session, session_id) is None
+
+    msg_selects = [
+        s for s in seen
+        if "CONVERSATION_MESSAGES" in s and s.startswith("SELECT")
+    ]
+    assert msg_selects, "no message read was issued"
+    assert all("COUNT(" in s or "LIMIT" in s for s in msg_selects), (
+        f"maybe_compact read message bodies to find nothing to fold: "
+        f"{msg_selects}"
+    )
+
+
+async def test_maybe_compact_still_counts_past_an_earlier_summary(db_session, engine):
+    """After one compaction the gate must count only what the summary does
+    not cover — and still fire once that grows past the threshold."""
+    from app.chat.conversation import (
+        COMPACT_THRESHOLD,
+        KEEP_VERBATIM,
+        add_message,
+        maybe_compact,
+    )
+
+    session_id = await _seed_session(db_session, COMPACT_THRESHOLD // 2 + 2)
+    assert await maybe_compact(db_session, session_id) is not None
+
+    # KEEP_VERBATIM remain uncovered; a few more still sit under the gate.
+    for i in range(COMPACT_THRESHOLD - KEEP_VERBATIM - 1):
+        await add_message(db_session, session_id, "user", f"more {i}")
+    seen: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        seen.append(" ".join(statement.split()).upper())
+
+    assert await maybe_compact(db_session, session_id) is None
+    bodies = [
+        s for s in seen
+        if "CONVERSATION_MESSAGES" in s and s.startswith("SELECT")
+        and "COUNT(" not in s and "LIMIT" not in s
+    ]
+    assert bodies == [], bodies
+
+    # Two more tips it over, and the second fold happens.
+    await add_message(db_session, session_id, "user", "tip")
+    await add_message(db_session, session_id, "assistant", "over")
+    assert await maybe_compact(db_session, session_id) is not None
