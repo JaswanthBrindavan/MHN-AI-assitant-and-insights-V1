@@ -102,3 +102,25 @@ async def test_a_failed_erasure_or_retention_step_is_recorded(
         ).scalars().one()
     assert job.status == "failed"
     assert step in (job.error or "")
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_builds_a_document_for_every_reader_who_chatted(db_session):
+    """The rebuild walked the PEDIGREE list, so a reader with a profile and no
+    family history never got a memory document at all (audit M15)."""
+    from app.chat.conversation import ensure_session
+    from app.chat.profile import grant_personalization, update_profile
+    from app.memory import document as memory_document
+
+    reader = uuid.uuid4()
+    await grant_personalization(db_session, reader)
+    await update_profile(db_session, reader, {"chronic_conditions": ["asthma"]})
+    await ensure_session(db_session, reader, None)
+    await db_session.commit()
+
+    result = await run_sweep(db_session)
+    await db_session.commit()
+
+    assert result["memory_documents_rebuilt"] == 1
+    row = await memory_document.get(db_session, reader)
+    assert row is not None and "asthma" in row.prompt_block

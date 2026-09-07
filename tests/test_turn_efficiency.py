@@ -223,6 +223,13 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 #             every message body in the session, so the statement count is
 #             the same and only the bytes moved went down. The correlation
 #             (17) and summary (45) turns re-measured the same way.
+#
+#   36 / 28   Re-measured when `record_topics` was batched (audit M12): the
+#             figure below does not move, because "why am I so tired lately?"
+#             names no condition and so records nothing. A turn that names
+#             two conditions and a red flag went 32 -> 24: one SELECT for the
+#             whole set instead of one per item. tests/test_long_term.py
+#             counts that directly.
 MAX_QUERIES_PER_TURN = 36
 
 # A HEALTH SUMMARY is the one turn that deliberately asks for everything:
