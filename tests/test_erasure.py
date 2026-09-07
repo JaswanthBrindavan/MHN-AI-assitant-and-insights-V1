@@ -25,8 +25,11 @@ from app.chat import erasure, memory_assembly
 from app.chat.orchestrator import handle_chat
 from app.chat.profile import grant_personalization, update_profile
 from app.config import get_settings
+from app.db import Base
+from app.insights.engine import recompute_insights
 from app.llm.fake import FakeProvider
 from app.llm.tools import join_system
+from app.memory import document as memory_document
 from app.models.chat import (
     ActiveSymptomState,
     ConversationMessage,
@@ -36,23 +39,38 @@ from app.models.chat import (
     UserMemory,
 )
 from app.models.common import utcnow
-from app.models.core import PedigreeCondition, PedigreeMember
+from app.models.core import EXTERNAL_TABLES, PedigreeCondition, PedigreeMember
 from app.models.erasure import ErasureRequest
 from app.models.feedback import TurnFeedback
-from app.models.profile import UserProfile
-from app.models.rules import InsightArtifact
+from app.models.rules import InsightArtifact, PatternArtifact
+from app.patterns.engine import recompute_patterns
 
 USER = uuid.UUID("00000000-0000-0000-0000-0000000e7a5e")
 OTHER = uuid.UUID("00000000-0000-0000-0000-0000000ffff1")
 
-# Every Davi-owned per-user table an erasure must clear. Messages are counted
-# separately because they carry no user_id of their own — they hang off the
-# session, and the cascade is what reaches them.
-ERASABLE_BY_USER_ID = (
-    UserProfile, PedigreeCondition, PedigreeMember, ActiveSymptomState,
-    SymptomLog, UserMemory, TurnFeedback, RagTurnReceipt, InsightArtifact,
-    ConversationSession,
-)
+# Per-user tables an erasure deliberately leaves behind. The consent and
+# erasure records are the evidence that it happened; a reviewer grant is a
+# role and is revoked, not deleted, so the review audit stays accountable.
+KEPT = {
+    "consent_ledger", "erasure_requests", "clinician_reviewers",
+    "insight_review_audit", "job_runs", "user",
+}
+
+# Every Davi-owned per-user table an erasure must clear, DERIVED from the
+# mappers. A hand-kept list here only mirrors `_ERASE_IN_ORDER`, and a list
+# that mirrors the code under test cannot catch what the code misses — that
+# is how `pattern_artifacts` shipped uncovered. External tables belong to
+# mhn-spring and are never ours to delete. Messages are counted separately
+# because they carry no user_id of their own — they hang off the session, and
+# the cascade is what reaches them.
+ERASABLE_BY_USER_ID = tuple(sorted(
+    (
+        m.class_ for m in Base.registry.mappers
+        if "user_id" in m.columns
+        and m.local_table.name not in EXTERNAL_TABLES | KEPT
+    ),
+    key=lambda model: model.__tablename__,
+))
 
 
 async def _seed_everything(db, user_id=USER):
@@ -98,6 +116,20 @@ async def _seed_everything(db, user_id=USER):
     # The self-referencing FK that makes delete order matter.
     first.superseded_by = second.id
 
+    stale = PatternArtifact(
+        user_id=user_id, pattern_key="late_screen__sleep_duration__same_day",
+        exposure="late_screen", outcome="sleep_duration", lag="same_day",
+        content_hash="e" * 64, status="superseded", computed_for=utcnow().date(),
+    )
+    live = PatternArtifact(
+        user_id=user_id, pattern_key="late_screen__sleep_duration__same_day",
+        exposure="late_screen", outcome="sleep_duration", lag="same_day",
+        content_hash="f" * 64, status="active", computed_for=utcnow().date(),
+    )
+    db.add_all([stale, live])
+    await db.flush()
+    stale.superseded_by = live.id
+
     session = ConversationSession(user_id=user_id)
     db.add(session)
     await db.flush()
@@ -110,6 +142,8 @@ async def _seed_everything(db, user_id=USER):
         user_id=user_id, message_id=message.id, session_id=session.id,
         rating="down", comment="private complaint",
     ))
+    # Last: it is built from everything above.
+    assert await memory_document.refresh(db, user_id) is not None
     await db.commit()
 
 
@@ -126,7 +160,7 @@ async def _counts(db, user_id=USER) -> dict[str, int]:
     for model in ERASABLE_BY_USER_ID:
         out[model.__tablename__] = (
             await db.execute(
-                select(func.count(model.id)).where(model.user_id == user_id)
+                select(func.count()).select_from(model).where(model.user_id == user_id)
             )
         ).scalar() or 0
     return out
@@ -227,8 +261,6 @@ async def test_the_sweep_does_not_rebuild_a_document_for_a_pending_erasure(db_se
     Rebuilding it nightly through the grace window re-derives a fresh copy of
     exactly what the reader asked to have deleted.
     """
-    from app.memory import document as memory_document
-
     await _seed_everything(db_session, USER)
     assert await memory_document.refresh(db_session, USER) is not None
 
@@ -236,6 +268,35 @@ async def test_the_sweep_does_not_rebuild_a_document_for_a_pending_erasure(db_se
     await db_session.flush()
 
     assert await memory_document.refresh(db_session, USER) is None
+
+
+async def test_the_sweep_does_not_recompute_artifacts_for_a_pending_erasure(db_session):
+    """Insight and pattern artifacts are two more of the erasable tables, and
+    the sweep re-derived both every night of the grace window. OTHER is the
+    control: the same calls on a reader with no pending erasure do real work,
+    so a silent no-op cannot pass this.
+    """
+    await _seed_everything(db_session, USER)
+    await _seed_everything(db_session, OTHER)
+    await erasure.request_erasure(db_session, USER, grace_days=30)
+    await db_session.flush()
+
+    assert await recompute_patterns(db_session, OTHER) > 0
+    assert await recompute_patterns(db_session, USER) == 0
+
+    # No rules are loaded, so a recompute retracts the seeded live artifact.
+    await recompute_insights(db_session, OTHER, reason="nightly_sweep")
+    await recompute_insights(db_session, USER, reason="nightly_sweep")
+    statuses = {
+        (row.user_id, row.status)
+        for row in (
+            await db_session.execute(
+                select(InsightArtifact).where(InsightArtifact.content_hash == "d" * 64)
+            )
+        ).scalars()
+    }
+    assert (OTHER, "superseded") in statuses, "control: the recompute did nothing"
+    assert (USER, "active") in statuses, "recomputed a reader who asked to be forgotten"
 
 
 async def test_a_pending_erasure_stops_new_memory_being_written(db_session):
@@ -267,6 +328,21 @@ async def test_the_pending_check_fails_CLOSED(db_session, monkeypatch):
 # --------------------------------------------------------------------------- #
 # 2. The deletion covers everything
 # --------------------------------------------------------------------------- #
+def test_the_erasure_walks_every_per_user_table():
+    """Checked against the mappers, not against another hand-kept list.
+
+    A new per-user table fails here the day it is added, by name. Either add
+    it to `_ERASE_IN_ORDER`, or to `KEPT` with a reason that would survive a
+    regulator reading it.
+    """
+    erased = {label for label, _ in erasure._ERASE_IN_ORDER}
+    missing = [
+        model.__tablename__ for model in ERASABLE_BY_USER_ID
+        if model.__tablename__ not in erased
+    ]
+    assert not missing, f"per-user tables an erasure never touches: {missing}"
+
+
 async def test_purge_clears_every_per_user_table(db_session):
     """`forget_everything` reached 3 of 11. This must reach all of them."""
     await _seed_everything(db_session)

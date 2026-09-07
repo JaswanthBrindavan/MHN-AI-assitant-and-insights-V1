@@ -10,8 +10,9 @@ the moment the request is made, so the assistant forgets the reader
 immediately even though the rows are destroyed later. See
 `app/models/erasure.py` for why the window exists at all.
 
-ORDER MATTERS. `insight_artifacts.superseded_by` is a self-referencing foreign
-key, so the rows must be unlinked before they can be deleted; `user_profiles`
+ORDER MATTERS. `insight_artifacts.superseded_by` and `pattern_artifacts.superseded_by`
+are self-referencing foreign keys, so the rows must be unlinked before they can
+be deleted; `user_profiles`
 and `pedigree_conditions` reference `consent_ledger`, which is deliberately
 kept, so they must go first. Getting this wrong surfaces as a foreign-key
 violation halfway through a destructive operation, which is the worst moment
@@ -41,7 +42,7 @@ from app.models.feedback import TurnFeedback
 from app.models.memory_document import UserMemoryDocument
 from app.models.profile import UserProfile
 from app.models.review import ClinicianReviewer
-from app.models.rules import InsightArtifact
+from app.models.rules import InsightArtifact, PatternArtifact
 
 logger = logging.getLogger("davi.erasure")
 
@@ -57,6 +58,9 @@ _ERASE_IN_ORDER = (
     ("user_memories", UserMemory),
     ("turn_feedback", TurnFeedback),
     ("rag_turn_receipts", RagTurnReceipt),
+    # A rendered profile of the reader's sleep and habit correlations. Only
+    # the sweep writes it, which is how it was missed here for so long.
+    ("pattern_artifacts", PatternArtifact),
     ("insight_artifacts", InsightArtifact),
     ("conversation_sessions", ConversationSession),
     # Derived, but it is a copy of the reader's data and must go with the
@@ -189,13 +193,14 @@ async def purge_user(db: AsyncSession, user_id: uuid.UUID) -> dict[str, int]:
     """
     counts: dict[str, int] = {}
 
-    # Unlink the self-referencing FK before deleting, or the delete order
+    # Unlink the self-referencing FKs before deleting, or the delete order
     # inside the table matters and Postgres will reject it.
-    await db.execute(
-        update(InsightArtifact)
-        .where(InsightArtifact.user_id == user_id)
-        .values(superseded_by=None)
-    )
+    for artifact in (InsightArtifact, PatternArtifact):
+        await db.execute(
+            update(artifact)
+            .where(artifact.user_id == user_id)
+            .values(superseded_by=None)
+        )
 
     for label, model in _ERASE_IN_ORDER:
         result = await db.execute(

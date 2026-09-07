@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.common import utcnow
 from app.models.core import ConsentLedger
 from app.models.feedback import TurnFeedback
+from app.models.memory_document import UserMemoryDocument
 from app.models.profile import UserProfile
 from app.services.pedigree import FAMILY_RISK_PURPOSE  # noqa: F401  (sibling purpose)
 
@@ -217,7 +218,7 @@ async def forget_everything(db: AsyncSession, user_id: uuid.UUID) -> dict:
     """
     from app.models.chat import UserMemory
 
-    deleted = {"profile": 0, "memories": 0, "feedback": 0}
+    deleted = {"profile": 0, "memories": 0, "feedback": 0, "memory_document": 0}
     try:
         result = await db.execute(
             delete(UserProfile).where(UserProfile.user_id == user_id)
@@ -235,6 +236,14 @@ async def forget_everything(db: AsyncSession, user_id: uuid.UUID) -> dict:
             delete(TurnFeedback).where(TurnFeedback.user_id == user_id)
         )
         deleted["feedback"] = getattr(result, "rowcount", 0) or 0
+        # The memory document's prompt_block is a rendered copy of exactly the
+        # fields consent gated. The gate runs at build time only, so leaving
+        # the row behind would keep serving the profile to the model after the
+        # reader revoked it -- the consent theatre the module docstring warns of.
+        result = await db.execute(
+            delete(UserMemoryDocument).where(UserMemoryDocument.user_id == user_id)
+        )
+        deleted["memory_document"] = getattr(result, "rowcount", 0) or 0
         await db.flush()
     except Exception:  # noqa: BLE001
         logger.warning("erase failed", exc_info=True)

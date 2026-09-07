@@ -74,3 +74,31 @@ async def test_nightly_sweep_purges_old_soft_deletes(db_session):
     # Only the recently-deleted row survives.
     assert len(remaining) == 1
     assert remaining[0].condition_code == "HTN"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["execute_due", "purge_expired"])
+async def test_a_failed_erasure_or_retention_step_is_recorded(
+    db_session, sessionmaker, monkeypatch, step
+):
+    """The job row said "succeeded" BEFORE erasure and retention ran, and the
+    "failed" written afterwards was flushed into a transaction the exception
+    stopped anyone committing. The two legally significant steps could fail
+    every night and job_runs would show a clean record.
+    """
+    import scripts.nightly_sweep as sweep
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError(f"{step} blew up")
+
+    monkeypatch.setattr(sweep, step, _boom)
+    with pytest.raises(RuntimeError):
+        await run_sweep(db_session)
+
+    # A fresh session: what an operator reading job_runs would actually see.
+    async with sessionmaker() as other:
+        job = (
+            await other.execute(select(JobRun).where(JobRun.name == "nightly_sweep"))
+        ).scalars().one()
+    assert job.status == "failed"
+    assert step in (job.error or "")

@@ -12,6 +12,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.erasure import is_pending
 from app.config import get_settings
 from app.insights import core
 from app.insights.constants import NEXT_STEP_TEXT, NOT_A_DIAGNOSIS_TEXT
@@ -112,7 +113,13 @@ async def recompute_insights(
     Idempotent: if the live artifact for a (user, condition) has the same
     content hash, it is left untouched. Conditions that no longer produce an
     outcome have their live artifact retracted (superseded, no replacement).
+
+    Never runs while an erasure is pending: the artifacts are one of the
+    tables the erasure destroys, and the nightly sweep would otherwise
+    re-derive them every night of the grace window.
     """
+    if await is_pending(db, user_id):
+        return []
     settings = get_settings()
 
     inputs = await _load_inputs(db, user_id)
