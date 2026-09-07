@@ -84,15 +84,20 @@ class RangeVerdict:
 
 def _range_text(spec: RangeSpec) -> str:
     if spec.low is not None and spec.high is not None:
-        return f"{_n(spec.low)}–{_n(spec.high)} {spec.unit}"
+        return f"{fmt_num(spec.low)}–{fmt_num(spec.high)} {spec.unit}"
     if spec.high is not None:
-        return f"below {_n(spec.high)} {spec.unit}"
+        return f"below {fmt_num(spec.high)} {spec.unit}"
     if spec.low is not None:
-        return f"at or above {_n(spec.low)} {spec.unit}"
+        return f"at or above {fmt_num(spec.low)} {spec.unit}"
     return ""
 
 
-def _n(v: float) -> str:
+def fmt_num(v: float) -> str:
+    """A number as a reader would write it: "72", "5.5", never "72.0".
+
+    Shared by the handlers and the [P] snapshot -- three private copies of
+    this line sat beside bare ``f"{x:g}"`` sites that diverge above 1e6
+    ("1.5e+06")."""
     return str(int(v)) if float(v).is_integer() else f"{v:g}"
 
 

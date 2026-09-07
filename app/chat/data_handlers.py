@@ -14,7 +14,7 @@ import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TypeVar
 
 from sqlalchemy import select
@@ -27,7 +27,6 @@ from app.chat.abilities import (
     METRIC_REGISTRY,
     DocumentQuery,
     FamilyRecordQuery,
-    MedicationCommand,
     MetricQuery,
     StatedValue,
     SummaryQuery,
@@ -46,7 +45,6 @@ from app.chat.abilities import (
     parse_document_query_fuzzy,
     parse_family_list_query,
     parse_family_record_query,
-    parse_medication_command,
     parse_metric_query,
     parse_report_param_ask,
     parse_section_detail_query,
@@ -115,9 +113,16 @@ from app.coredata.service import (
 from app.documents import service as documents_service
 from app.health import ranges as health_ranges
 from app.health import reference as health_reference
+from app.health.ranges import fmt_num as _g
 from app.knowledge.registry import load_condition_index
 from app.models.chat import ConversationMessage, McpChunk
-from app.models.common import tracking_today, utcnow
+from app.models.common import (
+    as_utc,
+    tracking_day_bounds,
+    tracking_today,
+    tracking_zone,
+    utcnow,
+)
 from app.models.core import User
 from app.models.coredata import MedicalCondition, Report, UnclassifiedFile
 from app.patterns.service import ticked_between
@@ -198,10 +203,6 @@ def _value_check_reply(stated: StatedValue) -> dict | None:
             "status": verdict.status,
         },
     }
-
-
-def _g(v: float) -> str:
-    return str(int(v)) if float(v).is_integer() else f"{v:g}"
 
 
 def _article(label: str) -> str:
@@ -928,7 +929,7 @@ async def handle_tracker_add(
     day = {0: "today", 1: "yesterday", 2: "the day before yesterday"}.get(
         add.day_offset, f"{add.day_offset} days ago"
     )
-    qty = f"{add.quantity:g}"
+    qty = _g(add.quantity)
     unit = plural_unit(add.unit, add.quantity)
     note = ""
     if add.log_type == "smoking":
@@ -948,7 +949,7 @@ async def handle_tracker_add(
     # ("2 cigarettes" is stored as 2 `count`, and "2 count" says nothing).
     stored_qty, stored_unit = canonical
     if stored_qty != add.quantity:
-        what += f" ({stored_qty:g} {stored_unit})"
+        what += f" ({_g(stored_qty)} {stored_unit})"
     return {
         "reply": (
             f"Logged: {what} for {day}. "
@@ -970,6 +971,27 @@ async def handle_tracker_add(
 # --------------------------------------------------------------------------- #
 # Metric pulls
 # --------------------------------------------------------------------------- #
+def _result_value(item: dict) -> float | None:
+    """The number in one extracted result row, or None.
+
+    Production pre-computes ``value_numeric`` -- trust it first. Otherwise
+    the first number in the verbatim ``value`` (which may carry a comparator,
+    "<5"), or the legacy demo shape's ``result`` / ``reading``. The ONE place
+    this is decided: a second copy of it inside the per-document walk meant
+    a new field had to be added twice, and would be found once.
+    """
+    vn = item.get("value_numeric")
+    if isinstance(vn, (int, float)):
+        return float(vn)
+    for value_key in ("value", "result", "reading"):
+        raw = item.get(value_key)
+        if raw is not None:
+            m = re.search(r"-?\d+(?:\.\d+)?", str(raw))
+            if m:
+                return float(m.group())
+    return None
+
+
 def _search_content_for_param(
     content, terms: tuple[str, ...], exclude: tuple[str, ...] = ()
 ):
@@ -990,16 +1012,9 @@ def _search_content_for_param(
             and any(t in name for t in terms)
             and not any(x in name for x in exclude)
         ):
-            # Production pre-computes the numeric value — trust it first.
-            vn = content.get("value_numeric")
-            if isinstance(vn, (int, float)):
-                return float(vn), content.get("unit")
-            for value_key in ("value", "result", "reading"):
-                raw = content.get(value_key)
-                if raw is not None:
-                    m = re.search(r"-?\d+(?:\.\d+)?", str(raw))
-                    if m:
-                        return float(m.group()), content.get("unit")
+            value = _result_value(content)
+            if value is not None:
+                return value, content.get("unit")
         for v in content.values():
             found = _search_content_for_param(v, terms, exclude)
             if found:
@@ -1072,7 +1087,7 @@ async def handle_metric_query(
                 )
                 if found is not None:
                     value, found_unit, created = found
-                    value_text = f"{value:g} {found_unit or unit}"
+                    value_text = f"{_g(value)} {found_unit or unit}"
                     when = (
                         created.strftime("%d %b %Y") if created
                         else "date unknown"
@@ -1092,9 +1107,9 @@ async def handle_metric_query(
                     }
             return _metric_not_found(display)
         if point.secondary is not None:
-            value_text = f"{point.value:g}/{point.secondary:g} {point.unit or unit}"
+            value_text = f"{_g(point.value)}/{_g(point.secondary)} {point.unit or unit}"
         else:
-            value_text = f"{point.value:g} {point.unit or unit}"
+            value_text = f"{_g(point.value)} {point.unit or unit}"
         when = point.at.strftime("%d %b %Y")
         if query.wants_trend:
             series = await vital_series(
@@ -1115,7 +1130,7 @@ async def handle_metric_query(
         point = await latest_body_measurement(db, user_id, spec["body_type"])
         if point is None:
             return _metric_not_found(display)
-        value_text = f"{point.value:g} {unit}"
+        value_text = f"{_g(point.value)} {unit}"
         when = point.at.strftime("%d %b %Y")
     else:  # report_param (e.g. HbA1c from extracted lab reports)
         found = await _latest_report_param(
@@ -1124,7 +1139,7 @@ async def handle_metric_query(
         if found is None:
             return _metric_not_found(display)
         value, found_unit, created = found
-        value_text = f"{value:g} {found_unit or unit}"
+        value_text = f"{_g(value)} {found_unit or unit}"
         when = created.strftime("%d %b %Y") if created else "date unknown"
 
     return {
@@ -1337,9 +1352,9 @@ def _wearable_line(
 def _vital_value(point) -> str:
     """One vital as the reader should see it: value, pair, unit."""
     value = (
-        f"{point.value:g}/{point.secondary:g}"
+        f"{_g(point.value)}/{_g(point.secondary)}"
         if point.secondary is not None
-        else f"{point.value:g}"
+        else _g(point.value)
     )
     return f"{value} {point.unit or ''}".strip()
 
@@ -2057,12 +2072,13 @@ async def _resolve_named_document(
             }
         owner_id, include_private = member, False
 
-    # Wider than a listing: this is a search over what the reader might name,
-    # not the three most recent.
+    # A NAME is a search over everything the reader has, not the recent
+    # listing: capped at 25 (33 fetched per kind), a document under forty
+    # newer ones was reported as not existing. "The latest" keeps the cap.
     hits = await latest_documents(
         db, owner_id, list(DOCUMENT_KINDS),
         owner_label=owner_label, include_private=include_private,
-        viewer_id=user_id, limit=25,
+        viewer_id=user_id, limit=None if query.handle else 25,
     )
     if not hits:
         return {
@@ -2592,12 +2608,20 @@ async def handle_report_param_ask(
     # the same reading twice. Compared as DAYS because the two sources disagree
     # about type: the series stores a `date`, the walk carries the report row's
     # `datetime`, and the two never compare equal however close they are.
+    #
+    # The series dates a reading by the tracking-zone day, so the report row
+    # is read in that zone too. `created_at.date()` was the UTC day, and a
+    # report uploaded at 01:30 IST fell on the previous one -- the same
+    # reading failed the dedupe and plotted twice.
     seen_days = {
         (h[0].date() if isinstance(h[0], datetime) else h[0])
         for h in history if h[0] is not None
     }
     for r in rows:
-        if r.created_at is not None and r.created_at.date() in seen_days:
+        if (
+            r.created_at is not None
+            and as_utc(r.created_at).astimezone(tracking_zone()).date() in seen_days
+        ):
             continue        # already in the series; not a second reading
         ai = (r.content or {}).get("ai") or {}
         results = ((ai.get("extraction") or {}).get("results")) or []
@@ -2607,13 +2631,9 @@ async def handle_report_param_ask(
                 continue
             if not want <= param_tokens(test_name):
                 continue
-            value = item.get("value_numeric")
-            if not isinstance(value, (int, float)):
-                raw = item.get("value")
-                m = re.search(r"-?\d+(?:\.\d+)?", str(raw or ""))
-                if not m:
-                    continue
-                value = float(m.group())
+            value = _result_value(item)
+            if value is None:
+                continue
             unit = item.get("unit") or ""
             flag = (item.get("abnormal_flag") or "").strip().lower()
             abnormal = _is_abnormal_flag(flag)
@@ -2621,15 +2641,6 @@ async def handle_report_param_ask(
                 r.created_at.strftime("%d %b %Y") if r.created_at
                 else "date unknown"
             )
-            if abnormal:
-                flag_note = (
-                    f" It is flagged {flag} against the printed reference "
-                    "range."
-                )
-            elif flag:
-                flag_note = " It is within the printed reference range."
-            else:
-                flag_note = ""
             # Collect rather than return. This used to `return` on the first
             # match, so "show my hba1c graph" got one number and no chart —
             # the reader asked for a trend and was handed a reading. Every
@@ -2697,7 +2708,7 @@ async def handle_report_param_ask(
             direction = "higher" if last > first else "lower"
             trend_note = (
                 f" Across the {len(points)} results on file it has gone from "
-                f"{first:g} to {last:g} {unit}".rstrip() + f", {direction} "
+                f"{_g(first)} to {_g(last)} {unit}".rstrip() + f", {direction} "
                 f"than the earliest one here."
             )
     elif points:
@@ -2714,7 +2725,7 @@ async def handle_report_param_ask(
     return {
         "reply": (
             f"Your most recent {test_name} on record is "
-            f"{value:g} {unit}".rstrip()
+            f"{_g(value)} {unit}".rstrip()
             + f" (from a report dated {when}).{flag_note}{trend_note} "
             f"{_NOT_MEDICAL_ADVICE}"
         ),
@@ -3375,13 +3386,15 @@ async def handle_tracker_query(
             )
     else:
         if span is not None:
-            # manual_tracking holds instants and no Spring-assigned day, so a
-            # UTC midnight is the only boundary there is. Unbounded above, an
-            # "entries yesterday" ask answers with today's reading.
+            # manual_tracking holds instants and no Spring-assigned day, so
+            # the calendar day is converted to instants here -- in the
+            # tracking zone `span` was reckoned in, not at UTC midnight, or
+            # an entry at 00:30 IST lands on the previous day. Bounded above
+            # too: unbounded, an "entries yesterday" ask answers with today's.
             metrics = await latest_manual_metrics(
                 db, user_id,
-                datetime.combine(span[0], time.min, tzinfo=UTC),
-                datetime.combine(span[1], time.min, tzinfo=UTC),
+                tracking_day_bounds(span[0])[0],
+                tracking_day_bounds(span[1])[0],
             )
         else:
             metrics = await latest_manual_metrics(db, user_id, since)
@@ -3450,15 +3463,16 @@ async def perform_medication_write(
 ) -> dict:
     """Do one medication write AS the reader and return a validator-safe reply.
 
-    The structured entry point shared by the deterministic parser (legacy) and
-    the agentic add/stop/remove tools. Davi never writes the row — it calls
+    The structured entry point shared by the deterministic medication flow
+    and the agentic add/stop/remove tools. Davi never writes the row — it calls
     mhn-spring's MedicineController. A write that does not land is reported
     honestly, so the model is never left to invent a false confirmation.
     """
     from app.medicines.service import (
-        _resolve,
+        _request,
         add_course,
         delete_course,
+        matching_courses,
         stop_course,
     )
 
@@ -3466,15 +3480,33 @@ async def perform_medication_write(
         # Every course matching the name, one confirmed sweep (duplicates on
         # the list are indistinguishable by name, so per-item prompts would
         # be unanswerable). Each write still reports honestly.
+        #
+        # `matching_courses`, not `_resolve`: the resolver narrows "dolo" to
+        # the exact-name hit when one exists, which is right for a single
+        # stop and wrong for a sweep -- it removed "dolo", reported "all 1",
+        # and left "Dolo 650" on the list.
         base_action = action.split("_", 1)[0]
-        resolved = await _resolve(
+        found = await matching_courses(
             user_id, name, active_only=(base_action == "stop"))
-        matches = list(resolved.courses) if resolved.courses else (
-            [resolved.course] if resolved.course else [])
-        from app.medicines.service import _request
+        if not found.ok:
+            prov = {"path": "medication_command", "action": action,
+                    "name": name, "ok": False, "reason": found.reason}
+            if found.reason in ("not_configured", "no_token"):
+                reply = _MED_UNAVAILABLE
+            elif found.reason == "not_found":
+                # Not on the list is not a transient failure; "try again in
+                # a moment" would send the reader round in a loop.
+                reply = (f"I couldn't find any '{name}' in your medications, "
+                         "so there was nothing to change. You can check the "
+                         "list in the Medications section.")
+            else:
+                reply = ("I couldn't update those just now — please try "
+                         "again in a moment, or use the Medications section "
+                         "of the app.")
+            return {"reply": reply, "action": "none", "provenance": prov}
 
         done, failed = 0, 0
-        for course in matches:
+        for course in found.courses:
             # Delete/stop by the RESOLVED id, not by re-resolving the name —
             # each removal changes what the name would resolve to.
             path = (f"/medicine/courses/{course.tracking_id}/stop"
@@ -3555,25 +3587,6 @@ async def perform_medication_write(
         reply = ("I couldn't update that just now — please try again in a "
                  "moment, or use the Medications section of the app.")
     return {"reply": reply, "action": "none", "provenance": prov}
-
-
-async def handle_medication_command(
-    db: AsyncSession, user_id: uuid.UUID, message: str
-) -> dict | None:
-    """"Add metformin 500 mg" / "stopped my amoxicillin" / "remove atorvastatin".
-
-    The legacy deterministic path: parse the phrase, then perform the write.
-    Returns None only when the message is not a medication command. The agentic
-    engine reaches the same writes through the add/stop/remove tools, which pass
-    structured frequency data ``perform_medication_write`` accepts directly.
-    """
-    cmd: MedicationCommand | None = parse_medication_command(message)
-    if cmd is None:
-        return None
-    return await perform_medication_write(
-        db, user_id, cmd.action, cmd.name,
-        strength=cmd.strength, is_prn=cmd.is_prn,
-    )
 
 
 # --------------------------------------------------------------------------- #

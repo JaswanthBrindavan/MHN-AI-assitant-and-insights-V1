@@ -524,3 +524,45 @@ async def test_a_single_day_ask_gets_no_week_chart(db_session):
 
     assert out is not None
     assert "visual" not in out
+
+
+# --------------------------------------------------------------------------- #
+# "today" opens at the TRACKING-ZONE midnight, like every other window here
+# --------------------------------------------------------------------------- #
+def test_today_floors_at_the_tracking_zone_midnight_not_utc():
+    """Water logged at 01:00 IST is today's water. Flooring at UTC midnight
+    dropped the first 5.5 hours of every IST day from "how much water today"
+    and folded most of the previous IST day in, while `calendar_window` and
+    `tracking_today()` a few lines away anchored on Asia/Kolkata."""
+    from datetime import UTC, datetime
+
+    from app.coredata.service import window_start
+    from app.models.common import tracking_day_bounds, tracking_today
+
+    # 20:00Z on the 7th is 01:30 IST on the 8th: the IST day opened at 18:30Z.
+    now = datetime(2026, 9, 7, 20, 0, tzinfo=UTC)
+    assert window_start("today", now) == datetime(2026, 9, 7, 18, 30, tzinfo=UTC)
+    # And the live call agrees with the helper written for exactly this.
+    assert window_start("today") == tracking_day_bounds(tracking_today())[0]
+
+
+async def test_a_manual_entry_yesterday_is_bounded_in_the_tracking_zone(db_session):
+    """"My calories yesterday" with an entry at 00:30 IST yesterday: bounding
+    the calendar day at UTC midnights (05:30 IST) pushed that entry out of
+    the day it was logged on."""
+    from datetime import timedelta
+
+    from app.models.common import tracking_day_bounds, tracking_today
+    from app.models.coredata import ManualTracking
+
+    yesterday = tracking_today() - timedelta(days=1)
+    start, _end = tracking_day_bounds(yesterday)
+    db_session.add(ManualTracking(
+        user_id=USER, type="calories", value=1850, unit="kcal",
+        effective_from=start + timedelta(minutes=30),  # 00:30 IST yesterday
+    ))
+    await db_session.flush()
+
+    out = await handle_tracker_query(db_session, USER, "how many calories yesterday")
+    assert out is not None
+    assert "1850" in out["reply"], out["reply"]

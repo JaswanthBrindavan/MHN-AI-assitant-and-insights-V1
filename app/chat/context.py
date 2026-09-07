@@ -29,6 +29,7 @@ from app.coredata.service import (
     recent_lab_values,
     window_start,
 )
+from app.health.ranges import fmt_num as _num
 from app.models.core import PedigreeCondition
 from app.models.rules import InsightArtifact
 
@@ -238,10 +239,6 @@ def _fmt_date(dt) -> str:
         return dt.strftime("%d %b %Y")
     except Exception:  # noqa: BLE001
         return ""
-
-
-def _num(value: float) -> str:
-    return str(int(value)) if float(value).is_integer() else f"{value:g}"
 
 
 async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
