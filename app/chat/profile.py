@@ -204,6 +204,12 @@ async def update_profile(
 
     row.consent_grant_id = grant.id
     row.updated_at = utcnow()
+    # The memory document renders a copy of these fields and is fresh for a
+    # day and a half. Drop it: the next turn reads the profile live, and the
+    # nightly sweep rebuilds the document from the edited row.
+    await db.execute(
+        delete(UserMemoryDocument).where(UserMemoryDocument.user_id == user_id)
+    )
     await db.flush()
     return await get_profile(db, user_id)
 

@@ -51,9 +51,10 @@ jobs:
         run: pytest -q -p no:randomly --cov=app --cov-report=term-missing
 
       - name: Safety evals (both engines)
+        # The default is agentic, so legacy is the one that must be named.
         run: |
           python -m scripts.run_evals
-          CHAT_ENGINE=agentic python -m scripts.run_evals
+          CHAT_ENGINE=legacy python -m scripts.run_evals
 
       # Quality is measured, not assumed. Against the deterministic fake this
       # covers retrieval scope and degradation only — tool choice and answer
@@ -61,6 +62,26 @@ jobs:
       # than reporting a confident number about something it did not measure.
       - name: Quality evals (fake provider — routing and retrieval only)
         run: python -m scripts.quality_eval --compare --min-overall 85
+
+  legacy-engine:
+    name: suite on CHAT_ENGINE=legacy
+    runs-on: ubuntu-latest
+    env:
+      CHAT_ENGINE: legacy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      # The default engine is agentic (what Railway runs), so every other job
+      # above tests that. Legacy still ships behind one env var, and the
+      # tests that pin it explicitly (`legacy_engine`) are a minority — this
+      # run keeps the rest of the suite honest on the other engine too.
+      - run: pytest -q -p no:randomly
 
   ordering:
     name: random-order tests

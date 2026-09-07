@@ -58,21 +58,68 @@ async def test_cross_session_recall_through_orchestrator(db_session):
     await handle_chat(db_session, USER, "tell me about diabetes", provider)
 
     # A NEW session (different session_id) recalls the prior topic in [P].
-    class Spy(FakeProvider):
-        def __init__(self):
-            super().__init__(responses=["General wellbeing info [GK]."])
-            self.system = ""
-
-        async def generate(self, *, system, user: str) -> str:
-            self.system = join_system(system)
-            return "General wellbeing info [GK]."
-
-    spy = Spy()
+    # Read the prompt from `calls`, which both engines record — a spy on
+    # `generate` sees nothing on the agentic engine.
+    spy = FakeProvider(responses=["General wellbeing info [GK]."])
     await handle_chat(
         db_session, USER, "how do I stay healthy?", spy,
         uuid.uuid4(),  # fresh session
     )
-    assert "previously asked about" in spy.system
+    system = join_system(spy.calls[0]["system"])
+    assert "previously asked about" in system
     # Unit env has no condition_registry, so the topic value is the code T2DM
     # (production resolves it to "Diabetes mellitus").
-    assert "t2dm" in spy.system.lower()
+    assert "t2dm" in system.lower()
+
+
+def _statements(engine) -> list[str]:
+    seen: list[str] = []
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        seen.append(statement.split()[0].upper())
+
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_recording_a_turn_is_one_read_however_many_items(db_session, engine):
+    """Three conditions and two flags used to be five sequential SELECTs, on
+    every turn, on both engines. It is one now, and the repeat mentions are
+    one UPDATE rather than one per row."""
+    topics = {"MC001": "Diabetes", "MC051": "Hypertension", "MC052": "CAD"}
+    flags = ["chest pain", "left arm"]
+
+    seen = _statements(engine)
+    await record_topics(db_session, USER, topics, flags=flags)
+    assert seen.count("SELECT") == 1, seen
+
+    seen.clear()
+    await record_topics(db_session, USER, topics, flags=flags)
+    assert seen.count("SELECT") == 1, seen
+    assert seen.count("UPDATE") == 1, seen
+
+    rows = (
+        await db_session.execute(
+            select(UserMemory).where(UserMemory.user_id == USER)
+        )
+    ).scalars().all()
+    assert len(rows) == 5
+    assert {r.mention_count for r in rows} == {2}
+
+
+@pytest.mark.asyncio
+async def test_a_flag_and_a_topic_with_the_same_key_stay_separate_rows(db_session):
+    """mem_key is unique per (user, kind), not per user — the batched read
+    matches on both."""
+    await record_topics(db_session, USER, {"x": "X"}, flags=["x"])
+    await record_topics(db_session, USER, {"x": "X"}, flags=["x", "x"])
+    rows = (
+        await db_session.execute(
+            select(UserMemory).where(UserMemory.user_id == USER)
+        )
+    ).scalars().all()
+    assert sorted((r.kind, r.mention_count) for r in rows) == [
+        ("condition_topic", 2), ("flag", 2),
+    ]

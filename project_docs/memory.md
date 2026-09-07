@@ -96,7 +96,7 @@ unrunnable on Windows for some time. Always pass `encoding="utf-8"`.
 
 ## The two chat engines
 
-`CHAT_ENGINE=legacy` (default) | `agentic`.
+`CHAT_ENGINE=agentic` (default, and what Railway runs) | `legacy`.
 
 - **legacy** — eleven regex-gated handlers tried in order; first match wins.
 - **agentic** — the same abilities offered to the model as tools.

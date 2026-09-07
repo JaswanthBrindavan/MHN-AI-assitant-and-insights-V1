@@ -105,6 +105,7 @@ def test_parse_summary_and_suggestions():
 # Tracker add end-to-end (writes lifestyle_log)
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_tracker_add_writes_lifestyle_log(db_session):
     provider = FakeProvider()
     result = await handle_chat(
@@ -124,6 +125,7 @@ async def test_tracker_add_writes_lifestyle_log(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_tracker_add_yesterday_backdates(db_session):
     await handle_chat(db_session, USER, "I smoked 2 cigs yesterday", FakeProvider())
     row = (
@@ -139,6 +141,7 @@ async def test_tracker_add_yesterday_backdates(db_session):
 # Document query end-to-end (self + family consent)
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_document_query_self(db_session):
     db_session.add(
         Report(id=1, user_id=USER, filepath="docs/cbc_report.pdf",
@@ -153,6 +156,7 @@ async def test_document_query_self(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_document_query_father_with_consent(db_session):
     db_session.add(Relation(id=1, name="Father", inverse="Son"))
     db_session.add(
@@ -172,6 +176,7 @@ async def test_document_query_father_with_consent(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_document_query_father_without_consent(db_session):
     db_session.add(Relation(id=1, name="Father", inverse="Son"))
     db_session.add(
@@ -213,6 +218,7 @@ async def test_document_query_private_family_doc_hidden(db_session):
 # Metric query end-to-end
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_metric_query_blood_pressure(db_session):
     db_session.add(
         VitalReading(id=1, user_id=USER, vital_type="blood_pressure",
@@ -230,6 +236,7 @@ async def test_metric_query_blood_pressure(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_metric_query_hba1c_from_report_content(db_session):
     db_session.add(
         Report(
@@ -249,6 +256,7 @@ async def test_metric_query_hba1c_from_report_content(db_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_metric_query_not_found(db_session):
     result = await handle_chat(
         db_session, USER, "what's my latest hba1c?", FakeProvider()

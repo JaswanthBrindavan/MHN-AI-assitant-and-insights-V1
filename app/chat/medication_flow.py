@@ -839,6 +839,22 @@ def _belongs_elsewhere(message: str) -> bool:
 # --------------------------------------------------------------------------- #
 # The turn handler
 # --------------------------------------------------------------------------- #
+def _confirm_phrase(pending: dict) -> str:
+    """What the reader is being asked to agree to — the SAME action the write
+    will execute (`pending["action"]` is add | stop | remove | stop_all |
+    remove_all). The re-ask used to say "remove" for every non-add action, so a
+    reader who said "yes" to "remove" got a STOP (course ended, history kept)
+    or the reverse (history erased) — a different destructiveness from the one
+    they answered. The "all N" case names the count for the same reason.
+    """
+    action = str(pending.get("action", ""))
+    name = pending.get("name", "")
+    if action.endswith("_all"):
+        count = pending.get("count")
+        return f"{action[:-4]} all {f'{count} ' if count else ''}{name} entries"
+    return f"{action} {name}"
+
+
 def _reply(text: str, *, action: str = "medication_flow",
            pending: dict | None = None, ok: bool | None = None) -> dict:
     prov: dict = {"path": "medication_flow"}
@@ -991,12 +1007,10 @@ async def handle_medication_turn(
                 return None  # release rather than trap
             return _reply(
                 f"Sorry, I didn't catch that — should I "
-                f"{'add' if pending['action'] == 'add' else 'remove'} "
-                f"{pending['name']}? (yes / no)",
+                f"{_confirm_phrase(pending)}? (yes / no)",
                 pending={**pending, "reasked": True})
         if yn is False:
-            verb = "add" if pending["action"] == "add" else "remove"
-            return _reply(f"Okay, I won't {verb} it.")
+            return _reply(f"Okay, I won't {_confirm_phrase(pending)}.")
         ability = await perform_medication_write(
             db, user_id, pending["action"], pending["name"],
             strength=pending.get("strength"), is_prn=pending.get("is_prn", False),

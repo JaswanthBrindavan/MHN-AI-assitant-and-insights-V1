@@ -276,8 +276,10 @@ async def test_the_first_byte_arrives_before_the_answer_is_finished(sessionmaker
 async def test_a_value_the_fidelity_guard_rejects_is_never_emitted(sessionmaker):
     """No records, no retrieval, and the model states a dose: the buffered
     path replaces the reply. The stream must not have shown the number."""
+    # Twice: the corrective retry must ALSO fail for the reply to be replaced
+    # rather than rewritten. Neither attempt may reach the wire.
     provider = FakeProvider(
-        responses=["Take 500 mg of paracetamol. Then rest well."]
+        responses=["Take 500 mg of paracetamol. Then rest well."] * 2
     )
     app = _app_with(sessionmaker, provider)
     chunks = await asgi_post(

@@ -526,3 +526,31 @@ async def test_the_insights_tool_reaches_the_family_path(db_session):
     )
     assert out is not None
     assert "family connection" in out["deterministic_reply"]
+
+
+@pytest.mark.asyncio
+async def test_a_named_document_is_found_however_far_down_the_list(db_session):
+    """Naming a document is a search, not a request for the recent ones.
+
+    The resolver read the listing function, which fetches a few dozen newest
+    rows per kind and truncates, so a reader whose "Thyroid Profile" sat under
+    forty newer reports was told it did not exist.
+    """
+    db_session.add(Report(
+        user_id=READER, filepath="s3/thyroid.pdf", private=False,
+        created_at=utcnow() - timedelta(days=400),
+        content=_content(document_id=7001, title="Thyroid Profile",
+                         report_date="2025-07-01"),
+    ))
+    for n in range(40):
+        db_session.add(Report(
+            user_id=READER, filepath=f"s3/panel-{n}.pdf", private=False,
+            created_at=utcnow() - timedelta(days=n),
+            content=_content(document_id=7100 + n, title=f"Blood Panel {n}",
+                             report_date=None),
+        ))
+    await db_session.flush()
+
+    query = parse_ai_result_query("insights from my thyroid profile report")
+    resolved = await _resolve_named_document(db_session, READER, query)
+    assert resolved == (7001, "Thyroid Profile")

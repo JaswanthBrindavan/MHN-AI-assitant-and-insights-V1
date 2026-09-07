@@ -30,6 +30,7 @@ from app.config import get_settings
 from app.db import get_sessionmaker
 from app.insights.engine import recompute_insights
 from app.memory import document as memory_document
+from app.models.chat import ConversationSession
 from app.models.common import utcnow
 from app.models.core import PedigreeCondition
 from app.models.coredata import LifestyleLog, SahhaDailyTotal
@@ -120,12 +121,19 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
         # database two other services share.
         settings = get_settings()
 
-        # Rebuild the memory document for everyone the recompute touched.
-        # Rebuilding on the events that change it is the design; this is the
-        # backstop for anything that changed without one, and it is what keeps
-        # a document from sitting stale for a reader who has not chatted.
+        # Rebuild the memory document for every reader who has chatted — the
+        # people who READ it. It used to walk the pedigree list above, which
+        # is a different population: a reader with labs and no family history
+        # never got a document at all. Its sources are written by other
+        # services that send no event here, so this pass is the refresh, and
+        # `memory_document.FRESHNESS` is sized to its cadence.
         rebuilt = 0
-        for uid in user_ids:
+        readers = (
+            await db.execute(select(ConversationSession.user_id).distinct())
+        ).scalars().all()
+        # ponytail: every reader who has ever chatted; window it on recent
+        # messages if this pass gets slow.
+        for uid in readers:
             if await memory_document.refresh(db, uid) is not None:
                 rebuilt += 1
         await db.commit()

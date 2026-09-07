@@ -1,8 +1,11 @@
 """Build, read and refresh the per-user memory document.
 
 The read path is one primary-key lookup. The build path does the twenty-odd
-queries that used to run on every turn, and runs them when something changes
-instead.
+queries, and runs in the nightly sweep for every reader who has chatted. The
+only in-repo writer of a source (a profile edit) invalidates the row instead;
+everything else it holds — labs, documents, tracked medicines, habits — is
+written by mhn-spring and mhn-ai, which send this service no event, so the
+sweep IS the refresh cadence and FRESHNESS is sized to it.
 
 THE BUDGET IS THE DESIGN. Every token of this block is charged on every turn,
 outside the cached prefix, forever — derived at ~$5,472/month per +50 tokens at
@@ -58,9 +61,17 @@ logger = logging.getLogger("davi.memory")
 MAX_PROMPT_TOKENS = 900
 
 # How stale a document may be before the caller falls back to live assembly.
-# One hour: long enough that rebuilds are cheap, short enough that a document
-# uploaded this morning is reflected by lunchtime.
-FRESHNESS = timedelta(hours=1)
+#
+# This was one hour, on the assumption that rebuilds ran on the events that
+# change the document. They never did: the sweep is the only builder, so the
+# document was usable for one hour in twenty-four — and the fallback carries
+# the profile only, so for the other twenty-three the reader's labs, documents
+# and tracked medicines simply did not reach the prompt. A day and a half
+# covers a nightly sweep with room for one that runs late; every dated value
+# in the block names when it was true, and a profile edit invalidates the row
+# outright (app/chat/profile.py), so the one source this service writes is
+# never served stale.
+FRESHNESS = timedelta(hours=36)
 
 # Caps, chosen so the block cannot grow without a code change.
 MAX_LABS = 6

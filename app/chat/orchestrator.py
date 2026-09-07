@@ -1656,6 +1656,15 @@ async def _dispatch(
     patient_text, user_codes = await _stage(
         "patient_context", build_patient_context(db, user_id)
     )
+    # Per-user memory (profile, open episodes, past topics), read once through
+    # the SHARED assembly so both engines see all of it. Read BEFORE the
+    # snapshot: when the profile slice came from the memory document, the
+    # snapshot leaves out the medications and labs that document already
+    # renders — one list of each per prompt, not two at different caps.
+    _memory = await _stage(
+        "memory_assembly",
+        memory_assembly.assemble(db, user_id, episodes_hint=_open),
+    )
     # For PERSONAL-symptom questions ("why am I so tired?"), enrich the [P]
     # block with the reader's own recorded data so the answer can be correlated
     # with their lifestyle/vitals/medications — as things to discuss with a
@@ -1664,10 +1673,13 @@ async def _dispatch(
     if is_personal_health_query(message):
         try:
             # SAVEPOINT: on PostgreSQL a failed read aborts the transaction;
-            # without this the memory read and the receipt after it fail too.
+            # without this the receipt write after it fails too.
             async with db.begin_nested():
                 snapshot = await _stage(
-                    "health_snapshot", build_health_snapshot(db, user_id)
+                    "health_snapshot",
+                    build_health_snapshot(
+                        db, user_id, from_document=_memory.from_document
+                    ),
                 )
             if snapshot:
                 patient_text = (
@@ -1676,13 +1688,6 @@ async def _dispatch(
         except Exception:  # noqa: BLE001 — enrichment must never break a reply
             logger.warning("health snapshot failed; continuing", exc_info=True)
             record_fail_open("health_snapshot")
-
-    # Per-user memory (profile, open episodes, past topics), read once through
-    # the SHARED assembly so both engines see all of it.
-    _memory = await _stage(
-        "memory_assembly",
-        memory_assembly.assemble(db, user_id, episodes_hint=_open),
-    )
 
     # Short-term memory: recent verbatim turns drive follow-up resolution. The
     # last entry is the current message (already persisted) — the PRIOR turns
@@ -2221,10 +2226,17 @@ async def _dispatch_agentic(
     settings = get_settings()
 
     patient_text, user_codes = await build_patient_context(db, user_id)
+    # Per-user memory, through the SHARED assembly. Agentic used to read the
+    # profile and episodes but never the long-term topic recall, and never
+    # recorded topics at all. See app/chat/memory_assembly.py. Read before
+    # the snapshot for the reason the legacy path gives.
+    _memory = await memory_assembly.assemble(db, user_id, episodes_hint=episodes)
     if is_personal_health_query(message):
         try:
             async with db.begin_nested():  # see the legacy path's note
-                snapshot = await build_health_snapshot(db, user_id)
+                snapshot = await build_health_snapshot(
+                    db, user_id, from_document=_memory.from_document
+                )
             if snapshot:
                 patient_text = (
                     f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
@@ -2232,11 +2244,6 @@ async def _dispatch_agentic(
         except Exception:  # noqa: BLE001 — enrichment must never break a reply
             logger.warning("health snapshot failed; continuing", exc_info=True)
             record_fail_open("health_snapshot")
-
-    # Per-user memory, through the SHARED assembly. Agentic used to read the
-    # profile and episodes but never the long-term topic recall, and never
-    # recorded topics at all. See app/chat/memory_assembly.py.
-    _memory = await memory_assembly.assemble(db, user_id, episodes_hint=episodes)
     patient_text = _memory.append_to(patient_text)
 
     compacted, recent = await assemble_context(db, session_id)
@@ -2419,7 +2426,12 @@ async def _dispatch_agentic(
         )
     except Exception:  # noqa: BLE001 — fail open, never crash the endpoint
         logger.warning("agent loop failed; safe reply", exc_info=True)
-        record_fail_open("agent")
+        # "provider", as on legacy: run_agent raises only what the provider
+        # raises (executors never raise), and this block already labels the
+        # degradation "provider_error". Recorded as "agent", the counter an
+        # on-call engineer watches for a provider outage stayed at zero on the
+        # engine production runs.
+        record_fail_open("provider")
         t("Generate", "provider failed — degrading to the deterministic safe reply")
         await _write_receipt(
             db, user_id=user_id, session_id=session_id, message=message,

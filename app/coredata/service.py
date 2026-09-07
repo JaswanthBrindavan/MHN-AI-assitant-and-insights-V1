@@ -13,7 +13,7 @@ import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 import sqlalchemy as sa
@@ -21,7 +21,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.models.common import as_utc, tracking_today, utcnow
+from app.models.common import (
+    as_utc,
+    tracking_day_bounds,
+    tracking_today,
+    tracking_zone,
+    utcnow,
+)
 from app.models.core import User
 from app.models.coredata import (
     Bill,
@@ -640,10 +646,14 @@ async def latest_documents(
     *,
     owner_label: str = "you",
     include_private: bool = True,
-    limit: int = 3,
+    limit: int | None = 3,
     viewer_id: uuid.UUID | None = None,
 ) -> list[DocumentHit]:
     """Newest documents of the requested kinds for one owner.
+
+    ``limit=None`` returns EVERY document: a caller resolving a name the
+    reader typed is searching, and a listing cut at the newest few dozen
+    told a reader their older document did not exist.
 
     ``include_private=False`` is used for family members' documents; pass the
     ``viewer_id`` there too so per-file exclusions (file_access_exclusions —
@@ -666,12 +676,12 @@ async def latest_documents(
         query = select(model).where(model.user_id == owner_id)  # type: ignore[attr-defined]
         if not include_private:
             query = query.where(model.private.is_not(True))  # type: ignore[attr-defined]
-        rows = (
-            await db.execute(
-                query.order_by(model.created_at.desc().nulls_last(), model.id.desc())  # type: ignore[attr-defined]
-                .limit(limit + 8)  # headroom: exclusions filter below
-            )
-        ).scalars().all()
+        query = query.order_by(
+            model.created_at.desc().nulls_last(), model.id.desc()  # type: ignore[attr-defined]
+        )
+        if limit is not None:
+            query = query.limit(limit + 8)  # headroom: exclusions filter below
+        rows = (await db.execute(query)).scalars().all()
         denied_ids = denied.get(_RESOURCE_TYPE.get(kind, kind), set())
         for r in rows:
             if r.id in denied_ids:
@@ -1220,7 +1230,12 @@ def window_start(period: str, now: datetime | None = None) -> datetime:
         # Midnight, not "now minus nothing": "how much water today" is read off
         # `lifestyle_log` rather than the overnight rollup, and the rolling
         # readers take a datetime floor.
-        return datetime.combine(now.date(), time.min, tzinfo=UTC)
+        #
+        # The TRACKING-ZONE midnight, like `calendar_window` and everything
+        # else that names a day here. UTC midnight dropped water logged
+        # 00:00-05:30 IST from "today" and folded 18 hours of the previous
+        # IST day in.
+        return tracking_day_bounds(now.astimezone(tracking_zone()).date())[0]
     days = {"week": 7, "month": 30, "year": 365}.get(period, 7)
     return now - timedelta(days=days)
 

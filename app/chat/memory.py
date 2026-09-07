@@ -1,8 +1,9 @@
 """Deterministic structured compaction extractors (no LLM).
 
 Flags are detected with the SAME triage vocabulary as the safety floor (one
-vocabulary). Sticky keys (flags, medications, boundaries, timeline) merge
-without truncation and survive every pass; topics/open_questions are capped.
+vocabulary). Sticky keys (flags, medications, boundaries, timeline) survive
+every compaction pass; topics/open_questions are capped at CAP. Every key is
+bounded — see STICKY_CAPS.
 """
 
 from __future__ import annotations
@@ -12,10 +13,35 @@ import re
 from app.rag.retrieval import extract_condition_codes
 from app.triage.red_flags import triage
 
-# Sticky keys never truncate; capped keys hold at most CAP items.
+# Sticky keys survive every pass; capped keys hold at most CAP items.
 STICKY_KEYS: tuple[str, ...] = ("flags", "medications", "boundaries", "timeline")
 CAPPED_KEYS: tuple[str, ...] = ("topics", "open_questions")
 CAP = 12
+
+# "Sticky" means a later compaction pass never drops what an earlier one kept —
+# a red flag from message 1 still stands at message 200, where a capped key
+# would have rolled it off. It never meant unbounded. This dict is
+# re-serialised into the prompt on every turn and is personal health
+# information in a JSON column, and until these caps existed the surviving
+# summary of a long session grew without limit (retention purges only the
+# SUPERSEDED versions). So each sticky key has a ceiling, and which end
+# survives follows what the key is for:
+#
+# * flags / timeline keep the EARLIEST entries — first mention is the thing
+#   they record, and the triage vocabulary runs to ~1,000 phrases so dedup
+#   alone bounds nothing.
+# * medications / boundaries keep the LATEST — a dose change or the most
+#   recent refusal is worth more than the one before it.
+#
+# Twenty-four medications covers real polypharmacy (an older reader on
+# fifteen drugs is not unusual, and a test pins fifteen). boundaries are
+# 120-character verbatim assistant refusals, so their cap is the tightest:
+# four is ~120 tokens, twenty-four would be more than the retrieved
+# knowledge gets.
+STICKY_CAPS: dict[str, int] = {
+    "flags": 24, "medications": 24, "boundaries": 4, "timeline": 24,
+}
+_KEEP_LATEST = frozenset({"medications", "boundaries"})
 
 # drug + dose, e.g. "metformin 500 mg", "amlodipine 5 mg".
 _MED_RE = re.compile(
@@ -69,6 +95,13 @@ def _dedup(items: list[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
+def _bound(key: str, items: list[str]) -> list[str]:
+    """Dedup (first mention wins) and cap. Which end survives depends on the key."""
+    cap = STICKY_CAPS.get(key, CAP)
+    kept = _dedup(items)
+    return kept[-cap:] if key in _KEEP_LATEST else kept[:cap]
+
+
 def empty_summary() -> dict:
     return {k: [] for k in (*STICKY_KEYS, *CAPPED_KEYS)}
 
@@ -107,16 +140,18 @@ def compact_messages(messages: list[dict]) -> dict:
             if q not in summary["open_questions"]:
                 summary["open_questions"].append(q)
 
-    summary["topics"] = summary["topics"][:CAP]
-    summary["open_questions"] = summary["open_questions"][:CAP]
+    for k in (*STICKY_KEYS, *CAPPED_KEYS):
+        summary[k] = _bound(k, summary[k])
     return summary
 
 
 def merge_summaries(old: dict, new: dict) -> dict:
-    """Sticky keys merge without truncation; capped keys hold at most CAP."""
-    merged: dict = {}
-    for k in STICKY_KEYS:
-        merged[k] = _dedup([*(old.get(k) or []), *(new.get(k) or [])])
-    for k in CAPPED_KEYS:
-        merged[k] = _dedup([*(old.get(k) or []), *(new.get(k) or [])])[:CAP]
-    return merged
+    """Union old and new per key, then bound every key (see STICKY_CAPS).
+
+    Old comes first, so for keep-earliest keys the merge is monotone: what an
+    earlier pass kept, a later pass keeps.
+    """
+    return {
+        k: _bound(k, [*(old.get(k) or []), *(new.get(k) or [])])
+        for k in (*STICKY_KEYS, *CAPPED_KEYS)
+    }

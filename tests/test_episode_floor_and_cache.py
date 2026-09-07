@@ -313,7 +313,9 @@ async def test_the_full_staging_sequence_ends_calm(db_session):
         "after the reader says they are better, an unrelated question must "
         f"not still carry the escalation; got {third.risk_level}"
     )
-    assert third.recommended_action == "discuss_with_clinician"
+    # "Calm" is the absence of the escalation: an uncited answer carries no
+    # pointer on the agentic engine (see `_answer_action`), a cited one does.
+    assert third.recommended_action in ("none", "discuss_with_clinician")
 
 
 async def test_a_carried_escalation_does_not_claim_the_reader_described_it(
@@ -695,3 +697,34 @@ async def test_a_failed_receipt_write_does_not_poison_the_turn(
     # The session is still usable, and the half-written receipt is gone
     # rather than waiting to fail the next flush too.
     assert (await db_session.execute(select(RagTurnReceipt.id))).all() == []
+
+
+async def test_a_recovery_that_names_a_symptom_closes_only_that_one(db_session):
+    """Pinning the decision behind `if not flags:` in memory_assembly.record.
+
+    The condition used to read `if not resolved_any and not flags`, which is
+    the same thing — but the name suggested that naming a symptom which
+    matched no open row would fall back to closing everything. It never did,
+    and does not now: name one, close one; name none, close all.
+    """
+    from app.chat import memory_assembly
+    from app.chat.episodes import open_episodes
+
+    user_id = uuid.uuid4()
+    await memory_assembly.record(
+        db_session, user_id,
+        message="chest pain and left arm discomfort",
+        risk=EMERGENCY,
+        flags=["chest pain", "left arm"],
+    )
+    await db_session.flush()
+
+    await memory_assembly.record(
+        db_session, user_id,
+        message="my chest pain is gone",
+        risk=NONE,
+        flags=["chest pain"],
+    )
+    await db_session.flush()
+
+    assert [e.symptom for e in await open_episodes(db_session, user_id)] == ["left arm"]
