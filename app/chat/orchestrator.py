@@ -2301,6 +2301,10 @@ async def _dispatch_agentic(
     async def _executor(call):
         return await execute_tool(
             db, user_id, call, session_id,
+            # The reader's own words, not the model's reconstruction of them.
+            # Every executor rebuilds a first-person question from structured
+            # arguments, which is where "my mother's" goes missing.
+            asked=message,
             visuals=tool_visuals, sources=tool_sources,
             documents=tool_documents,
         )

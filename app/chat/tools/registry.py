@@ -19,8 +19,18 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.abilities import (
+    _POSSESSIVE_NAME_RE,
+    _POSSESSIVE_STOP,
+    find_relation,
+    names_another_person,
+)
 from app.chat.tools import executors
 from app.chat.tools.definitions import TOOL_SPECS
+from app.coredata.service import (
+    resolve_family_member,
+    resolve_family_member_by_name,
+)
 from app.llm.tools import ToolCall, ToolResult
 from app.telemetry import record_fail_open, tool_calls
 
@@ -48,6 +58,83 @@ EXECUTORS = {
     "remove_medication": executors.remove_medication,
     "analyze_image": executors.analyze_image,
 }
+
+#: Tools that answer ONLY from the reader's own rows. Each one's handler
+#: filters hard on ``user_id``, and there is no family-scoped read behind any
+#: of them: ``latest_documents`` and ``can_view_document`` are the ONLY reads
+#: in ``app/coredata/service.py`` that take a ``viewer_id`` at all. Asked about
+#: a relative these return the READER's figure, and the model then presents it
+#: as the relative's.
+#:
+#: ``get_documents`` and ``get_document_ai_result`` are deliberately absent:
+#: their handlers resolve a relation or a named member and read under the
+#: sharing gate, which is the right answer to the same question.
+READER_ONLY_TOOLS = frozenset({
+    "get_latest_metric",
+    "get_report_parameter",
+    "get_section_details",
+    "get_tracker_total",
+    "get_health_summary",
+})
+
+
+async def _about_someone_else(
+    db: AsyncSession, user_id: uuid.UUID, asked: str
+) -> dict:
+    """The result for a reader-only tool asked about somebody else.
+
+    Not ``None``: the registry turns that into "Nothing on file for that",
+    which asserts the reader has no such data — false, and a different wrong
+    answer to the same question.
+
+    The relation is resolved rather than merely refused, because what MHN can
+    offer about a family member is real and specific: their DOCUMENTS, under
+    the sharing settings they chose. Naming who was understood, and whether
+    they are connected, is the difference between a dead end and a next step.
+    """
+    relation = find_relation(asked)
+    who = relation
+    member: uuid.UUID | None = None
+    if relation is not None:
+        member = await resolve_family_member(db, user_id, relation)
+    else:
+        m = _POSSESSIVE_NAME_RE.search(asked.lower())
+        if m and m.group(1) not in _POSSESSIVE_STOP:
+            who = m.group(1)
+            member = await resolve_family_member_by_name(db, user_id, who)
+
+    subject = f"the reader's {relation}" if relation else (
+        f"{who}" if who else "someone other than the reader"
+    )
+    if member is not None:
+        nxt = (
+            "They ARE connected in Family Connect and sharing. Their "
+            "documents can be fetched with get_documents — offer that. "
+            "Readings, trackers and section fields are not shared for "
+            "anyone but the reader, so those you cannot show."
+        )
+    elif who:
+        nxt = (
+            "Nobody matching that is connected and sharing, so there is "
+            "nothing of theirs to read. Say so plainly and mention Family "
+            "Connect, rather than implying the data does not exist."
+        )
+    else:
+        nxt = (
+            "Say you can only show the reader's own readings here."
+        )
+
+    return {
+        "found": False,
+        "about": subject,
+        "note": (
+            f"This question is about {subject}, and this tool reads only the "
+            f"reader's own records. Do NOT answer it from them, and do NOT "
+            f"present the reader's own figure as theirs. This is NOT a "
+            f"statement that anyone has no data. {nxt}"
+        ),
+    }
+
 
 # Tools that MUTATE state: their None is a failed action, never an empty read.
 WRITE_TOOLS = frozenset({
@@ -80,11 +167,19 @@ async def execute_tool(
     user_id: uuid.UUID,
     call: ToolCall,
     session_id: uuid.UUID | None = None,
+    asked: str | None = None,
     visuals: list[dict] | None = None,
     sources: list | None = None,
     documents: list[dict] | None = None,
 ) -> ToolResult:
     """Run one tool call. Always returns a ToolResult — never raises.
+
+    ``asked`` is the reader's own message, not the model's reconstruction of
+    it. Every executor here builds a first-person sentence out of the model's
+    structured arguments — ``get_latest_metric`` sends "what is my latest
+    blood pressure" — so by the time a parser sees it, "my mother's" is gone
+    and the guard in ``abilities.names_another_person`` cannot fire. Passing
+    the real message is what lets it.
 
     ``visuals`` collects chart payloads OUT OF BAND: a rendered SVG is prompt
     the model cannot use, but the client still needs it, so the caller passes a
@@ -110,6 +205,23 @@ async def execute_tool(
         )
     if not isinstance(call.arguments, dict):
         return _error(call.id, "Tool arguments could not be read.", tool=call.name)
+
+    # A relative's question, answered from the reader's rows (audit H7).
+    #
+    # The deterministic parsers have refused this since #72, but that guard
+    # reads the MESSAGE, and on this path no executor ever sees one — each
+    # rebuilds a first-person question from the model's arguments. So the
+    # refusal held on the legacy engine and was bypassed entirely on the
+    # agentic one, which is what production runs.
+    #
+    # Enforced here rather than in the prompt for the same reason the wearable
+    # no-grade rule is: a rule the model may decline to follow is not a guard.
+    if call.name in READER_ONLY_TOOLS and asked and names_another_person(asked):
+        logger.info("tool %s declined: the turn is about another person", call.name)
+        return ToolResult(
+            call_id=call.id,
+            content=json.dumps(await _about_someone_else(db, user_id, asked)),
+        )
 
     try:
         # SAVEPOINT: a failure rolls back only this tool's writes.
