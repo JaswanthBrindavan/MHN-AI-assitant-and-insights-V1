@@ -115,6 +115,24 @@ def legacy_engine(monkeypatch):
 
 
 @pytest.fixture
+def agentic_engine(monkeypatch):
+    """Pin the engine production runs, for a test that must measure IT.
+
+    The mirror of [legacy_engine], and needed for the opposite reason. Most
+    tests inherit the default, which is already agentic; this one exists for
+    the tests CI deliberately re-runs under CHAT_ENGINE=legacy. A ceiling that
+    protects production has to be measured against production's engine — read
+    against legacy it reports a number no reader ever pays.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("CHAT_ENGINE", "agentic")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
 def set_grounding_mode(monkeypatch):
     """Set GROUNDING_MODE for a test and refresh the settings cache."""
     from app.config import get_settings

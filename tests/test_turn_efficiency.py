@@ -311,7 +311,16 @@ MAX_QUERIES_PER_CORRELATION_TURN = 19
 MAX_QUERIES_PER_SUMMARY_TURN = 45
 
 
-async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):
+async def test_a_turn_stays_within_its_round_trip_budget(
+    db_session, engine, agentic_engine
+):
+    # Pinned to agentic, the engine Railway runs and the only one a reader
+    # meets. CI re-runs this suite under CHAT_ENGINE=legacy, where the same
+    # turn measures 39 rather than 38 — a real difference, and a meaningless
+    # one to hold production to. The ceiling exists to trip when somebody adds
+    # a read to the path that ships; measured against the other engine it
+    # would either report a cost nobody pays or need three queries of slack,
+    # which is the same as not having a ceiling.
     from app.chat.profile import grant_personalization, update_profile
 
     user_id = uuid.uuid4()
