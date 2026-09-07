@@ -263,8 +263,8 @@ CHEST_STEM_RE = re.compile(
 # on|out" shape, so "I cut myself" and "I have been cutting" keep their
 # meaning.
 _CUTTING_IDIOM_RE = re.compile(
-    r"cut(?:ting|s)?\s+(?:down|back)(?:\s+(?:on|to))?"
-    r"|cut(?:ting|s)?\s+out"
+    r"\bcut(?:ting|s)?\s+(?:down|back)\b(?:\s+(?:on|to))?"
+    r"|\bcut(?:ting|s)?\s+out\b"
 )
 
 
