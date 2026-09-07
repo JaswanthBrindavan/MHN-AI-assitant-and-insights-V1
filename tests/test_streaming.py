@@ -235,7 +235,7 @@ def test_finish_replaces_when_the_pipeline_rewrote_the_answer():
 def test_an_extra_check_sees_the_raw_markers():
     seen: list[str] = []
 
-    def _grounded(raw: str) -> bool:
+    def _grounded(raw: str, _tools) -> bool:
         seen.append(raw)
         # Every sentence of the prefix must carry a marker.
         return all("[" in s for s in raw.strip().split(". ") if s)

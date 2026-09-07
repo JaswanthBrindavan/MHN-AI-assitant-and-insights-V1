@@ -191,6 +191,15 @@
         }
       ],
       "agentic_reply": "There are no sleep readings on record for the last 14 days, so I can't describe a trend for you yet."
+    },
+    {
+      "name": "ungrounded_directive_is_not_served_in_enforce_mode",
+      "message": "I feel a bit tired in the afternoons lately",
+      "scripted_reply": "You can stop taking your blood pressure tablet once the tiredness settles.",
+      "grounding_mode": "enforce",
+      "expect": {
+        "reply_never_matches": "(?i)stop taking"
+      }
     }
   ]
 }

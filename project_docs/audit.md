@@ -234,6 +234,8 @@ Any new deterministic, safety-relevant behaviour belongs in the shared prologue 
 
 **Fix.** Move the assertion check into a marker-free function (`assertion_kind` is already pure and standalone at `claims.py:90`) and call it on `display` next to `values_traceable` at `:1740`; record a real `grounding_status` on the agentic receipt.
 
+**Resolved** (`fix/enforce-means-enforce`). Not latent after all: Railway runs `CHAT_ENGINE=agentic` with `GROUNDING_MODE=enforce`, so the setting was live and inert. The agentic ladder now runs the same `analyze_grounding` as legacy, between the fidelity and validation rungs, with `enforce` = one corrective retry through `recover` (the model keeps its tool results) then the safe reply, and `log` = log only. The source model: `[n]` is retrieved block n, `[P]` is the patient block plus the turn's trusted tool results, and a marker-free sentence stating nothing but values a tool returned is grounded by provenance — a tool result has no marker in the prompt's vocabulary and the fidelity guard has already traced every number in it. The stream gate on the agentic engine now carries the enforce-mode grounding rung too (it never did). Receipts record `grounded`/`violations`/`off` instead of `agentic`. Measured on the fake: no added latency (regex), one extra model call only on a turn that fails grounding.
+
 #### C9 — Self-harm plus a physical emergency suppresses the medical directive (medium)
 
 `app/chat/orchestrator.py:733`

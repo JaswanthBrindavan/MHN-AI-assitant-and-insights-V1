@@ -28,6 +28,15 @@ _THRESHOLD_RE = re.compile(
     r"no more than|higher than|lower than)\s+\d",
     re.IGNORECASE,
 )
+# A unit-less numeric RANGE in clinical context ("a normal reading is between
+# 60 and 100") is a reference-range claim even without a unit token —
+# hallucinated ranges never required a citation (audit medium).
+_RANGE_RE = re.compile(
+    r"\b(?:between|range|normal|typical|upper|lower|below|above|"
+    r"under|over)\b[^.?!]{0,30}\b\d+(?:\.\d+)?\s*"
+    r"(?:to|and|[–-])\s*\d+(?:\.\d+)?\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -110,17 +119,42 @@ def is_factual(sentence: str) -> bool:
     return bool(
         _UNIT_RE.search(sentence)
         or _THRESHOLD_RE.search(sentence)
-        # A unit-less numeric RANGE in clinical context ("a normal reading is
-        # between 60 and 100") is a reference-range claim even without a unit
-        # token — hallucinated ranges never required a citation (audit medium).
-        or re.search(
-            r"\b(?:between|range|normal|typical|upper|lower|below|above|"
-            r"under|over)\b[^.?!]{0,30}\b\d+(?:\.\d+)?\s*"
-            r"(?:to|and|[–-])\s*\d+(?:\.\d+)?\b",
-            sentence, re.IGNORECASE,
-        )
+        or _RANGE_RE.search(sentence)
         or assertion_kind(sentence)
     )
+
+
+def _grounded_by_tools(sentence: str, tool_texts: list[str] | None) -> bool:
+    """A marker-free sentence whose ONLY claims are values a tool returned.
+
+    The prompt's citation vocabulary is [n]/[P]/[GK]; a tool result has no
+    marker of its own, and the numeric-fidelity guard has already traced every
+    value in the reply to it. Demanding a marker here would send a verbatim
+    records answer back for rewriting — measured on the eval set: a correct
+    sleep total, replaced by a generic reply. Anything else a factual sentence
+    can carry — a threshold, a range, a directive, a prognosis — is a claim
+    no tool made, and still needs a marker.
+    """
+    if not tool_texts:
+        return False
+    from app.grounding.fidelity import unit_values, values_traceable
+
+    checked = unit_values(sentence)
+    if not checked:
+        return False
+    # Every value THIS module counts must be one the fidelity guard verifies:
+    # "7 hours" is factual here and invisible there, so a sentence carrying
+    # one still needs a marker.
+    covered = " ".join(checked)
+    if any(m.group(0) not in covered for m in _UNIT_RE.finditer(sentence)):
+        return False
+    if (
+        assertion_kind(sentence)
+        or _THRESHOLD_RE.search(sentence)
+        or _RANGE_RE.search(sentence)
+    ):
+        return False
+    return values_traceable(sentence, tool_texts)[0]
 
 
 def _normalize(answer: str) -> str:
@@ -157,6 +191,7 @@ def analyze_grounding(
     retrieval_happened: bool,
     chunk_texts: list[str] | None = None,
     patient_text: str = "",
+    tool_texts: list[str] | None = None,
 ) -> GroundingReport:
     """Verify citations and flag ungrounded factual sentences.
 
@@ -165,6 +200,10 @@ def analyze_grounding(
     in chunk n is an ``unsupported_value`` violation. Existence-only checking
     let any in-range [n] legitimize a fabricated number even in enforce mode
     (audit high — false assurance in the audit trail).
+
+    ``tool_texts`` are the trusted tool results of an agentic turn. They have
+    no marker, so a marker-free sentence stating only values traceable to
+    them is grounded by provenance (see ``_grounded_by_tools``).
     """
     provided = {str(i) for i in range(1, num_chunks + 1)}
     if has_patient_context:
@@ -197,33 +236,33 @@ def analyze_grounding(
                     }
                 )
 
-        if factual and not markers:
+        if factual and not markers and not _grounded_by_tools(sentence, tool_texts):
             violations.append(
                 {"type": "ungrounded_claim", "sentence": sentence.strip()}
             )
 
         # Content check: every unit-bearing value in a [n]/[P]-cited sentence
-        # must literally appear in the cited source.
+        # must appear in the cited source. Same comparison as the fidelity
+        # guard (whitespace, case and thousands separators collapsed), so a
+        # value that the guard traces to a tool result is not re-rejected
+        # here for writing "6.1%" where the record says "6.1 %".
         if chunk_texts is not None and markers:
-            from app.grounding.fidelity import unit_values
+            from app.grounding.fidelity import values_traceable
 
-            stated = unit_values(sentence)
-            if stated:
-                sources: list[str] = []
-                for marker in markers:
-                    if marker == "P":
-                        sources.append(patient_text)
-                    elif marker.isdigit():
-                        i = int(marker) - 1
-                        if 0 <= i < len(chunk_texts):
-                            sources.append(chunk_texts[i])
-                blob = " ".join(sources)
-                missing = [v for v in stated if v not in blob]
-                if missing and sources:
-                    violations.append({
-                        "type": "unsupported_value",
-                        "sentence": sentence.strip(),
-                    })
+            sources: list[str] = []
+            for marker in markers:
+                if marker == "P":
+                    sources.append(patient_text)
+                elif marker.isdigit():
+                    i = int(marker) - 1
+                    if 0 <= i < len(chunk_texts):
+                        sources.append(chunk_texts[i])
+            supported, _missing = values_traceable(sentence, sources)
+            if not supported:
+                violations.append({
+                    "type": "unsupported_value",
+                    "sentence": sentence.strip(),
+                })
 
     status = "violations" if violations else "grounded"
     return GroundingReport(

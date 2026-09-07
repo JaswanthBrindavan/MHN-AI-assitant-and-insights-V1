@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 
 from app.chat.validation import validate_reply
 from app.grounding.claims import MARKER_RE
@@ -130,7 +130,10 @@ class AnswerSink:
         self._sources: list[str] = []
         self._extra: tuple[str, ...] | None = None
         self._lead = ""
-        self._extra_check: Callable[[str], bool] | None = None
+        # Tool results of the current round, handed to ``extra_check``: on the
+        # agentic engine they are what a [P] citation may rest on.
+        self._tool_sources: list[str] = []
+        self._extra_check: Callable[[str, Sequence[str]], bool] | None = None
 
     def arm(
         self,
@@ -139,11 +142,12 @@ class AnswerSink:
         sources: Iterable[str],
         extra_conditions: tuple[str, ...] | None = None,
         lead: str = "",
-        extra_check: Callable[[str], bool] | None = None,
+        extra_check: Callable[[str, Sequence[str]], bool] | None = None,
     ) -> None:
         """Start accepting text. ``lead`` is a constant prefix (the HIGH
         banner) shown with the first sentence; ``extra_check`` sees the raw,
-        marker-bearing prefix and must return True to allow release."""
+        marker-bearing prefix plus this round's tool results, and must return
+        True to allow release."""
         self._armed = True
         self._risk = risk
         self._base_sources = list(sources)
@@ -155,7 +159,8 @@ class AnswerSink:
     def new_round(self, tool_sources: Iterable[str] = ()) -> None:
         """A new model call begins. Whatever the previous call produced was a
         tool-round preamble, not the answer: retract it."""
-        self._sources = [*self._base_sources, *tool_sources]
+        self._tool_sources = list(tool_sources)
+        self._sources = [*self._base_sources, *self._tool_sources]
         self._buffer = ""
         self._closed = False
         if self.released:
@@ -226,4 +231,4 @@ class AnswerSink:
             return False
         if not validate_reply(text, self._risk, self._extra).ok:
             return False
-        return self._extra_check is None or self._extra_check(raw)
+        return self._extra_check is None or self._extra_check(raw, self._tool_sources)
