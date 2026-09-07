@@ -131,6 +131,11 @@ _NOT_MEDICAL_ADVICE = (
     "This is your own recorded data, not medical advice — please discuss any "
     "concerns with your doctor."
 )
+# The same line for a family member's record: it is THEIR data, not the reader's.
+_NOT_MEDICAL_ADVICE_FAMILY = (
+    "This is what their record shows, not medical advice — please discuss any "
+    "concerns with their doctor."
+)
 
 # Never diagnoses; always routes an out-of-range reading to a clinician.
 _NOT_A_DIAGNOSIS_LINE = (
@@ -748,7 +753,7 @@ async def handle_family_record_query(
             )
             reply = (
                 f"The records {label} has shared with you list: {named}. "
-                f"{_NOT_MEDICAL_ADVICE}"
+                f"{_NOT_MEDICAL_ADVICE_FAMILY}"
             )
         else:
             reply = (
@@ -777,7 +782,7 @@ async def handle_family_record_query(
                 lines.append(f"• {name}: {value}" + (f" {unit}" if unit else ""))
             if len(params) > 8:
                 lines.append(f"…and {len(params) - 8} more values.")
-            lines.append(_NOT_MEDICAL_ADVICE)
+            lines.append(_NOT_MEDICAL_ADVICE_FAMILY)
             provenance.update(document={"kind": hit.kind, "id": hit.doc_id,
                                         "date": hit.when.isoformat() if hit.when else None},
                               found=len(params))
@@ -850,7 +855,7 @@ async def handle_family_record_query(
                     f"{cap}'s most recent {name} in the reports shared with "
                     f"you is {shown}" + (f" {unit}" if unit else "")
                     + f", from {_shared_doc_phrase(hit)}.{flag_note} "
-                    f"{_NOT_MEDICAL_ADVICE}"
+                    f"{_NOT_MEDICAL_ADVICE_FAMILY}"
                 ),
                 "action": (
                     "discuss_with_clinician" if flagged else "review_with_clinician"

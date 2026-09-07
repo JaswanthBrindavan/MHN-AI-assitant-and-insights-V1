@@ -203,6 +203,7 @@ async def test_the_value_with_its_date_and_document(db_session, mother_sharing):
     assert reply.startswith("Your mother's most recent HbA1c")
     assert "6.8 %" in reply and "Full body checkup" in reply and "28 Aug 2026" in reply
     assert "flagged high" in reply
+    assert "their doctor" in reply and "your own recorded data" not in reply
     assert r["action"] == "discuss_with_clinician"
     # The card opens the MEMBER's file, not the reader's.
     card = r["documents"][0]
