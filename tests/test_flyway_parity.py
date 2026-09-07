@@ -118,7 +118,7 @@ def _added_columns(table: str) -> dict[str, bool]:
             re.IGNORECASE,
         ):
             name, rest = match.group(1), match.group(2)
-            added[name] = not re.search(r"NOT NULL", rest, re.I)
+            added[name] = not re.search(r"\bNOT NULL\b", rest, re.I)
     return added
 
 

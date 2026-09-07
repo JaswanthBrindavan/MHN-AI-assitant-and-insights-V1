@@ -17,6 +17,8 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from app.chat import memory_assembly
+from app.chat.episodes import open_or_touch
+from app.chat.long_term import record_topics
 from app.chat.profile import grant_personalization, update_profile
 from app.memory import document as memory_document
 from app.models.common import utcnow
@@ -202,6 +204,33 @@ async def test_a_fresh_document_is_used(db_session):
     memory = await memory_assembly.assemble(db_session, USER)
     assert memory.from_document is True
     assert "Penicillin" in memory.profile_text
+
+
+async def test_a_fresh_document_does_not_eat_episodes_or_recall(db_session):
+    """The document replaces the PROFILE slice only.
+
+    Its `_gather` holds no episodes and no recall, so returning it as the whole
+    memory dropped the "same ongoing episode" instruction and long-term topic
+    recall for anyone whose document was under an hour old — while the risk
+    floor still fired, leaving a seek-care banner with none of the context that
+    explains it.
+    """
+    await _seed(db_session)
+    await open_or_touch(db_session, USER, "chest pain", "emergency", ["chest pain"])
+    await record_topics(db_session, USER, {"MC001": "type 2 diabetes"})
+    await memory_document.refresh(db_session, USER)
+    await db_session.flush()
+
+    memory = await memory_assembly.assemble(db_session, USER)
+
+    assert memory.from_document is True
+    assert "Penicillin" in memory.profile_text
+    assert "chest pain" in memory.episode_text
+    assert "SAME ongoing episode" in memory.episode_text
+    assert [e.symptom for e in memory.episodes] == ["chest pain"]
+    assert "type 2 diabetes" in memory.recall_text
+    # And all three reach the prompt, not just the profile.
+    assert len(memory.blocks()) == 3
 
 
 async def test_a_broken_document_read_still_answers(db_session, monkeypatch):

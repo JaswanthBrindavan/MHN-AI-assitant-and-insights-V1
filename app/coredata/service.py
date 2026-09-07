@@ -110,6 +110,53 @@ def _owner_read_grant(fc: FamilyConnect, owner_is_requester: bool) -> bool:
     )
 
 
+async def ai_context_granted(db: AsyncSession, user_id: uuid.UUID) -> bool | None:
+    """Has this reader switched on family context for anyone?
+
+    The toggle lives on ``family_connect`` and, like the read grant, sits on
+    the side whose data it covers: ``req_ai_context_access`` is the REQUESTER
+    saying "my AI-built context may be used", ``acc_ai_context_access`` the
+    acceptor saying the same (mhn-spring V27; ``editAccessControls`` writes
+    the caller's own side and never the other). So the reader's grant is the
+    flag on THEIR side of each accepted link — reading the other side would
+    gate the reader's own history on a relative's decision about the
+    relative's data, which is neither what the switch says nor what they
+    agreed to. One link with the reader's flag on is a grant: the switch is
+    "may my context be used", asked per relationship, and withholding it from
+    one relative says nothing about the reader's own chat.
+
+    Tri-state on purpose. ``None`` means the reader has no accepted link at
+    all, so no switch exists for them to have set either way; the caller
+    decides what that means rather than this read folding it into a bool
+    that would look identical to an explicit "off". Only accepted links count,
+    because Spring only lets the flag be edited on an accepted row — a pending
+    row carries the column default and no decision.
+
+    NULL reads as off: production has both columns ``NOT NULL DEFAULT false``
+    and a NULL can only come from a database without V27, where nobody has
+    opted in to anything.
+    """
+    rows = (
+        await db.execute(
+            select(FamilyConnect).where(
+                FamilyConnect.accepted.is_(True),
+                (FamilyConnect.requester_id == user_id)
+                | (FamilyConnect.acceptor_id == user_id),
+            )
+        )
+    ).scalars().all()
+    if not rows:
+        return None
+    return any(
+        bool(
+            fc.req_ai_context_access
+            if fc.requester_id == user_id
+            else fc.acc_ai_context_access
+        )
+        for fc in rows
+    )
+
+
 # Asked-for term → the relation-name words it accepts. Production relation
 # rows use both gendered and generic names ("Father"/"Child",
 # "Grandparent"/"Grandchild"), so "my grandson" must find a "Grandchild" row
@@ -1818,17 +1865,25 @@ async def medical_records(
 ) -> list[MedicalCondition]:
     """The reader's own conditions / surgeries / allergies — one table, one read.
 
-    THE single place the two invisibility rules are applied, because both are
-    columns a reader can easily forget:
+    THE single place the invisibility rule is applied, because it is a column a
+    reader can easily forget:
 
-    * ``private`` — the owning app hides these; NULL means not private (the
-      column's own default), so a pre-column row stays visible.
     * ``deleted_at`` — a SOFT delete. A condition the reader deleted in the app
       keeps ``status = 'active'`` forever, so a query that filters on status
       alone reports a deleted condition as a current one.
 
-    Own data only; there is no family path into it. Callers split by ``type``
-    in Python rather than issuing one query per type.
+    ``private`` is deliberately NOT a filter here. It is the FAMILY-sharing
+    switch: mhn-spring's own record list applies no ``private`` predicate and
+    only its family path does (``getByUserIdAndIsPrivateFalse``), and the app
+    defaults every new record to private. This read used to honour the flag on
+    the reasoning that "the owning app honours it", and the measured result on
+    the deployed app was that EVERY condition in production was invisible to
+    its own owner — "what health issues do I have?" was answered "There are no
+    conditions on your record" for a reader with two. The flag belongs on a
+    family read, and there is no family path into this table.
+
+    Own data only. Callers split by ``type`` in Python rather than issuing one
+    query per type.
     """
     return list(
         (
@@ -1837,10 +1892,6 @@ async def medical_records(
                 .where(
                     MedicalCondition.user_id == user_id,
                     MedicalCondition.deleted_at.is_(None),
-                    sa.or_(
-                        MedicalCondition.private.is_(False),
-                        MedicalCondition.private.is_(None),
-                    ),
                     *([MedicalCondition.type == type_] if type_ else []),
                 )
                 .order_by(MedicalCondition.id)

@@ -8,6 +8,8 @@ from functools import lru_cache
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.observability import configure_logging
+
 logger = logging.getLogger("davi.config")
 
 
@@ -196,6 +198,14 @@ class Settings(BaseSettings):
     voice_token: str = ""
     voice_timeout_seconds: float = 30.0
 
+    # --- observability ------------------------------------------------
+    # Root logger level (DEBUG | INFO | WARNING | ERROR | CRITICAL). Audit
+    # R7: nothing ever called basicConfig/dictConfig, so production had no
+    # handler at all — every INFO line was dropped and every WARNING fell
+    # through to logging.lastResort, losing its level and logger name. See
+    # app/observability.py for the handler this configures.
+    log_level: str = "INFO"
+
     @model_validator(mode="after")
     def _no_open_door_outside_dev(self) -> Settings:
         """Refuse to start a non-dev deployment with auth off or a default
@@ -240,4 +250,15 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    # Every construction of Settings goes through here — including a couple
+    # of module-level constants elsewhere that build one as an import-time
+    # side effect (app/patterns/service.py's READER_ZONE, via
+    # app/models/common.py's tracking_zone()), which can run before
+    # create_app() does. Configuring logging HERE, rather than in
+    # create_app(), is what guarantees the auth-mode line the validator logs
+    # two lines below is never the one line lost to a not-yet-configured
+    # root logger. See app/observability.py; audit R7.
+    configure_logging()
+    settings = Settings()
+    logging.getLogger().setLevel(settings.log_level.upper())
+    return settings

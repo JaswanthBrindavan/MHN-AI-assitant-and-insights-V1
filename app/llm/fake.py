@@ -12,6 +12,7 @@ the call and then fails, for provider-outage tests.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Sequence
 
 from app.llm.tools import LLMTurn, Message, ToolSpec, join_system
@@ -35,9 +36,11 @@ class FakeProvider:
         responses: Sequence[str] | None = None,
         turns: Sequence[LLMTurn] | None = None,
         raises: Exception | None = None,
+        stream_delay: float = 0.0,
     ) -> None:
         self._responses = list(responses or [])
         self._turns = list(turns or [])
+        self.stream_delay = stream_delay
         # Exception, not BaseException: the orchestrator's fail-open path
         # catches `except Exception`, so a BaseException would escape it and
         # the outage tests would stop exercising the degrade.
@@ -90,15 +93,34 @@ class FakeProvider:
         *,
         system: str | Sequence[str],
         messages: Sequence[Message],
-    ) -> AsyncIterator[str]:
-        """Stream the next scripted turn word by word."""
+        tools: Sequence[ToolSpec] = (),
+    ) -> AsyncIterator[str | LLMTurn]:
+        """Stream the next scripted turn word by word, then the turn itself.
+
+        Same script order as ``generate_turn``, so a test can drive the agent
+        loop through the streaming path with the turns it already wrote.
+        ``stream_delay`` (seconds per word) makes a fake slow enough to
+        measure time-to-first-byte against.
+        """
         self.calls.append(
-            {"system": join_system(system), "messages": list(messages), "stream": True}
+            {
+                "system": join_system(system),
+                "messages": list(messages),
+                "tools": [t.name for t in tools],
+                "stream": True,
+            }
         )
         if self._raises is not None:
             raise self._raises
-        text = self._turns.pop(0).text if self._turns else (
-            self._responses.pop(0) if self._responses else self.DEFAULT
-        )
-        for word in text.split(" "):
-            yield word + " "
+        if self._turns:
+            turn = self._turns.pop(0)
+        elif self._responses:
+            turn = LLMTurn(text=self._responses.pop(0), stop_reason="end_turn")
+        else:
+            turn = LLMTurn(text=self.DEFAULT, stop_reason="end_turn")
+        words = turn.text.split(" ")
+        for i, word in enumerate(words):
+            if self.stream_delay:
+                await asyncio.sleep(self.stream_delay)
+            yield word if i == len(words) - 1 else word + " "
+        yield turn

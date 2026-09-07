@@ -14,9 +14,13 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
+import pytest
+
 from app.chat.abilities import is_about_me_query, is_my_conditions_query
 from app.chat.data_handlers import handle_about_me_query
+from app.chat.orchestrator import handle_chat
 from app.chat.router import is_identity_question
+from app.llm.fake import FakeProvider
 from app.models.core import User
 from app.models.coredata import MedicalCondition
 
@@ -100,6 +104,68 @@ async def test_what_health_do_i_have_lists_the_conditions(db_session):
     assert out["provenance"]["asked"] == "conditions"
 
 
+async def test_a_private_condition_is_still_listed_to_its_owner(db_session):
+    """`private` is the FAMILY-sharing switch, and the app defaults it on.
+
+    Reported from the deployed app: "what health issues do I have?" was
+    answered "There are no conditions on your record" for a reader with two.
+    Both were `private = True` -- as was every condition row in production --
+    and the shared read was filtering the flag on the owner's own question.
+    Spring's own record list applies no such predicate; only its family path
+    does. What a relative may see must never decide what the owner may.
+    """
+    await _seed(db_session, with_conditions=False)
+    db_session.add(MedicalCondition(
+        user_id=USER, name="Sugar", type="condition", status="active",
+        private=True,
+    ))
+    db_session.add(MedicalCondition(
+        user_id=USER, name="Short Term Memory Loss", type="condition",
+        status="controlled", private=True,
+    ))
+    await db_session.flush()
+
+    out = await handle_about_me_query(
+        db_session, USER, "what health issues do I have?"
+    )
+    assert out is not None
+    assert "Sugar (active)" in out["reply"]
+    assert "Short Term Memory Loss (controlled)" in out["reply"]
+    assert "no conditions on your record" not in out["reply"].lower()
+    assert out["provenance"]["conditions"] == ["Short Term Memory Loss", "Sugar"]
+
+
+@pytest.mark.parametrize("chat_engine", ["legacy", "agentic"])
+async def test_the_reported_turn_lists_private_conditions_on_both_engines(
+    db_session, monkeypatch, chat_engine
+):
+    """The exact production turn, end to end.
+
+    The handler is SHARED at step 3.49, ahead of engine selection, so the
+    turn must never reach a model on either engine: the production log shows
+    the deterministic reply being served, and the fix is in the read beneath
+    it, so this pins the whole path rather than the read alone.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "chat_engine", chat_engine)
+    await _seed(db_session, with_conditions=False)
+    db_session.add(MedicalCondition(
+        user_id=USER, name="Sugar", type="condition", status="active",
+        private=True,
+    ))
+    await db_session.flush()
+
+    result = await handle_chat(
+        db_session, USER, "what health issues do I have?", FakeProvider(),
+        uuid.uuid4(),
+    )
+    assert result.provenance["path"] == "about_me", (
+        f"the {chat_engine} engine did not reach the deterministic reader"
+    )
+    assert "Sugar (active)" in result.response_message
+
+
 async def test_an_empty_record_states_absence_of_a_RECORD(db_session):
     """"You have no conditions" is a claim about the reader's body made out of
     an empty table. "Nothing is on your record" is a claim about the table."""
@@ -128,3 +194,23 @@ async def test_an_unrelated_message_is_not_claimed(db_session):
     assert await handle_about_me_query(
         db_session, USER, "what is diabetes"
     ) is None
+
+
+async def test_a_failed_condition_read_is_not_a_clinical_absence(db_session):
+    """"No conditions on your record" was rendered from a CRASHED read.
+
+    The read used to fail into `[]`, which is the same value an empty record
+    gives — so an outage was reported as a clean bill. A failed read must say
+    it failed.
+    """
+    from sqlalchemy import text
+
+    await _seed(db_session)
+    await db_session.execute(text("DROP TABLE medical_condition"))
+
+    out = await handle_about_me_query(db_session, USER, "what health do i have")
+    assert out is not None
+    low = out["reply"].lower()
+    assert "no conditions on your record" not in low
+    assert "could not read your conditions" in low
+    assert out["provenance"]["conditions"] == []

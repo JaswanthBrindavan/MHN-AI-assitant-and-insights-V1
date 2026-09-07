@@ -175,7 +175,13 @@ async def test_a_deleted_medication_is_not_reported_as_current(db_session):
     assert await coredata.active_medications(db_session, USER) == ["Amlodipine 5mg"]
 
 
-async def test_a_private_row_never_reaches_the_summary(db_session):
+async def test_a_private_row_still_reaches_the_readers_own_summary(db_session):
+    """`private` hides a record from CONNECTED RELATIVES, not from its owner.
+
+    The summary is the reader's own record read back to them; nothing on it is
+    a family read. The app defaults every new record to private, so filtering
+    the flag here listed no conditions for anyone who had recorded one.
+    """
     db_session.add(MedicalCondition(
         id=1, user_id=USER, name="Depression", type="condition", status="active",
         started_on=utcnow(), private=True,
@@ -189,7 +195,7 @@ async def test_a_private_row_never_reaches_the_summary(db_session):
     out = await handle_summary_query(db_session, USER, "health summary for the week")
 
     assert out is not None
-    assert "Asthma" in out["reply"] and "Depression" not in out["reply"]
+    assert "Asthma" in out["reply"] and "Depression" in out["reply"]
 
 
 async def test_a_deleted_allergy_no_longer_reaches_the_drug_path_either(db_session):

@@ -259,11 +259,18 @@ async def load_condition_index(db: AsyncSession) -> ConditionIndex | None:
     if _cache_loaded and (_now() - _cache_loaded_at) < CACHE_TTL_SECONDS:
         return _index_cache
     try:
-        rows = (
-            await db.execute(
-                select(ConditionRegistry).where(ConditionRegistry.active.is_(True))
-            )
-        ).scalars().all()
+        # SAVEPOINT: this swallows its own failure, so the chat turn that
+        # called it carries on — and on PostgreSQL a failed statement aborts
+        # the whole transaction, so every later read in that turn would fail
+        # too. The savepoint keeps the failure to this one statement.
+        async with db.begin_nested():
+            rows = (
+                await db.execute(
+                    select(ConditionRegistry).where(
+                        ConditionRegistry.active.is_(True)
+                    )
+                )
+            ).scalars().all()
         if rows:
             entries = [
                 RegistryEntry(

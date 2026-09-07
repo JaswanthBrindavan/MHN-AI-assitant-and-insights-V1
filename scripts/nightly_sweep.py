@@ -47,7 +47,10 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
     # means "the system", never "an unknown user".
     job = JobRun(name="nightly_sweep", trigger="cron", status="running", started_at=now)
     db.add(job)
-    await db.flush()
+    # Committed on its own so the row survives the rollback a failure below
+    # needs, and can then be marked failed. A "failed" that is only flushed is
+    # discarded with the transaction, and the sweep fails invisibly.
+    await db.commit()
 
     try:
         user_ids = (
@@ -75,8 +78,6 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
                 )
             )
 
-        job.status = "succeeded"
-        job.finished_at = utcnow()
         # Symptom episodes nobody has mentioned in STALE_AFTER are over. Read
         # paths already filter them out; this is where the rows actually go,
         # because a chat turn is the wrong place to run a cleanup.
@@ -140,13 +141,19 @@ async def run_sweep(db: AsyncSession, now: datetime | None = None) -> dict:
                 batch_size=settings.retention_batch_size,
             )
         )
+        # Only now. Erasure and retention are the two legally significant
+        # steps, and "succeeded" recorded before they ran was recording a
+        # claim the sweep had not yet earned.
+        job.status = "succeeded"
+        job.finished_at = utcnow()
+        await db.commit()
     except Exception as exc:  # noqa: BLE001 — record failure on the job row
+        await db.rollback()
         job.status = "failed"
         job.finished_at = utcnow()
         job.error = str(exc)
-        await db.flush()
+        await db.commit()
         raise
-    await db.flush()
     return result
 
 

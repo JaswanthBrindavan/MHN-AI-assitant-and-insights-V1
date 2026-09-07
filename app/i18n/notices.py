@@ -17,8 +17,13 @@ model-corrupted at runtime.
 
 from __future__ import annotations
 
-# language code -> one-sentence notice (native script).
+# language code -> one-sentence notice (native script; "hi-Latn" mirrors the
+# reader's Latin script, since the router only ever claims Hindi).
 ENGLISH_FALLBACK_NOTICE: dict[str, str] = {
+    "hi-Latn": (
+        "Maaf kijiye — abhi poori Hindi seva uplabdh nahi hai, isliye jawab "
+        "angrezi mein diya gaya hai."
+    ),
     "hi": "क्षमा करें — अभी पूरी हिंदी सेवा उपलब्ध नहीं है, इसलिए उत्तर अंग्रेज़ी में दिया गया है।",
     "bn": "দুঃখিত — এই মুহূর্তে সম্পূর্ণ বাংলা পরিষেবা উপলব্ধ নেই, তাই উত্তরটি ইংরেজিতে দেওয়া হয়েছে।",
     "pa": "ਮੁਆਫ਼ ਕਰਨਾ — ਇਸ ਸਮੇਂ ਪੂਰੀ ਪੰਜਾਬੀ ਸੇਵਾ ਉਪਲਬਧ ਨਹੀਂ ਹੈ, ਇਸ ਲਈ ਜਵਾਬ ਅੰਗਰੇਜ਼ੀ ਵਿੱਚ ਦਿੱਤਾ ਗਿਆ ਹੈ।",
@@ -33,6 +38,12 @@ ENGLISH_FALLBACK_NOTICE: dict[str, str] = {
 
 
 def english_fallback_notice(lang: str) -> str | None:
-    """The notice for a language, or None for English/unknown codes."""
-    base = (lang or "").split("-", 1)[0].lower()
-    return ENGLISH_FALLBACK_NOTICE.get(base)
+    """The notice for a language, or None for English/unknown codes.
+
+    The full code is tried first so "hi-Latn" gets the Latin-script line;
+    every other "-Latn" code falls back to its native-script notice.
+    """
+    code = (lang or "").strip()
+    if code in ENGLISH_FALLBACK_NOTICE:
+        return ENGLISH_FALLBACK_NOTICE[code]
+    return ENGLISH_FALLBACK_NOTICE.get(code.split("-", 1)[0].lower())

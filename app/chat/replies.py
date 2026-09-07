@@ -104,6 +104,16 @@ CARRIED_ESCALATION = (
     "it rather than waiting."
 )
 
+# The floor when the open episodes could not be READ. The floor fails closed
+# (see the orchestrator), so the banner still leads — but "you mentioned
+# something earlier" is a claim we could not check, and a banner that asserts
+# something false is one people learn to skip. Same marker constraint as above.
+UNCHECKED_ESCALATION = (
+    "Before that — I could not check just now whether something you mentioned "
+    "earlier is still unresolved. If anything you have described can be "
+    "serious, please seek medical care promptly rather than waiting."
+)
+
 # Supportive self-harm reply. Tele-MANAS 14416 is India's national 24x7
 # mental-health helpline; the digit-fidelity check in app/translate/service.py
 # guarantees the number survives machine translation.

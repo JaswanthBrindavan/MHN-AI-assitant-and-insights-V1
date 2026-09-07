@@ -279,6 +279,26 @@ _SELF_GRADING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A comparison against the reader's OWN earlier days is not a grade. "Your
+# sleep averaged 5.5 h over the last 3 days, below your usual 7.0 h" states
+# two figures from their record and draws no line anyone has to agree with;
+# it is the exact distinction `app/patterns/baseline.py` is built on, and the
+# wording of every Insights card and the yesterday review. Those sentences
+# now reach chat through get_trends_and_patterns, and "below" plus a figure
+# plus "your sleep" is this rule's own shape, so the reader's own trend was
+# being replaced with the safe reply the moment the model quoted it.
+#
+# Only the comparator ANCHORED to the reader's own baseline is lifted out
+# before the verdict check, so "below your usual 7 h and below the
+# recommended 8 h" is still a grade -- the second "below" stands.
+_OWN_BASELINE_RE = re.compile(
+    r"\b(?:below|above"
+    r"|(?:lower|higher|shorter|longer|more|less|better|worse|fewer)\s+than)"
+    r"\s+(?:your\s+(?:own\s+)?(?:usual|recent\s+average|baseline|average"
+    r"|typical|normal)\b|usual\b|you\s+usually\b)",
+    re.IGNORECASE,
+)
+
 
 def grades_a_wearable_figure(text: str) -> bool:
     """True when a sentence puts a verdict on the reader's own wearable number."""
@@ -287,6 +307,7 @@ def grades_a_wearable_figure(text: str) -> bool:
         scope = sentence
         if i and _BACKREF_RE.match(sentence) and _NORMATIVE_RE.search(sentence):
             scope = sentences[i - 1] + " " + sentence
+        scope = _OWN_BASELINE_RE.sub(" ", scope)
         graded = _VERDICT_RE.search(scope)
         # A traffic light or a named score carries the grade on its own, so
         # it is exempt from the figure conjunct: "your sleep score is amber"
@@ -338,6 +359,58 @@ _PERSONAL_CLEARANCE_RE = re.compile(
     r"|\byou\s+(?:should|will|'ll|\u2019ll|would|could)\s+be\s+"
     r"(?:fine|ok|okay|safe|clear)\s+to\s+(?:take|use|start|have|continue)\b"
     r"|\byou\s+can\s+(?:safely|certainly)\s+(?:take|use|start|have|continue)\b",
+    re.IGNORECASE,
+)
+
+# A claim to have DONE something Davi cannot do. Davi has no way to set a
+# reminder or an alarm, book or cancel an appointment, contact a doctor or
+# emergency services, or place an order. The system prompt now says so, but a
+# prompt is an instruction and this is the enforcement: "I've set a reminder
+# for 9pm" is worse than a refusal, because the reader then does not set one.
+#
+# Gated on a first-person COMPLETION or PROMISE auxiliary ("I've", "I have",
+# "I'll", "I will"), so the wordings the prompt actually asks for — "I can't
+# set a reminder", "you can set one in the Medications section" — both pass.
+#
+# The verb list deliberately excludes add/log/record/stop/remove: those are
+# the medication-list and lifestyle bookkeeping Davi really does perform, and
+# "I've added metformin to your list" must stay sayable.
+#
+# KNOWN GAPS, stated rather than papered over: a bare past tense ("I set that
+# up for you"), a subjectless confirmation ("Done — reminder for 9pm") and a
+# passive about an appointment rather than a reminder ("the appointment has
+# been booked") are not caught. Closing the first two means dropping the
+# auxiliary gate, which is what keeps this off ordinary prose; the third
+# would block "your appointment was booked on 3 May", which can be TRUE of a
+# consultation already on the reader's record.
+_UNDOABLE_OBJECTS = (
+    r"reminders?|alarms?|calendar(?:\s+(?:entry|event|invite))?|appointments?"
+    r"|consultations?|ambulance|emergency services|lab tests?|blood tests?"
+    r"|delivery|prescription refill"
+)
+_FIRST_PERSON = r"\bi(?:'|’)?(?:ve|ll|\s+have|\s+will|\s+am\s+going\s+to)\s+"
+_FALSE_ACTION_CLAIM_RE = re.compile(
+    # "I've booked your appointment", "I have set an alarm for 9pm"
+    _FIRST_PERSON
+    + r"(?:just\s+|already\s+|now\s+|gone\s+ahead\s+and\s+)*"
+    r"(?:set(?:\s+up)?|scheduled|booked|arranged|creat\w+|plac\w+|order\w+"
+    r"|cancell?\w*|made|sent|contacted|call\w+|notified|alerted)\b"
+    rf"[^.?!]{{0,40}}?\b(?:{_UNDOABLE_OBJECTS})\b"
+    # "I'll remind you at 9pm" — the promise, with no object noun at all.
+    r"|" + _FIRST_PERSON
+    + r"(?:just\s+|already\s+)*(?:remind|reminded|alert\w*|ping\w*|notif\w+)"
+    r"\s+(?:you|him|her|them)\b"
+    # "I've set that up for you" — vague object, unmistakable verb.
+    r"|" + _FIRST_PERSON
+    + r"(?:just\s+|already\s+)*"
+    r"(?:set|scheduled|booked|arranged|cancell?ed)\s+"
+    r"(?:that|this|it|everything|you)\b"
+    # "Your reminder is set" — the passive form, no first person at all.
+    # reminder/alarm ONLY: "your appointment was booked on 3 May" can be a
+    # true statement about a real consultation on the reader's record, and a
+    # guard that blocks a true fact is worse than one that misses a phrasing.
+    r"|\b(?:reminder|alarm)s?\s+(?:is|are|has\s+been|have\s+been|was|were)"
+    r"\s+(?:now\s+)?(?:set|booked|scheduled|created|cancell?ed)\b",
     re.IGNORECASE,
 )
 
@@ -394,6 +467,8 @@ def find_banned(
         return "absence-as-finding"
     if _PERSONAL_CLEARANCE_RE.search(text):
         return "personal-clearance"
+    if _FALSE_ACTION_CLAIM_RE.search(text):
+        return "false-action-claim"
     if _DIAGNOSTIC_RE.search(text):
         return "diagnostic-assertion"
     if extra_conditions:

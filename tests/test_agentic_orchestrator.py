@@ -158,6 +158,21 @@ async def test_tools_are_offered_at_none_risk(db_session):
     assert "get_latest_metric" in provider.calls[0]["tools"]
 
 
+async def test_the_trends_tool_is_offered_and_the_offer_is_the_same_for_everyone(
+    db_session,
+):
+    """The offered tools are part of the cached prefix. Two readers asking two
+    different things must be offered the identical list, or the cache misses
+    on every turn."""
+    first = FakeProvider(turns=[LLMTurn(text="General guidance.")])
+    second = FakeProvider(turns=[LLMTurn(text="General guidance.")])
+    await handle_chat(db_session, uuid.uuid4(), "how has my sleep been this month?", first)
+    await handle_chat(db_session, uuid.uuid4(), "what helps blood pressure?", second)
+    assert "get_trends_and_patterns" in first.calls[0]["tools"]
+    assert first.calls[0]["tools"] == second.calls[0]["tools"]
+    assert first.calls[0]["system"].split("\n\n")[0] == second.calls[0]["system"].split("\n\n")[0]
+
+
 # --------------------------------------------------------------------------- #
 # The guards that run AFTER the model
 # --------------------------------------------------------------------------- #

@@ -283,3 +283,202 @@ async def test_several_tool_calls_in_one_turn_all_succeed(
 
     # And the session is still usable for everything that follows.
     assert (await db_session.execute(text("SELECT 1"))).scalar() == 1
+
+
+# --------------------------------------------------------------------------- #
+# get_trends_and_patterns — the assistant can see what app/patterns computes
+# --------------------------------------------------------------------------- #
+def test_the_trends_tool_is_offered():
+    """Audit gap: ~2,200 lines of trend work, and chat imported one helper."""
+    assert "get_trends_and_patterns" in {s.name for s in TOOL_SPECS}
+    assert "get_trends_and_patterns" in EXECUTORS
+
+
+def test_the_trends_tool_schema_is_a_deploy_constant():
+    """The tool schemas are the larger half of the cached prefix. A schema
+    that varied per reader or per flag would miss the cache on every turn."""
+    from app.chat.tools.definitions import GET_TRENDS_AND_PATTERNS
+    from app.patterns.service import TREND_METRICS
+
+    first = json.dumps(GET_TRENDS_AND_PATTERNS.input_schema, sort_keys=True)
+    second = json.dumps(GET_TRENDS_AND_PATTERNS.input_schema, sort_keys=True)
+    assert first == second
+    assert GET_TRENDS_AND_PATTERNS.input_schema["properties"]["metric"]["enum"] == list(
+        TREND_METRICS
+    )
+    assert isinstance(TOOL_SPECS, tuple)
+
+
+def _seed_wearable(db, user_id, *, days: int, short_last: bool = False):
+    """A run of complete days ending yesterday: sleep, steps, and a habit."""
+    from datetime import timedelta
+
+    from app.models.common import tracking_today, utcnow
+    from app.models.coredata import LifestyleLog, SahhaDailyTotal
+
+    today = tracking_today()
+    for i in range(1, days + 1):
+        day = today - timedelta(days=i)
+        # A short night on the most recent day, when asked for, so the
+        # yesterday review has a move to talk about.
+        sleep = 300.0 if (short_last and i == 1) else (360.0 if i <= days // 2 else 420.0)
+        db.add(SahhaDailyTotal(
+            user_id=user_id, metric="sleep_duration", bucket_start=day,
+            total=sleep, entries=1, days_counted=1,
+        ))
+        db.add(SahhaDailyTotal(
+            user_id=user_id, metric="steps", bucket_start=day,
+            total=7000.0, entries=1, days_counted=1,
+        ))
+        db.add(LifestyleLog(
+            user_id=user_id, log_type="coffee", quantity=1, unit="cup",
+            logged_at=utcnow().replace(hour=20 if i <= days // 2 else 8)
+            - timedelta(days=i),
+        ))
+
+
+async def _tool(db, user_id, **arguments):
+    visuals: list[dict] = []
+    result = await execute_tool(
+        db, user_id, _call("get_trends_and_patterns", **arguments), None,
+        visuals=visuals,
+    )
+    assert not result.is_error, result.content
+    return json.loads(result.content), visuals
+
+
+async def test_patterns_focus_returns_the_stored_artifacts(db_session):
+    """Real rows the sweep wrote, served as the Insights screen serves them."""
+    from app.patterns.engine import active_patterns, recompute_patterns
+
+    user = uuid.uuid4()
+    _seed_wearable(db_session, user, days=26)
+    await db_session.flush()
+    await recompute_patterns(db_session, user, reason="test")
+    stored = {r.pattern_key for r in await active_patterns(db_session, user)}
+    assert stored
+
+    payload, _ = await _tool(db_session, user, focus="patterns")
+    assert payload.get("found") is not False
+    assert payload.get("computed") is not False
+    assert {c["key"] for c in payload["patterns"]} <= stored
+    coffee = next(c for c in payload["patterns"] if c["key"].startswith("coffee__sleep"))
+    assert coffee["headline"] in payload["deterministic_reply"]
+    # Observational wording only: no cause, no grade.
+    assert "because" not in payload["deterministic_reply"].lower()
+    # The raw floats behind the sentence stay out of the prompt — a mean in
+    # minutes beside a sentence in hours is the fidelity trap.
+    assert "mean_with" not in coffee and "difference" not in coffee
+
+
+async def test_a_reader_with_no_data_is_told_not_enough_days_not_nothing_on_file(
+    db_session,
+):
+    """No data is 'not enough days yet', with the count — never a bare
+    'nothing on file', which the model reads as 'you have no records'."""
+    payload, _ = await _tool(db_session, uuid.uuid4(), focus="patterns")
+    assert payload["patterns"] == []
+    assert len(payload["not_yet"]) > 0
+    assert "enough days" in payload["deterministic_reply"]
+    assert "Nothing on file" not in json.dumps(payload)
+
+    payload, _ = await _tool(db_session, uuid.uuid4(), focus="trend",
+                             metric="sleep_duration")
+    assert payload["found"] is False
+    assert "no sleep readings" in payload["deterministic_reply"]
+
+    payload, _ = await _tool(db_session, uuid.uuid4(), focus="yesterday")
+    assert payload["found"] is False
+    assert "Nothing was recorded" in payload["deterministic_reply"]
+
+
+async def test_a_reader_the_sweep_never_reached_is_computed_once_and_stored(
+    db_session,
+):
+    """The sweep has never run in this deployment. A reader with 26 days of
+    data and no artifact must get their patterns, not 'nothing on file' —
+    and the rows are STORED, so the next read is a plain read."""
+    from app.patterns.engine import active_patterns
+
+    user = uuid.uuid4()
+    _seed_wearable(db_session, user, days=26)
+    await db_session.flush()
+    assert not await active_patterns(db_session, user)
+
+    payload, _ = await _tool(db_session, user, focus="patterns")
+    assert payload.get("computed") is not False
+    assert payload["patterns"] or payload["not_yet"]
+    rows = await active_patterns(db_session, user)
+    assert rows and all(r.recompute_reason == "first_use" for r in rows)
+
+
+async def test_a_sweep_that_produced_nothing_is_not_reported_as_no_data(
+    db_session, monkeypatch
+):
+    """Distinct from the empty-record case above: when neither the stored
+    rows nor the one-off compute yield anything, the payload says 'not
+    computed' and forbids the model from inferring an absence of data."""
+    from app.chat.tools import executors
+
+    async def _nothing(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(executors, "stored_cards", _nothing)
+    payload, _ = await _tool(db_session, uuid.uuid4(), focus="patterns")
+    assert payload["computed"] is False
+    assert "NOT a statement that they have no data" in payload["note"]
+    assert "found" not in payload
+
+
+async def test_trend_focus_reports_this_week_against_last_with_a_chart(db_session):
+    from app.chat.validation import validate_reply
+    from app.grounding.fidelity import values_traceable
+    from app.triage.red_flags import NONE
+
+    user = uuid.uuid4()
+    _seed_wearable(db_session, user, days=14)
+    await db_session.flush()
+
+    payload, visuals = await _tool(db_session, user, focus="trend",
+                                   metric="sleep_duration")
+    reply = payload["deterministic_reply"]
+    assert "Over the last 7 days" in reply
+    assert payload["direction"] == "down"
+    assert "trending down" in reply
+    # The series travels out of band, and the model is told a chart exists.
+    assert visuals and visuals[0]["metric"] == "sleep_duration"
+    assert visuals[0]["window_days"] == 14
+    assert payload["chart_shown_to_reader"]["title"].startswith("Sleep")
+    # A model quoting the sentence verbatim passes the fidelity guard, and
+    # the sentence itself passes the validator.
+    ok, stray = values_traceable(reply, [json.dumps(payload)])
+    assert ok, stray
+    assert validate_reply(reply, NONE).ok
+
+
+async def test_yesterday_focus_returns_the_review_and_what_it_rests_on(db_session):
+    from app.chat.validation import validate_reply
+    from app.triage.red_flags import NONE
+
+    user = uuid.uuid4()
+    _seed_wearable(db_session, user, days=16, short_last=True)
+    await db_session.flush()
+
+    payload, _ = await _tool(db_session, user, focus="yesterday")
+    assert payload.get("found") is not False
+    assert payload["heading"]
+    assert payload["reasoning"]
+    assert "sleep_duration" in payload["rests_on"]
+    assert "because" not in payload["deterministic_reply"].lower()
+    assert validate_reply(payload["deterministic_reply"], NONE).ok
+
+
+async def test_an_unknown_focus_or_metric_degrades_to_the_default_not_to_none(
+    db_session,
+):
+    """None would become 'nothing on file' — an assertion about the reader's
+    records made out of a model typo."""
+    payload, _ = await _tool(db_session, uuid.uuid4(), focus="nonsense",
+                             metric="deep_sleep")
+    assert payload["metric"] == "sleep_duration"
+    assert payload["provenance"]["path"] == "patterns_trend"

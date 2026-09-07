@@ -27,6 +27,7 @@ from datetime import date
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.erasure import is_pending
 from app.models.common import tracking_today
 from app.models.rules import PatternArtifact
 from app.patterns.core import Observation, content_hash
@@ -59,7 +60,13 @@ async def recompute_patterns(
     Condition Profiles the chat quotes, never generated: if the corpus has
     nothing, the card carries no "in general" line. A missing fact costs a
     line; a wrong one costs the reader's trust.
+
+    Never runs while an erasure is pending: the artifacts are one of the
+    tables the erasure destroys, and the nightly sweep would otherwise
+    re-derive them every night of the grace window.
     """
+    if await is_pending(db, user_id):
+        return 0
     observations = await compute(db, user_id, today=today)
     written = 0
     # The same anchor `compute` just used for its windows. A stamp naming a
@@ -138,3 +145,21 @@ async def active_patterns(db: AsyncSession, user_id) -> list[PatternArtifact]:
             )
         ).scalars().all()
     )
+
+
+async def stored_cards(db: AsyncSession, user_id) -> list[dict]:
+    """Stored cards, computing ONCE for a reader who has never been swept.
+
+    The one exception to "reads never compute", shared by the Insights route
+    and the chat tool so the two cannot answer the same reader differently.
+    It exists because the sweep has never actually run in this deployment —
+    `job_runs` is empty — and without it both would be permanently blank
+    rather than merely stale, which looks like a data problem instead of a job
+    nobody scheduled. The computed rows are STORED, so every later read is a
+    plain read.
+    """
+    rows = await active_patterns(db, user_id)
+    if not rows:
+        await recompute_patterns(db, user_id, reason="first_use")
+        rows = await active_patterns(db, user_id)
+    return [r.card or {} for r in rows]

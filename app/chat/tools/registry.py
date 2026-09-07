@@ -34,6 +34,7 @@ EXECUTORS = {
     "log_lifestyle_entry": executors.log_lifestyle_entry,
     "get_health_summary": executors.get_health_summary,
     "get_tracker_total": executors.get_tracker_total,
+    "get_trends_and_patterns": executors.get_trends_and_patterns,
     "get_family_members": executors.get_family_members,
     "get_condition_guidance": executors.get_condition_guidance,
     "lookup_medicine": executors.lookup_medicine,

@@ -482,11 +482,12 @@ async def handle_document_query(
         try:
             from app.models.core import User
 
-            owner_slug = (
-                await db.execute(
-                    select(User.user_name).where(User.id == member)
-                )
-            ).scalar_one_or_none()
+            async with db.begin_nested():  # a failed read must not poison the rest
+                owner_slug = (
+                    await db.execute(
+                        select(User.user_name).where(User.id == member)
+                    )
+                ).scalar_one_or_none()
         except Exception:  # noqa: BLE001 — user table may be absent standalone
             owner_slug = None
 
@@ -2604,18 +2605,19 @@ async def handle_correlation_query(
         if not candidates:
             return False
         try:
-            own = await active_medications(db, user_id)
-            names = {
-                part.lower()
-                for entry in own
-                for part in entry.split()
-                if len(part) > 3 and part.isalpha()
-            }
-            if names & set(candidates):
-                return True
-            for term in candidates:
-                if await find_drug(db, term) is not None:
+            async with db.begin_nested():  # a failed read must not poison the rest
+                own = await active_medications(db, user_id)
+                names = {
+                    part.lower()
+                    for entry in own
+                    for part in entry.split()
+                    if len(part) > 3 and part.isalpha()
+                }
+                if names & set(candidates):
                     return True
+                for term in candidates:
+                    if await find_drug(db, term) is not None:
+                        return True
         except Exception:  # noqa: BLE001 — never turn a question into a refusal
             logger.warning("medication check failed", exc_info=True)
             return False
@@ -3249,18 +3251,22 @@ async def handle_about_me_query(
         return None
 
     lines: list[str] = []
+    # Every read goes through `_section`: its own SAVEPOINT, and None on
+    # failure rather than an empty value. These used to be three bare
+    # try/excepts that turned a failure into "no row" — on PostgreSQL the
+    # FIRST failure aborted the transaction, so a broken profile read made the
+    # condition read fail too, and that rendered as "there are no conditions
+    # on your record": a confident clinical absence made out of an outage.
+    failed: list[str] = []
 
     if wants_profile:
-        try:
-            row = (
-                await db.execute(
-                    select(User.name, User.dob, User.gender).where(
-                        User.id == user_id
-                    )
-                )
-            ).first()
-        except Exception:  # noqa: BLE001 — a missing profile is not an error
-            row = None
+        result = await _section(
+            db, failed, "profile",
+            lambda: db.execute(
+                select(User.name, User.dob, User.gender).where(User.id == user_id)
+            ),
+        )
+        row = result.first() if result is not None else None
         if row is not None:
             name, dob, gender = row
             bits = [b for b in (name, _age_phrase(dob), gender) if b]
@@ -3269,11 +3275,10 @@ async def handle_about_me_query(
 
     # Conditions, for both questions: "who am I" without them is a name, and
     # the reader asking it in a health app is not asking for their name.
-    try:
-        conditions = await medical_records(db, user_id, type_="condition")
-    except Exception:  # noqa: BLE001
-        logger.warning("condition read failed", exc_info=True)
-        conditions = []
+    conditions = await _section(
+        db, failed, "conditions",
+        lambda: medical_records(db, user_id, type_="condition"),
+    )
 
     if conditions:
         named = "; ".join(
@@ -3281,20 +3286,26 @@ async def handle_about_me_query(
             for c in conditions[:8]
         )
         lines.append(f"Your records list: {named}.")
-    else:
-        # Absence of a RECORD, never absence of a condition.
+    elif conditions is not None:
+        # Absence of a RECORD, never absence of a condition — and only when
+        # the record was actually read. A failed read is reported below.
         lines.append(
             "There are no conditions on your record. That is what is written "
             "down here, not a statement that you have none."
         )
 
     if wants_profile:
-        try:
-            meds = await active_medications(db, user_id)
-        except Exception:  # noqa: BLE001
-            meds = []
+        meds = await _section(
+            db, failed, "medications", lambda: active_medications(db, user_id)
+        )
         if meds:
             lines.append(f"Current medications on record: {'; '.join(meds)}.")
+
+    if failed:
+        lines.append(
+            f"I could not read your {' or '.join(failed)} just now, so this is "
+            "not the whole record."
+        )
 
     lines.append(_NOT_MEDICAL_ADVICE)
     return {
@@ -3311,7 +3322,7 @@ async def handle_about_me_query(
             # "Something went wrong. Please try again." on every "who am I". The reply
             # was correct and complete the whole time; a diagnostic field killed it.
             # One key, one type: the length is still there, in the obvious way.
-            "conditions": sorted(c.name for c in conditions if c.name),
+            "conditions": sorted(c.name for c in conditions or () if c.name),
         },
     }
 

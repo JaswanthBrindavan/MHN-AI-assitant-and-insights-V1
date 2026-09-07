@@ -117,26 +117,33 @@ async def assemble(
     if await is_pending(db, user_id):
         return UserMemory()
 
-    # The assembled document, when there is a fresh one. One primary-key read
-    # instead of the twenty-odd this function otherwise issues.
+    # The assembled document, when there is a fresh one. It replaces the
+    # PROFILE slice and nothing else: its `_gather` holds no episodes and no
+    # recall, so returning here would drop both — with them the "same ongoing
+    # episode" instruction and long-term topic recall — while the risk floor
+    # still fired, leaving the reader a seek-care banner and none of the
+    # context that explains it. Whether a reader got their history would then
+    # depend on when the nightly sweep last ran.
     #
     # Falling back is ALWAYS safe: the live assembly below is what ran before
     # the document existed, and it is correct — just slower. So a missing,
     # stale or unreadable document costs latency, never an answer.
+    doc_block = ""
     try:
         row = await memory_document.get(db, user_id)
         if memory_document.is_fresh(row) and row is not None and row.prompt_block:
-            return UserMemory(profile_text=row.prompt_block, from_document=True)
+            doc_block = row.prompt_block
     except Exception:  # noqa: BLE001 — an optimisation must never break a turn
         logger.warning("memory document read failed; assembling live", exc_info=True)
         record_fail_open("memory_document")
 
-    profile_text = ""
-    try:
-        profile_text = render_profile(await get_profile(db, user_id))
-    except Exception:  # noqa: BLE001 — enrichment must never break a reply
-        logger.warning("profile context failed; continuing", exc_info=True)
-        record_fail_open("profile")
+    profile_text = doc_block
+    if not doc_block:
+        try:
+            profile_text = render_profile(await get_profile(db, user_id))
+        except Exception:  # noqa: BLE001 — enrichment must never break a reply
+            logger.warning("profile context failed; continuing", exc_info=True)
+            record_fail_open("profile")
 
     episodes: list = []
     episode_text = ""
@@ -162,6 +169,7 @@ async def assemble(
         episode_text=episode_text,
         recall_text=recall_text,
         episodes=episodes,
+        from_document=bool(doc_block),
     )
 
 

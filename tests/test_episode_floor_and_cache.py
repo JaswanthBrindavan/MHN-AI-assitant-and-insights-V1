@@ -496,6 +496,40 @@ def test_cutting_down_on_food_is_not_self_harm(message):
     assert result.level == NONE, message
 
 
+def test_the_dietary_idiom_guard_itself_fires():
+    """The layer BELOW the phrase list, tested on its own.
+
+    ``test_cutting_down_on_food_is_not_self_harm`` passed for eighteen months
+    while ``_CUTTING_IDIOM_RE`` matched nothing at all: the word boundaries in
+    it had been written as literal 0x08 backspace bytes, so the pattern
+    compiled and never fired. The outcome was still right, because narrowing
+    SELF_HARM_PHRASES away from a bare "been cutting" is what actually keeps
+    those sentences out of the table -- this regex is the second layer.
+
+    Testing only the outcome cannot tell a working guard from a dead one. If
+    the phrase list is ever widened again for recall, this is the assertion
+    that says whether anything is behind it.
+    """
+    from app.triage.red_flags import _CUTTING_IDIOM_RE
+
+    for message in (
+        "i have been cutting down on sugar",
+        "im cutting back on salt",
+        "trying to cut out sweets",
+        "i cut down on carbs",
+    ):
+        assert _CUTTING_IDIOM_RE.search(message), message
+
+    # Narrow on purpose: it must not swallow a real disclosure before the
+    # self-harm scan ever sees it.
+    for message in (
+        "i have been cutting myself",
+        "i keep cutting myself",
+        "i cut my wrists",
+    ):
+        assert not _CUTTING_IDIOM_RE.search(message), message
+
+
 @pytest.mark.parametrize("message", [
     "i have been cutting myself",
     "i keep cutting myself",
@@ -583,3 +617,81 @@ async def test_a_personal_turn_still_re_escalates(db_session):
         db_session, user_id, "should i be worried about this", FakeProvider()
     )
     assert result.risk_level == HIGH
+
+
+# --------------------------------------------------------------------------
+# The floor fails CLOSED
+# --------------------------------------------------------------------------
+#
+# The floor is a guard, not enrichment. It used to fail open: `open_episodes`
+# swallowed a database error and returned [], "nothing open" and "could not
+# look" became the same value, and a reader with an unresolved red flag lost
+# the seek-care banner on exactly the day the episode table was unreadable.
+
+async def _break_episode_reads(db) -> None:
+    """Make the REAL read fail, the way a missing migration would."""
+    from sqlalchemy import text
+
+    await db.execute(text("DROP TABLE active_symptom_states"))
+
+
+async def test_a_failed_episode_read_does_not_lower_the_floor(db_session):
+    """Could not read the episodes = behave as if the worst were true."""
+    from app.chat.replies import CARRIED_ESCALATION, UNCHECKED_ESCALATION
+
+    await _break_episode_reads(db_session)
+
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "should i be worried about this", FakeProvider()
+    )
+
+    assert result.risk_level == HIGH, (
+        f"a failed episode read dropped the floor to {result.risk_level}"
+    )
+    assert result.recommended_action == "seek_care_promptly"
+    # Honest about WHY: it says the check could not be made, and does not
+    # claim the reader mentioned something we could not see.
+    assert result.response_message.startswith(UNCHECKED_ESCALATION)
+    assert CARRIED_ESCALATION not in result.response_message
+    assert any(
+        "could not be checked" in step["detail"]
+        for step in result.trace if step["step"] == "Safety triage"
+    ), result.trace
+
+
+async def test_a_failed_episode_read_still_respects_the_message_gates(db_session):
+    """Failing closed means the worst the TABLE could hold — and the table
+    never raises a corpus lookup, so neither does its absence."""
+    await _break_episode_reads(db_session)
+
+    result = await handle_chat(
+        db_session, uuid.uuid4(), "what is diabetes", FakeProvider()
+    )
+    assert result.risk_level == NONE
+
+
+async def test_a_failed_receipt_write_does_not_poison_the_turn(
+    db_session, monkeypatch
+):
+    """A failed flush leaves the session needing a rollback on EVERY dialect.
+
+    Without the savepoint in `_write_receipt`, the next statement on the
+    session raises PendingRollbackError — so the memory write after the
+    receipt, and every read after that, fails with it.
+    """
+    from sqlalchemy import select
+
+    from app.chat.orchestrator import _write_receipt
+    from app.config import get_settings
+    from app.models.chat import RagTurnReceipt
+
+    # prompt_version is NOT NULL: the flush itself fails, not the Python.
+    monkeypatch.setattr(get_settings(), "llm_prompt_version", None)
+    await _write_receipt(
+        db_session, user_id=uuid.uuid4(), session_id=None, message="m",
+        model_name="fake",
+    )
+
+    # The session is still usable, and the half-written receipt is gone
+    # rather than waiting to fail the next flush too.
+    assert (await db_session.execute(select(RagTurnReceipt.id))).all() == []

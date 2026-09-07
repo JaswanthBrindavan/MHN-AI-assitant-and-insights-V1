@@ -32,7 +32,7 @@ from app.chat.abilities import (
     parse_tracker_add,
     parse_tracker_query,
 )
-from app.chat.agent import append_directive, recover, run_agent
+from app.chat.agent import append_directive, recover, run_agent, stream_turn
 from app.chat.context import (
     build_health_snapshot,
     build_patient_context,
@@ -74,6 +74,7 @@ from app.chat.replies import (
     IDENTITY_REPLIES,
     SCOPE_DECLINES,
     SELF_HARM_REPLY,
+    UNCHECKED_ESCALATION,
     pick,
     safe_reply,
 )
@@ -84,6 +85,7 @@ from app.chat.router import (
     route,
 )
 from app.chat.scope import is_off_topic
+from app.chat.streaming import AnswerSink
 from app.chat.tools.definitions import TOOL_SPECS
 from app.chat.tools.registry import execute_tool
 from app.chat.validation import redact_reason, validate_reply
@@ -169,7 +171,7 @@ def lang_hint(pivot, message: str) -> str:
     """The reader's language for notice selection — pivot detection first,
     script-range detection as the fallback."""
     if pivot is not None and pivot.language and pivot.language != "en":
-        return pivot.language
+        return pivot.display_language  # keeps "-Latn", so the notice can too
     return detect_language(message)
 
 
@@ -445,21 +447,26 @@ async def _write_receipt(
     """Write an auditable receipt (hashes only, never raw text). Fail-open."""
     settings = get_settings()
     try:
-        db.add(
-            RagTurnReceipt(
-                user_id=user_id,
-                session_id=session_id,
-                query_hash=_hash(message),
-                model_name=model_name,
-                prompt_version=settings.llm_prompt_version,
-                retrieved=retrieved,
-                grounding=grounding,
-                grounding_mode=settings.grounding_mode,
-                grounding_status=grounding_status,
-                used_rag=used_rag,
+        # SAVEPOINT: a failed flush leaves the session needing a rollback (on
+        # every dialect) and the pending row still in it, so without this the
+        # memory write that follows fails too. Rolling back the savepoint
+        # expunges the receipt and leaves the rest of the turn usable.
+        async with db.begin_nested():
+            db.add(
+                RagTurnReceipt(
+                    user_id=user_id,
+                    session_id=session_id,
+                    query_hash=_hash(message),
+                    model_name=model_name,
+                    prompt_version=settings.llm_prompt_version,
+                    retrieved=retrieved,
+                    grounding=grounding,
+                    grounding_mode=settings.grounding_mode,
+                    grounding_status=grounding_status,
+                    used_rag=used_rag,
+                )
             )
-        )
-        await db.flush()
+            await db.flush()
     except Exception:  # noqa: BLE001 — receipts must never break a reply
         logger.warning("receipt write failed", exc_info=True)
         record_fail_open("receipts")
@@ -515,6 +522,67 @@ async def _apply_grounding(
         return retry_report, retry
     logger.warning("grounding still failing after retry; degrading to safe reply")
     return retry_report, None
+
+
+async def _diagnostic_terms(db: AsyncSession) -> tuple[str, ...] | None:
+    """The registry's condition names for the diagnostic-assertion rule.
+    Fail-open: no index, no extra terms."""
+    try:
+        index = await load_condition_index(db)
+        return index.diagnostic_terms() if index is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _fidelity_sources(chunks: Sequence[RetrievedChunk], patient_text: str) -> list[str]:
+    """What a stated value may be traced to before any tool has run."""
+    sources = [c.content for c in chunks]
+    if patient_text:
+        sources.append(patient_text)
+    return sources
+
+
+async def _generate_streamed(
+    db: AsyncSession,
+    stream: AnswerSink,
+    provider: LLMProvider,
+    system: str | Sequence[str],
+    message: str,
+    chunks: list[RetrievedChunk],
+    patient_text: str,
+    *,
+    risk: str,
+    escalation: str,
+) -> str:
+    """The legacy engine's one model call, through the stream gate.
+
+    Same prompt and budget as ``provider.generate``; only the transport
+    differs. The gate is armed with exactly what the guards below will use —
+    and in enforce mode with the grounding analysis too, so an uncited
+    factual sentence that ``_apply_grounding`` would send back for rewriting
+    is never shown first.
+    """
+    def _grounded(raw: str) -> bool:
+        return analyze_grounding(
+            raw,
+            num_chunks=len(chunks),
+            has_patient_context=bool(patient_text),
+            retrieval_happened=bool(chunks),
+            chunk_texts=[c.content for c in chunks],
+            patient_text=patient_text,
+        ).status == "grounded"
+
+    extra_check = _grounded if get_settings().grounding_mode == "enforce" else None
+    stream.arm(
+        risk=risk,
+        sources=_fidelity_sources(chunks, patient_text),
+        extra_conditions=await _diagnostic_terms(db),
+        lead=f"{escalation} " if risk == HIGH else "",
+        extra_check=extra_check,
+    )
+    turn = await stream_turn(provider, system, [UserMessage(message)], (), stream)
+    stream.flush()
+    return turn.text
 
 
 async def _data_query_reply(db: AsyncSession, user_id: uuid.UUID) -> str:
@@ -1009,6 +1077,7 @@ async def _dispatch(
     pivot: InboundPivot | None = None,
     pending_med: dict | None = None,
     original_message: str | None = None,
+    stream: AnswerSink | None = None,
 ) -> ChatResult:
     tr = triage(message)
     # With an ACTIVE pivot, `message` is the MT English and the floor would
@@ -1097,24 +1166,48 @@ async def _dispatch(
     )
     try:
         _open = await open_episodes(db, user_id)
-        if (
-            not _corpus_lookup
-            and not _recovery
-            and not _unrelated_ask
-            and LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]
-        ):
-            episode_floor = HIGH
-    except Exception:  # noqa: BLE001 — memory must never break a reply
-        logger.warning("open-episode floor failed; using triage only", exc_info=True)
+        _carried_high = LEVEL_ORDER[episodes_worst_level(_open)] >= LEVEL_ORDER[HIGH]
+    except Exception:  # noqa: BLE001 — a guard FAILS CLOSED
+        # This is a guard, not enrichment, so it cannot fail open. It used to:
+        # a failed read became "no episodes" and the floor dropped, so a reader
+        # who described chest pain yesterday and never said it settled lost
+        # the seek-care banner on the one day the episode table was unreadable
+        # — silently, because `open_episodes` swallowed the error and nothing
+        # scrapes the fail-open counter.
+        #
+        # "Keep the floor" when the episodes could not be read means: behave
+        # as if the worst were true. We do not know whether an unresolved HIGH
+        # is on file, and the two ways of being wrong are not symmetric — a
+        # banner shown to someone with nothing open is one sentence of noise;
+        # a banner dropped for someone with an unresolved red flag is the
+        # failure this floor exists to prevent. The message-shape gates below
+        # still apply exactly as they do on a successful read: they are about
+        # THIS message, not the table, so a corpus lookup or a recovery report
+        # is not escalated either way.
+        #
+        # `_open` stays None so the prompt does not claim to know what is open,
+        # and the banner says the check could not be made (UNCHECKED_ESCALATION)
+        # rather than asserting the reader mentioned something.
+        logger.error("open-episode read failed; keeping a HIGH floor", exc_info=True)
         record_fail_open("episode_floor")
+        _open = None
+        _carried_high = True
+    if (
+        not _corpus_lookup
+        and not _recovery
+        and not _unrelated_ask
+        and _carried_high
+    ):
+        episode_floor = HIGH
     # Which banner the reply leads with. When the floor comes from an
     # unresolved EARLIER episode and this message raised nothing itself,
-    # "some of what you describe" is false — see CARRIED_ESCALATION.
-    escalation = (
-        CARRIED_ESCALATION
-        if episode_floor == HIGH and LEVEL_ORDER[risk] < LEVEL_ORDER[HIGH]
-        else HIGH_ESCALATION
-    )
+    # "some of what you describe" is false — see CARRIED_ESCALATION. And when
+    # the episodes could not be READ, "you mentioned something earlier" is a
+    # claim we cannot make — see UNCHECKED_ESCALATION.
+    if episode_floor == HIGH and LEVEL_ORDER[risk] < LEVEL_ORDER[HIGH]:
+        escalation = CARRIED_ESCALATION if _open is not None else UNCHECKED_ESCALATION
+    else:
+        escalation = HIGH_ESCALATION
     risk = max_level(risk, episode_floor)
     # Every reply composes in English; when the pivot is active the sidecar
     # translates the final text into the user's language and script. lang is
@@ -1139,6 +1232,10 @@ async def _dispatch(
     if tr.matched:
         t("Safety triage",
           f"{risk.upper()} — matched: {', '.join(repr(m) for m in tr.matched_terms[:4])}")
+    elif episode_floor != NONE and _open is None:
+        t("Safety triage",
+          f"{risk.upper()} — nothing in this message; earlier symptoms could "
+          "not be checked, so erring on the side of care")
     elif episode_floor != NONE:
         # Saying "no red flags detected" beside a seek-care banner reads as a
         # contradiction and hides WHY the turn escalated. This message raised
@@ -1348,6 +1445,7 @@ async def _dispatch(
         return await _dispatch_agentic(
             db, user_id, message, provider, session_id, tr, risk, lang,
             trace, t, pivot=pivot, episodes=_open, escalation=escalation,
+            stream=stream,
         )
 
     # 4) Deterministic data abilities — documents, tracker adds, metric
@@ -1490,9 +1588,12 @@ async def _dispatch(
     # enforce that). General education questions stay lean (no private data).
     if is_personal_health_query(message):
         try:
-            snapshot = await _stage(
-                "health_snapshot", build_health_snapshot(db, user_id)
-            )
+            # SAVEPOINT: on PostgreSQL a failed read aborts the transaction;
+            # without this the memory read and the receipt after it fail too.
+            async with db.begin_nested():
+                snapshot = await _stage(
+                    "health_snapshot", build_health_snapshot(db, user_id)
+                )
             if snapshot:
                 patient_text = (
                     f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
@@ -1674,7 +1775,13 @@ async def _dispatch(
     # validator enforces that) and not here in the user-visible trace either.
     t("Generate", "asking the assistant")
     try:
-        answer = await provider.generate(system=system, user=message)
+        if stream is not None:
+            answer = await _generate_streamed(
+                db, stream, provider, system, message, chunks, patient_text,
+                risk=risk, escalation=escalation,
+            )
+        else:
+            answer = await provider.generate(system=system, user=message)
     except Exception:  # noqa: BLE001 — fail open
         logger.warning("LLM provider failed; safe reply", exc_info=True)
         record_fail_open("provider")
@@ -1886,8 +1993,13 @@ async def handle_chat(
     provider: LLMProvider,
     session_id: uuid.UUID | None = None,
     translator: SidecarTranslator | None = None,
+    stream: AnswerSink | None = None,
 ) -> ChatResult:
     """Persist the turn, dispatch, then run deterministic compaction.
+
+    ``stream`` (the /chat/stream endpoint) receives the model's text as it is
+    generated, gated sentence by sentence — see app/chat/streaming.py. The
+    result is identical with or without it.
 
     Compaction fires after the assistant message and never raises. When the
     translation sidecar is configured, non-English messages are pivoted
@@ -1926,6 +2038,10 @@ async def handle_chat(
             db, user_id, work, provider, session_id, pivot=pivot,
             pending_med=pending_med,
             original_message=message if pivot.active else None,
+            # With a pivot the reader sees a TRANSLATION of the validated
+            # English, never the English itself: the engines get no sink and
+            # `finish` below delivers the translated reply whole.
+            stream=None if pivot.active else stream,
         )
 
     chat_turns.inc(engine=engine, risk=result.risk_level)
@@ -1959,6 +2075,8 @@ async def handle_chat(
         result.provenance["translation"] = {
             "language": lang_hint(pivot, message), "status": "english_notice",
         }
+        if stream is not None:
+            stream.feed(f"\n\n{notice}")
     if pivot.active and result.response_message:
         translated = await pivot_outbound(
             result.response_message, pivot, translator
@@ -1973,6 +2091,10 @@ async def handle_chat(
             result.provenance["translation"] = {
                 "language": pivot.display_language, "status": "fallback_english",
             }
+    if stream is not None:
+        # The text is final here. Whatever was streamed is reconciled with it
+        # BEFORE compaction, which may call the model again.
+        stream.finish(result.response_message)
     # Persist the reply's structured extras alongside the text so a restored
     # conversation keeps its document cards (and action line) after a reload —
     # the extracted_intent JSON column already exists for exactly this kind of
@@ -2013,6 +2135,7 @@ async def _dispatch_agentic(
     pivot: InboundPivot | None = None,
     episodes: list | None = None,
     escalation: str = HIGH_ESCALATION,
+    stream: AnswerSink | None = None,
 ) -> ChatResult:
     """The tool-driven path.
 
@@ -2025,7 +2148,8 @@ async def _dispatch_agentic(
     patient_text, user_codes = await build_patient_context(db, user_id)
     if is_personal_health_query(message):
         try:
-            snapshot = await build_health_snapshot(db, user_id)
+            async with db.begin_nested():  # see the legacy path's note
+                snapshot = await build_health_snapshot(db, user_id)
             if snapshot:
                 patient_text = (
                     f"{patient_text}\n\n{snapshot}" if patient_text else snapshot
@@ -2195,10 +2319,22 @@ async def _dispatch_agentic(
     t("Generate",
       "asking the assistant, with access to your records" if offered
       else "asking the assistant — no records access on a red-flag turn")
+    # The registry's diagnostic terms, loaded before generation because the
+    # stream gate needs them; the buffered validator below uses the same ones.
+    extra_terms = await _diagnostic_terms(db)
+    if stream is not None:
+        # Same sources the fidelity ladder below checks against; the tool
+        # results join them round by round inside run_agent.
+        stream.arm(
+            risk=risk,
+            sources=_fidelity_sources(chunks, patient_text),
+            extra_conditions=extra_terms,
+            lead=f"{escalation} " if risk == HIGH else "",
+        )
     try:
         outcome = await run_agent(
             provider, system, [UserMessage(message)], offered, _executor,
-            max_rounds=settings.llm_max_tool_rounds,
+            max_rounds=settings.llm_max_tool_rounds, stream=stream,
         )
     except Exception:  # noqa: BLE001 — fail open, never crash the endpoint
         logger.warning("agent loop failed; safe reply", exc_info=True)
@@ -2268,15 +2404,11 @@ async def _dispatch_agentic(
         _menu = disclosure_menu(_shown)
         if _menu:
             display = display + "\n\n" + _menu
+            if stream is not None:
+                stream.feed(f"\n\n{_menu}")
     display = _lead(escalation, risk, display)
 
     degraded: str | None = None
-
-    try:
-        index = await load_condition_index(db)
-        extra_terms = index.diagnostic_terms() if index is not None else None
-    except Exception:  # noqa: BLE001
-        extra_terms = None
 
     async def _try_recover(reason: str, detail: str = "") -> bool:
         """One corrective retry before falling back. True if it worked.
