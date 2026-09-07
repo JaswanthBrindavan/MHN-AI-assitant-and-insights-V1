@@ -884,9 +884,14 @@ async def handle_family_record_query(
 # Tracker adds
 # --------------------------------------------------------------------------- #
 async def handle_tracker_add(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    add: TrackerAdd | None = None,
 ) -> dict | None:
-    add: TrackerAdd | None = parse_tracker_add(message)
+    # ``message`` is parsed unless ``add`` is given -- a TOOL CALL passes its
+    # structured arguments directly (see abilities.tracker_add_for).
+    if add is None:
+        add = parse_tracker_add(message)
     if add is None:
         return None
     # mhn-spring stores water and alcohol in MILLILITRES and rejects any other
@@ -1030,7 +1035,9 @@ async def _latest_report_param(
 
 
 async def handle_metric_query(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    query: MetricQuery | None = None,
 ) -> dict | None:
     # Whose record? Guarded HERE, not only at the routes in, because every
     # entry-point guard so far has been bypassed by a route nobody had thought
@@ -1043,7 +1050,10 @@ async def handle_metric_query(
     if names_another_person(message):
         return None
 
-    query: MetricQuery | None = parse_metric_query(message)
+    # ``message`` is parsed unless ``query`` is given (a TOOL CALL's
+    # structured argument, see abilities.metric_query_for).
+    if query is None:
+        query = parse_metric_query(message)
     if query is None:
         return None
     spec = METRIC_REGISTRY[query.metric]
@@ -2535,13 +2545,18 @@ async def _series_history(
 
 
 async def handle_report_param_ask(
-    db: AsyncSession, user_id: uuid.UUID, message: str
+    db: AsyncSession, user_id: uuid.UUID, message: str,
+    *,
+    term: str | None = None,
 ) -> dict | None:
     """Answer ANY parameter present in the user's extracted reports — the
     curated registry covers headline metrics; this covers the rest of the
     THPs (basophils, RDW, GGT, …) by matching the asked term against the
-    test names actually on file. Only answers when a match exists."""
-    term = parse_report_param_ask(message)
+    test names actually on file. Only answers when a match exists.
+
+    ``message`` is parsed unless ``term`` is given (a TOOL CALL's parameter)."""
+    if term is None:
+        term = parse_report_param_ask(message)
     if term is None:
         return None
     want = param_tokens(term)

@@ -381,13 +381,18 @@ _UNIT_CANON = {
 }
 
 
+_DAYS_AGO_RE = re.compile(r"\b(\d{1,3})\s+days?\s+(?:ago|back)\b")
+
+
 def _day_offset(message: str) -> int:
     low = message.lower()
     if "day before yesterday" in low:
         return 2
     if "yesterday" in low or "last night" in low:
         return 1
-    return 0
+    # "3 days ago" used to fall through to 0 and be logged TODAY, silently.
+    m = _DAYS_AGO_RE.search(low)
+    return int(m.group(1)) if m else 0
 
 
 def parse_tracker_add(message: str) -> TrackerAdd | None:
@@ -426,6 +431,44 @@ def parse_tracker_add(message: str) -> TrackerAdd | None:
             kind=kind,
         )
     return None
+
+
+#: "smoking" is the tool schema's own word for the kind
+#: (definitions.LOG_LIFESTYLE_ENTRY); ``_KIND_TO_LOG_TYPE`` names only drinks.
+_SMOKING_KINDS = frozenset(
+    {"smoking", "cigarette", "cigarettes", "cig", "cigs", "beedi", "beedis"}
+)
+#: The ``days_ago`` ceiling the tool schema declares.
+TOOL_MAX_DAYS_AGO = 30
+
+
+def tracker_add_for(kind: str, quantity: float, days_ago: int) -> TrackerAdd | None:
+    """Resolve a TOOL's structured arguments against the parser's own tables.
+
+    Structured, not synthesised: "I had 3 coffee 3 days ago" was re-read by
+    ``parse_tracker_add``, whose ``_day_offset`` knew no "N days ago", so the
+    row landed on TODAY and the reply said so -- while the tool echoed
+    ``days_ago=3`` back to the model. And "smoking", the schema's own word for
+    the kind, parsed to nothing at all. Same reason ``tracker_query_for`` exists.
+
+    None means "cannot log that" -- the executor says why; it never guesses a
+    kind, a size or a day.
+    """
+    low = kind.strip().lower()
+    if not 0 < quantity <= 100 or not 0 <= days_ago <= TOOL_MAX_DAYS_AGO:
+        return None
+    if low in _SMOKING_KINDS:
+        return TrackerAdd(
+            log_type="smoking", quantity=quantity, unit="cigarette",
+            day_offset=days_ago,
+        )
+    log_type = _KIND_TO_LOG_TYPE.get(low)
+    if log_type is None:
+        return None
+    return TrackerAdd(
+        log_type=log_type, quantity=quantity,
+        unit=_KIND_DEFAULT_UNIT.get(low, "cup"), day_offset=days_ago, kind=low,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -620,6 +663,20 @@ def parse_metric_query(message: str) -> MetricQuery | None:
             if not re.search(r"\bmy\b|\bmine\b|\blatest\b|\blast\b|\bcurrent\b", low):
                 return None
             return MetricQuery(metric=key, wants_trend=bool(_TREND_RE.search(low)))
+    return None
+
+
+def metric_query_for(metric: str) -> MetricQuery | None:
+    """Resolve a TOOL's metric argument: a registry key, or a spoken name
+    matched against the same ``_METRIC_TERMS`` the free-text parser uses --
+    without synthesising a sentence for that parser to re-read."""
+    key = metric.strip().lower().replace(" ", "_")
+    if key in METRIC_REGISTRY:
+        return MetricQuery(metric=key)
+    spoken = key.replace("_", " ")
+    for pattern, found in _METRIC_TERMS:
+        if re.search(rf"(?:{pattern})", spoken):
+            return MetricQuery(metric=found)
     return None
 
 
