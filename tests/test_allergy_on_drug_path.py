@@ -2,7 +2,7 @@
 
 The drug-information handler returns from the orchestrator BEFORE
 `build_patient_context` runs, and it sits AFTER the engine branch — so it is
-legacy-only, and `CHAT_ENGINE` defaults to legacy. (Deliberately not citing
+legacy-only (the test pins that engine). (Deliberately not citing
 line numbers: they moved once already, in the medicine_master merge.)
 
 `build_drug_reply(drug)` took no user and no session, so the reader's allergies

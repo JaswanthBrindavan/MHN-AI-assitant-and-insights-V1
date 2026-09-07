@@ -381,13 +381,18 @@ _UNIT_CANON = {
 }
 
 
+_DAYS_AGO_RE = re.compile(r"\b(\d{1,3})\s+days?\s+(?:ago|back)\b")
+
+
 def _day_offset(message: str) -> int:
     low = message.lower()
     if "day before yesterday" in low:
         return 2
     if "yesterday" in low or "last night" in low:
         return 1
-    return 0
+    # "3 days ago" used to fall through to 0 and be logged TODAY, silently.
+    m = _DAYS_AGO_RE.search(low)
+    return int(m.group(1)) if m else 0
 
 
 def parse_tracker_add(message: str) -> TrackerAdd | None:
@@ -426,6 +431,44 @@ def parse_tracker_add(message: str) -> TrackerAdd | None:
             kind=kind,
         )
     return None
+
+
+#: "smoking" is the tool schema's own word for the kind
+#: (definitions.LOG_LIFESTYLE_ENTRY); ``_KIND_TO_LOG_TYPE`` names only drinks.
+_SMOKING_KINDS = frozenset(
+    {"smoking", "cigarette", "cigarettes", "cig", "cigs", "beedi", "beedis"}
+)
+#: The ``days_ago`` ceiling the tool schema declares.
+TOOL_MAX_DAYS_AGO = 30
+
+
+def tracker_add_for(kind: str, quantity: float, days_ago: int) -> TrackerAdd | None:
+    """Resolve a TOOL's structured arguments against the parser's own tables.
+
+    Structured, not synthesised: "I had 3 coffee 3 days ago" was re-read by
+    ``parse_tracker_add``, whose ``_day_offset`` knew no "N days ago", so the
+    row landed on TODAY and the reply said so -- while the tool echoed
+    ``days_ago=3`` back to the model. And "smoking", the schema's own word for
+    the kind, parsed to nothing at all. Same reason ``tracker_query_for`` exists.
+
+    None means "cannot log that" -- the executor says why; it never guesses a
+    kind, a size or a day.
+    """
+    low = kind.strip().lower()
+    if not 0 < quantity <= 100 or not 0 <= days_ago <= TOOL_MAX_DAYS_AGO:
+        return None
+    if low in _SMOKING_KINDS:
+        return TrackerAdd(
+            log_type="smoking", quantity=quantity, unit="cigarette",
+            day_offset=days_ago,
+        )
+    log_type = _KIND_TO_LOG_TYPE.get(low)
+    if log_type is None:
+        return None
+    return TrackerAdd(
+        log_type=log_type, quantity=quantity,
+        unit=_KIND_DEFAULT_UNIT.get(low, "cup"), day_offset=days_ago, kind=low,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -620,6 +663,20 @@ def parse_metric_query(message: str) -> MetricQuery | None:
             if not re.search(r"\bmy\b|\bmine\b|\blatest\b|\blast\b|\bcurrent\b", low):
                 return None
             return MetricQuery(metric=key, wants_trend=bool(_TREND_RE.search(low)))
+    return None
+
+
+def metric_query_for(metric: str) -> MetricQuery | None:
+    """Resolve a TOOL's metric argument: a registry key, or a spoken name
+    matched against the same ``_METRIC_TERMS`` the free-text parser uses --
+    without synthesising a sentence for that parser to re-read."""
+    key = metric.strip().lower().replace(" ", "_")
+    if key in METRIC_REGISTRY:
+        return MetricQuery(metric=key)
+    spoken = key.replace("_", " ")
+    for pattern, found in _METRIC_TERMS:
+        if re.search(rf"(?:{pattern})", spoken):
+            return MetricQuery(metric=found)
     return None
 
 
@@ -1478,39 +1535,16 @@ def parse_tracker_query(message: str) -> TrackerQuery | None:
 
 
 # --------------------------------------------------------------------------- #
-# Medication commands ("add metformin 500mg", "stopped my amoxicillin",
-# "remove atorvastatin") — the write goes to mhn-spring, never Davi's DB.
+# Medication words in an effect question ("does my metformin affect my sleep")
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class MedicationCommand:
-    action: str  # "add" | "stop" | "remove"
-    name: str
-    strength: str | None = None  # "500 mg", "10mg"
-    is_prn: bool = False
-
-
-# Verb → action. Stop and complete/finish are the same thing to Spring (the
-# course ends); remove/delete erases it. "add/start/began taking" opens one.
-_MED_ADD_RE = re.compile(
-    r"\b(?:add|start(?:ed)?|began|begin|log|record|put me on|now (?:on|taking)|"
-    r"prescribed)\b",
-    re.IGNORECASE,
-)
-_MED_STOP_RE = re.compile(
-    r"\b(?:stop(?:ped)?|complet(?:e|ed)|finish(?:ed)?|done with|"
-    r"came off|got off|no longer (?:on|taking)|ended)\b",
-    re.IGNORECASE,
-)
-_MED_REMOVE_RE = re.compile(
-    r"\b(?:remove|delete|take (?:it |this )?off (?:my )?list|"
-    r"get rid of|clear)\b",
-    re.IGNORECASE,
-)
-# A medication signal must be present so "stop worrying" / "add sugar" never
-# parse as med commands: either a context word, or a real dose unit (mg/mcg/
-# ml/iu — NOT bare "units", which alcohol uses). The parser stays conservative
-# on purpose; the agentic engine's model handles the fuzzier phrasings
-# ("I stopped my amoxicillin") the deterministic path deliberately skips.
+# The add/stop/remove COMMAND parser that used to open this section is gone:
+# `app/chat/medication_flow.py` owns those writes on both engines, with the
+# guards (question framing, third party, dose changes, conditionals) this one
+# never had, and nothing in production called it -- only its own tests kept
+# it alive beside a complete second implementation.
+# A medication NOUN. `parse_correlation_query` declines an effect question
+# that carries one ("does my bp tablet affect my sleep") to the prescriber
+# rather than answering it from lifestyle data.
 _MED_CONTEXT_RE = re.compile(
     r"\b(?:medication|medicine|med|meds|tablet|tablets|pill|pills|capsule|"
     r"capsules|drug|dose|course|syrup|injection)\b",
@@ -1584,79 +1618,6 @@ def medication_candidates(message: str) -> tuple[str, ...]:
         if len(seen) == 3:
             break
     return tuple(seen)
-_DOSE_UNIT_RE = re.compile(
-    r"\b\d+(?:\.\d+)?\s?(?:mg|mcg|ml|iu)\b", re.IGNORECASE
-)
-# "metformin 500 mg", "10mg atorvastatin" — strength is optional.
-_STRENGTH_RE = re.compile(
-    r"\b(\d+(?:\.\d+)?)\s?(mg|mcg|g|ml|iu|units?)\b", re.IGNORECASE
-)
-# The drug name: a word (optionally hyphenated) after the verb, before a
-# strength/frequency clause. Deliberately conservative — a real medicine name
-# is a single token here; multi-word brands are matched by the DB resolve step
-# when stopping/removing.
-_MED_NAME_RE = re.compile(
-    r"\b(?:my |the |this )?([a-z][a-z0-9\-]{2,40})\b", re.IGNORECASE
-)
-_MED_STOPWORDS = frozenset({
-    "add", "start", "started", "began", "begin", "log", "record", "stop",
-    "stopped", "complete", "completed", "finish", "finished", "remove",
-    "delete", "taking", "take", "took", "put", "now", "prescribed", "done",
-    "came", "got", "off", "longer", "ended", "get", "rid", "clear", "medication",
-    "medicine", "med", "meds", "tablet", "tablets", "pill", "pills", "capsule",
-    "capsules", "drug", "dose", "course", "syrup", "injection", "the", "this",
-    "that", "my", "for", "and", "with", "daily", "twice", "once", "every",
-    "morning", "night", "evening", "needed", "prn",
-})
-
-
-def _med_name(message: str, strength_match: re.Match[str] | None) -> str | None:
-    """First plausible drug-name token that is not a command/stop word."""
-    # Search the whole message; the strength (if any) marks a natural end but a
-    # name can also follow it ("500mg of metformin").
-    for m in _MED_NAME_RE.finditer(message):
-        token = m.group(1)
-        low = token.lower()
-        if low in _MED_STOPWORDS or low.isdigit():
-            continue
-        # Skip a pure unit token that the strength regex owns.
-        if re.fullmatch(r"mg|mcg|ml|iu|units?|g", low):
-            continue
-        return token
-    return None
-
-
-def parse_medication_command(message: str) -> MedicationCommand | None:
-    """Parse an add/stop/remove medication instruction, or None.
-
-    Requires BOTH an action verb AND a medication-context word, so ordinary
-    talk ("stop worrying", "tell me about metformin") never matches. "tell me
-    about X" has no action verb; "I take metformin" (bare statement) is left to
-    the model — only an explicit add/stop/remove is a command.
-    """
-    if not (_MED_CONTEXT_RE.search(message) or _DOSE_UNIT_RE.search(message)):
-        return None
-    if _MED_REMOVE_RE.search(message):
-        action = "remove"
-    elif _MED_STOP_RE.search(message):
-        action = "stop"
-    elif _MED_ADD_RE.search(message):
-        action = "add"
-    else:
-        return None
-    strength_match = _STRENGTH_RE.search(message)
-    name = _med_name(message, strength_match)
-    if name is None:
-        return None
-    strength = None
-    if strength_match:
-        strength = f"{strength_match.group(1)} {strength_match.group(2).lower()}"
-    is_prn = bool(re.search(r"\bas needed\b|\bprn\b|\bwhen (?:needed|required)\b",
-                            message, re.IGNORECASE))
-    return MedicationCommand(
-        action=action, name=name, strength=strength, is_prn=is_prn
-    )
-
 
 # --------------------------------------------------------------------------- #
 # "Who am I" / "what health do I have" — about the READER, not the assistant

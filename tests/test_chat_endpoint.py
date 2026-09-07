@@ -38,6 +38,7 @@ async def test_chat_identity(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_chat_data_query_no_data(client):
     resp = await client.post(
         "/api/v1/chat", headers=HDR, json={"message": "what is my family risk?"}
@@ -47,6 +48,7 @@ async def test_chat_data_query_no_data(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("legacy_engine")
 async def test_chat_symptom_rag_default(client):
     resp = await client.post(
         "/api/v1/chat", headers=HDR, json={"message": "what helps blood pressure?"}

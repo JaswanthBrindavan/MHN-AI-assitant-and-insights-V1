@@ -58,24 +58,18 @@ async def test_cross_session_recall_through_orchestrator(db_session):
     await handle_chat(db_session, USER, "tell me about diabetes", provider)
 
     # A NEW session (different session_id) recalls the prior topic in [P].
-    class Spy(FakeProvider):
-        def __init__(self):
-            super().__init__(responses=["General wellbeing info [GK]."])
-            self.system = ""
-
-        async def generate(self, *, system, user: str) -> str:
-            self.system = join_system(system)
-            return "General wellbeing info [GK]."
-
-    spy = Spy()
+    # Read the prompt from `calls`, which both engines record — a spy on
+    # `generate` sees nothing on the agentic engine.
+    spy = FakeProvider(responses=["General wellbeing info [GK]."])
     await handle_chat(
         db_session, USER, "how do I stay healthy?", spy,
         uuid.uuid4(),  # fresh session
     )
-    assert "previously asked about" in spy.system
+    system = join_system(spy.calls[0]["system"])
+    assert "previously asked about" in system
     # Unit env has no condition_registry, so the topic value is the code T2DM
     # (production resolves it to "Diabetes mellitus").
-    assert "t2dm" in spy.system.lower()
+    assert "t2dm" in system.lower()
 
 
 def _statements(engine) -> list[str]:

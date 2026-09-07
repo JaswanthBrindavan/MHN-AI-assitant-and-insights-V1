@@ -48,6 +48,8 @@ restartPolicyMaxRetries = 5
 #     Costs are tracked in project_docs/model-cost.md. Verify the prefix
 #     with: python -m scripts.cache_probe --model claude-sonnet-5
 #   GROUNDING_MODE=enforce
+#   CHAT_ENGINE=agentic     the code default too; set explicitly so the two
+#                           can never drift apart unnoticed again
 #   EMBEDDING_BASE_URL / EMBEDDING_MODEL — leave empty on Railway unless a
 #   hosted embedding endpoint is available; retrieval falls back to keyword
 #   ranking automatically (fail-open by design).

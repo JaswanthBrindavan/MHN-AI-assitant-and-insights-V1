@@ -193,17 +193,16 @@ async def test_personal_question_passes_snapshot_to_prompt(db_session, monkeypat
     await _seed_rich(db_session)
     await _seed_one_chunk(db_session)
 
-    captured = {}
-
-    class SpyProvider(FakeProvider):
-        async def generate(self, *, system, user: str) -> str:
-            captured["system"] = join_system(system)
-            return "Fatigue has many causes [1]. Discuss with your doctor."
-
-    await handle_chat(
-        db_session, USER, "why do I feel tired all the time?", SpyProvider()
+    # Read the prompt from `calls`, which both engines record. A spy on
+    # `generate` captures nothing on the agentic engine, and the "stays lean"
+    # twin below then passed vacuously against an empty string.
+    provider = FakeProvider(
+        responses=["Fatigue has many causes [1]. Discuss with your doctor."]
     )
-    sys = captured.get("system", "")
+    await handle_chat(
+        db_session, USER, "why do I feel tired all the time?", provider
+    )
+    sys = join_system(provider.calls[0]["system"])
     # The reader's own data reached the prompt as [P] context…
     assert "own recorded data" in sys
     assert "Metformin 500mg" in sys
@@ -218,18 +217,93 @@ async def test_educational_question_stays_lean(db_session, monkeypatch):
     await _seed_rich(db_session)
     await _seed_one_chunk(db_session)
 
-    captured = {}
-
-    class SpyProvider(FakeProvider):
-        async def generate(self, *, system, user: str) -> str:
-            captured["system"] = join_system(system)
-            return "Diabetes is a condition [1]."
-
+    provider = FakeProvider(responses=["Diabetes is a condition [1]."])
     await handle_chat(
-        db_session, USER, "what are the symptoms of diabetes?", SpyProvider()
+        db_session, USER, "what are the symptoms of diabetes?", provider
     )
-    sys = captured.get("system", "")
-    # No private data and no personalization directive on an educational query.
-    assert "own recorded data" not in sys
+    sys = join_system(provider.calls[0]["system"])
+    assert sys  # the prompt was actually captured — see the test above
+    # No private data on an educational query. (The personalization RULE is
+    # not probed: the agentic engine keeps it in its byte-identical cached
+    # prefix and lets the rule gate itself on the [P] block; legacy adds it
+    # only when the snapshot is present. What must stay out is the data.)
     assert "Metformin" not in sys
-    assert "Personalization:" not in sys
+    assert "blood sugar 142" not in sys
+
+
+# --------------------------------------------------------------------------- #
+# One list of medications per prompt (audit M6)
+# --------------------------------------------------------------------------- #
+# The memory document (app/memory/document.py) renders the reader's
+# medications and labs itself, at its own caps. When it is fresh it lands in
+# the same [P] block as the snapshot, and the model was seeing two medication
+# lists and two lab lists of different lengths with nothing saying which was
+# current — paying twice for the content the document's token budget exists
+# to protect.
+@pytest.mark.asyncio
+async def test_snapshot_leaves_meds_and_labs_to_the_document(db_session):
+    await _seed_rich(db_session)
+    snap = await build_health_snapshot(db_session, USER, from_document=True)
+    # What the document does NOT carry still renders…
+    assert "blood pressure 134/88" in snap and "blood sugar 142" in snap
+    assert "5.5 h of sleep" in snap and "bmi 28.4" in snap
+    assert "5 cups of coffee" in snap
+    # …and what it does carry is left to it.
+    assert "Metformin" not in snap
+    assert "HbA1c" not in snap and "Total Cholesterol" not in snap
+
+
+def _prompt_with_snapshot(provider: FakeProvider) -> str:
+    """The system prompt of the answer call — the one carrying the [P] block."""
+    for call in provider.calls:
+        if "own recorded data" in call["system"]:
+            return call["system"]
+    raise AssertionError("no call carried the reader's recorded data")
+
+
+@pytest.mark.parametrize("chat_engine", ["legacy", "agentic"])
+@pytest.mark.asyncio
+async def test_fresh_document_means_one_medication_list_per_prompt(
+    db_session, monkeypatch, chat_engine
+):
+    from app.config import get_settings
+    from app.memory import document as memory_document
+
+    monkeypatch.setattr(get_settings(), "chat_engine", chat_engine)
+    await _seed_rich(db_session)
+    await _seed_one_chunk(db_session)
+    assert await memory_document.refresh(db_session, USER) is not None
+
+    provider = FakeProvider(responses=[
+        "Fatigue has many causes [1]. Discuss with your doctor."
+    ])
+    await handle_chat(db_session, USER, "why do I feel tired all the time?", provider)
+    sys = _prompt_with_snapshot(provider)
+    # The document's list is the ONLY list.
+    assert "tracked medicines: Metformin 500mg" in sys
+    assert "Current medications on record" not in sys
+    assert sys.count("Metformin 500mg") == 1
+    assert sys.count("HbA1c 6.2") == 1
+    # The snapshot still contributes what the document does not carry.
+    assert "blood sugar 142" in sys and "5.5 h of sleep" in sys
+
+
+@pytest.mark.parametrize("chat_engine", ["legacy", "agentic"])
+@pytest.mark.asyncio
+async def test_no_fresh_document_keeps_the_snapshot_whole(
+    db_session, monkeypatch, chat_engine
+):
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "chat_engine", chat_engine)
+    await _seed_rich(db_session)
+    await _seed_one_chunk(db_session)
+
+    provider = FakeProvider(responses=[
+        "Fatigue has many causes [1]. Discuss with your doctor."
+    ])
+    await handle_chat(db_session, USER, "why do I feel tired all the time?", provider)
+    sys = _prompt_with_snapshot(provider)
+    assert "Current medications on record: Metformin 500mg" in sys
+    assert "HbA1c 6.2 %" in sys
+    assert sys.count("Metformin 500mg") == 1

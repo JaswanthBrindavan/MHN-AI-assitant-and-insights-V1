@@ -626,3 +626,53 @@ async def test_on_topic_schedule_answer_beats_the_release_check(db_session):
     assert r is not None
     assert r["pending_med"]["stage"] == "confirm"
     assert r["pending_med"]["schedule_pattern"] == "M"
+
+
+# --------------------------------------------------------------------------- #
+# The confirmation names the SAME action the write then executes (audit M8)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("action", "phrase"),
+    [
+        ("add", "add dolo 650"),
+        ("stop", "stop dolo 650"),
+        ("remove", "remove dolo 650"),
+        ("stop_all", "stop all 3 dolo 650"),
+        ("remove_all", "remove all 3 dolo 650"),
+    ],
+)
+async def test_the_reask_names_the_action_that_yes_then_performs(
+    db_session, monkeypatch, action, phrase
+):
+    """Stop ends a course and keeps its history; remove erases it. The re-ask
+    used to say "remove" for BOTH (and dropped the "all N" entirely), then
+    executed whatever was stored — so the reader answered a question they
+    were never asked."""
+    seen = {}
+
+    async def _write(db, user_id, act, name, **kw):
+        seen["action"] = act
+        return {"reply": "done", "action": "medication_updated",
+                "provenance": {"ok": True}}
+
+    import app.chat.data_handlers as dh
+    monkeypatch.setattr(dh, "perform_medication_write", _write)
+
+    pending = {"stage": "confirm", "action": action, "name": "dolo 650",
+               "count": 3}
+    asked = await mf.handle_medication_turn(db_session, USER, "hmm", pending)
+    assert asked is not None and asked["pending_med"]["reasked"] is True
+    assert phrase in asked["reply"].lower(), asked["reply"]
+    # And "stop" must not be dressed as "remove" or vice versa.
+    other = "stop" if "remove" in action else "remove"
+    assert other not in asked["reply"].lower(), asked["reply"]
+
+    declined = await mf.handle_medication_turn(
+        db_session, USER, "no", asked["pending_med"])
+    assert declined is not None and phrase in declined["reply"].lower()
+    assert "action" not in seen
+
+    done = await mf.handle_medication_turn(
+        db_session, USER, "yes", asked["pending_med"])
+    assert done is not None and done["pending_med"] is None
+    assert seen["action"] == action
