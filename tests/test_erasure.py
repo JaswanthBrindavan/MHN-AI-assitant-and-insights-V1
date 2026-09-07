@@ -67,7 +67,7 @@ ERASABLE_BY_USER_ID = tuple(sorted(
     (
         m.class_ for m in Base.registry.mappers
         if "user_id" in m.columns
-        and m.local_table.name not in EXTERNAL_TABLES | KEPT
+        and m.class_.__tablename__ not in EXTERNAL_TABLES | KEPT
     ),
     key=lambda model: model.__tablename__,
 ))
