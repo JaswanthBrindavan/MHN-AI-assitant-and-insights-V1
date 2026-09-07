@@ -20,7 +20,6 @@ from app.coredata.service import (
     BODY_METRIC_ORDER,
     MANUAL_METRIC_ORDER,
     active_medications,
-    ai_context_granted,
     latest_body_metrics,
     latest_manual_metrics,
     latest_vitals,
@@ -78,31 +77,24 @@ async def build_patient_context(
     still carried the reader's family history, the most sensitive category
     here, into the model's prompt.
 
-    **Returns nothing until the reader has switched family context on.** The
-    Family Connect page has an AI-context switch per link
-    (`family_connect.req_ai_context_access` / `acc_ai_context_access`, the
-    reader's own side — see `ai_context_granted`), and before this gate it
-    governed nothing here: the family history reached the prompt on every
-    turn whatever the switch said. A reader with an accepted link and the
-    switch off is withheld exactly like a pending erasure, condition codes
-    included, because scoping retrieval to the father's diabetes is the same
-    history reaching the answer by a side door. A reader with NO accepted
-    link keeps their history: the switch is a grant over a relationship and
-    does not exist for them to set, their pedigree is their own record and
-    not a relative's, and withholding it would take personalisation away
-    from everyone who has not yet connected a relative — which is not what
-    the toggle was asked to do.
+    **The Family Connect AI-context switch is NOT a condition here.** That
+    switch (`family_connect.req_ai_context_access` / `acc_ai_context_access`)
+    is an OUTBOUND grant: the flag on the reader's side means a connected
+    member may use the READER's data for their own analysis — mhn-spring's
+    `editAccessControls` writes the caller's own side under "the recipient's
+    resulting grants on our files", and the Android Family Permissions screen
+    binds it under "<name> can". It says nothing about the reader's own chat.
+    Their pedigree is their own record, entered by them the way any clinician
+    takes a family history; what personalises their own answers is
+    personalization consent, checked where the profile is assembled. A gate
+    on the outbound grant here withheld a reader's own history from their
+    own answers until they had shared with some relative.
 
     The suppression is memoised like any other result: within one session
     the pending state cannot change, because a forget-me request and a chat
     turn are separate HTTP requests with separate sessions. Belt and braces,
     `request_erasure` clears this memo, so even a caller that did both on one
-    session cannot serve a stale pre-request value. The consent answer is
-    memoised the same way and for the same reason: the switch is written by
-    mhn-spring from another request entirely, so a session never sees it
-    move, and the memo only ever holds the GATED result — the check runs
-    before anything is stored, so a cache hit cannot hand out history that
-    the gate would have refused.
+    session cannot serve a stale pre-request value.
     """
     memo = _memo(db)
     cached = memo.get(user_id)
@@ -136,18 +128,6 @@ async def build_patient_context(
     if not conditions and not insights:
         memo[user_id] = ("", set(codes))
         return "", codes
-
-    # Asked only now, once there is something to withhold: a reader with no
-    # history on record — most first turns — must not pay a round trip to
-    # learn that nothing would have been suppressed. Round trips are what this
-    # pipeline spends (the budget in test_turn_efficiency is a ceiling, and
-    # this read sits outside the scenario it measures).
-    # ``is False`` and not ``not``: None is "no link, so no switch", and that
-    # reader keeps their history (see the docstring). Only an accepted link
-    # with the reader's own switch off withholds it.
-    if await ai_context_granted(db, user_id) is False:
-        memo[user_id] = ("", set())
-        return "", set()
 
     displays = sorted({c.condition_display for c in conditions})
     lines: list[str] = []
