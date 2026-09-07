@@ -125,6 +125,44 @@ _POSSESSIVE_STOP = frozenset(
 _THIRD_PERSON_RE = re.compile(r"\b(?:his|her|hers|their|theirs)\b", re.IGNORECASE)
 
 
+# A relation MENTIONED as history, not asked about. "my hba1c came back --
+# should I worry given my father has diabetes?" is a question about the
+# READER's number; the father is why they are asking. Family history is the
+# single most common way a relative appears in a health question, and treating
+# every mention as a change of subject refuses the reader their own data.
+#
+# Narrow on purpose: only a relation followed by a state-of-health clause.
+# "did my father drink" (an action, and a question about HIM) is untouched, and
+# so is any possessive -- "my father's hba1c" never reaches this because the
+# apostrophe is not one of these verbs.
+_FAMILY_HISTORY_RE = re.compile(
+    r"\bmy\s+(?:" + "|".join(RELATION_TERMS) + r")\s+"
+    r"(?:has|had|have|is|was|suffers?|suffered|died|passed|got|developed)\b",
+    re.IGNORECASE,
+)
+
+
+def _relation_is_only_history(message: str) -> bool:
+    """True when every relation in the message is history framing."""
+    low = message.lower()
+    if not _FAMILY_HISTORY_RE.search(low):
+        return False
+    # A possessive anywhere means something IS being asked about them.
+    for term in RELATION_TERMS:
+        if re.search(rf"\bmy {term}(?:'|\u2019)s\b", low):
+            return False
+    # "did my father drink", "how much does my mother walk" -- an action by
+    # them is a question about them.
+    for term in RELATION_TERMS:
+        if re.search(
+            rf"\b(?:did|does|do|is|was|has|have)\s+my\s+{term}\b\s+"
+            rf"(?!has\b|had\b|have\b|is\b|was\b)",
+            low,
+        ):
+            return False
+    return True
+
+
 def names_another_person(message: str) -> bool:
     r"""True when the subject of the question is someone other than the reader.
 
@@ -139,7 +177,9 @@ def names_another_person(message: str) -> bool:
     gate. What must not happen is answering it from the reader's own rows.
     """
     if find_relation(message) is not None:
-        return True
+        # Unless the only mention is family history — see _FAMILY_HISTORY_RE.
+        if not _relation_is_only_history(message):
+            return True
     if _THIRD_PERSON_RE.search(message):
         return True
     m = _POSSESSIVE_NAME_RE.search(message.lower())
