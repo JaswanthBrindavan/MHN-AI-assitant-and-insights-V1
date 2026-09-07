@@ -325,9 +325,22 @@ SELF_HARM_PHRASES: tuple[str, ...] = (
 )
 
 # The fixed directive that leads every EMERGENCY response.
+#
+# NEEDS CLINICIAN / OWNER SIGN-OFF before merge — this is clinical copy.
+#
+# The numbers: the userbase is India, and the old string named none at all,
+# which is the failure this replaces. 112 is India's official unified
+# emergency number (it reaches police, fire and ambulance); 108 is the
+# ambulance line most states actually run and the one many readers will
+# already know. Both are named because either alone leaves a caller worse
+# off in some state. "Or your local emergency number" is kept for readers
+# outside India — it is now the fallback rather than the whole instruction.
+# The digit-fidelity check in app/translate/service.py protects 112/108
+# through translation exactly as it protects 14416 in SELF_HARM_REPLY.
 EMERGENCY_DIRECTIVE = (
-    "This may be a medical emergency. Please call your local emergency number "
-    "or go to the nearest emergency department right now."
+    "This may be a medical emergency. In India, call 112 now, or 108 for an "
+    "ambulance — elsewhere, your local emergency number. If you can get "
+    "there faster, go to the nearest emergency department right now."
 )
 
 

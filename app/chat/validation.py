@@ -341,6 +341,58 @@ _PERSONAL_CLEARANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A claim to have DONE something Davi cannot do. Davi has no way to set a
+# reminder or an alarm, book or cancel an appointment, contact a doctor or
+# emergency services, or place an order. The system prompt now says so, but a
+# prompt is an instruction and this is the enforcement: "I've set a reminder
+# for 9pm" is worse than a refusal, because the reader then does not set one.
+#
+# Gated on a first-person COMPLETION or PROMISE auxiliary ("I've", "I have",
+# "I'll", "I will"), so the wordings the prompt actually asks for — "I can't
+# set a reminder", "you can set one in the Medications section" — both pass.
+#
+# The verb list deliberately excludes add/log/record/stop/remove: those are
+# the medication-list and lifestyle bookkeeping Davi really does perform, and
+# "I've added metformin to your list" must stay sayable.
+#
+# KNOWN GAPS, stated rather than papered over: a bare past tense ("I set that
+# up for you"), a subjectless confirmation ("Done — reminder for 9pm") and a
+# passive about an appointment rather than a reminder ("the appointment has
+# been booked") are not caught. Closing the first two means dropping the
+# auxiliary gate, which is what keeps this off ordinary prose; the third
+# would block "your appointment was booked on 3 May", which can be TRUE of a
+# consultation already on the reader's record.
+_UNDOABLE_OBJECTS = (
+    r"reminders?|alarms?|calendar(?:\s+(?:entry|event|invite))?|appointments?"
+    r"|consultations?|ambulance|emergency services|lab tests?|blood tests?"
+    r"|delivery|prescription refill"
+)
+_FIRST_PERSON = r"\bi(?:'|’)?(?:ve|ll|\s+have|\s+will|\s+am\s+going\s+to)\s+"
+_FALSE_ACTION_CLAIM_RE = re.compile(
+    # "I've booked your appointment", "I have set an alarm for 9pm"
+    _FIRST_PERSON
+    + r"(?:just\s+|already\s+|now\s+|gone\s+ahead\s+and\s+)*"
+    r"(?:set(?:\s+up)?|scheduled|booked|arranged|creat\w+|plac\w+|order\w+"
+    r"|cancell?\w*|made|sent|contacted|call\w+|notified|alerted)\b"
+    rf"[^.?!]{{0,40}}?\b(?:{_UNDOABLE_OBJECTS})\b"
+    # "I'll remind you at 9pm" — the promise, with no object noun at all.
+    r"|" + _FIRST_PERSON
+    + r"(?:just\s+|already\s+)*(?:remind|reminded|alert\w*|ping\w*|notif\w+)"
+    r"\s+(?:you|him|her|them)\b"
+    # "I've set that up for you" — vague object, unmistakable verb.
+    r"|" + _FIRST_PERSON
+    + r"(?:just\s+|already\s+)*"
+    r"(?:set|scheduled|booked|arranged|cancell?ed)\s+"
+    r"(?:that|this|it|everything|you)\b"
+    # "Your reminder is set" — the passive form, no first person at all.
+    # reminder/alarm ONLY: "your appointment was booked on 3 May" can be a
+    # true statement about a real consultation on the reader's record, and a
+    # guard that blocks a true fact is worse than one that misses a phrasing.
+    r"|\b(?:reminder|alarm)s?\s+(?:is|are|has\s+been|have\s+been|was|were)"
+    r"\s+(?:now\s+)?(?:set|booked|scheduled|created|cancell?ed)\b",
+    re.IGNORECASE,
+)
+
 # The underlying model/provider must never be named to the user — Davi answers
 # identity questions deterministically as "Davi" (router + canned reply), and
 # this is the last line of defense if a leak slips into generated text.
@@ -394,6 +446,8 @@ def find_banned(
         return "absence-as-finding"
     if _PERSONAL_CLEARANCE_RE.search(text):
         return "personal-clearance"
+    if _FALSE_ACTION_CLAIM_RE.search(text):
+        return "false-action-claim"
     if _DIAGNOSTIC_RE.search(text):
         return "diagnostic-assertion"
     if extra_conditions:

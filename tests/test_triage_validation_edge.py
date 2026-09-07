@@ -21,6 +21,7 @@ from app.triage.red_flags import (
     ACS_ASSOCIATED_PHRASES,
     CHEST_PAIN_PHRASES,
     EMERGENCY,
+    EMERGENCY_DIRECTIVE,
     EMERGENCY_PHRASES,
     HIGH,
     HIGH_PHRASES,
@@ -565,6 +566,54 @@ def test_find_banned_returns_none_for_benign_text():
 def test_has_escalation_true_and_false():
     assert has_escalation("Please go to the nearest clinic.")
     assert not has_escalation("Everything seems okay for now.")
+
+
+# --------------------------------------------------------------------------- #
+# Claiming to have done something Davi cannot do. The prompt tells the model
+# it cannot set reminders, book appointments or contact anyone; this is the
+# enforcement, and the half that actually needs guarding is the NEGATIVE side
+# — the medication and lifestyle bookkeeping Davi really does perform must
+# stay sayable, or the guard blocks the product's own confirmations.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "I've set a reminder for 9pm.",
+        "I have set an alarm for you at 9pm.",
+        "I've set that up for you.",
+        "I'll set that for you.",
+        "I've booked your appointment with a cardiologist.",
+        "I have scheduled a consultation for tomorrow.",
+        "I'll remind you at 9pm to take your metformin.",
+        "I've called an ambulance for you.",
+        "I've cancelled your appointment.",
+        "I've ordered the blood tests for you.",
+        "I have gone ahead and created a calendar entry.",
+        "Your reminder is set for 9pm.",
+        "Your reminders have been set.",
+    ],
+)
+def test_false_action_claim_is_banned(reply):
+    assert find_banned(reply) == "false-action-claim"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "I can't set reminders or alarms.",
+        "I cannot book an appointment for you.",
+        "You can set a dose reminder in the Medications section of the app.",
+        "I've added metformin 500 mg twice a day to your medication list.",
+        "I've logged 2 glasses of water for you.",
+        "I've removed ibuprofen from your list.",
+        "I've recorded that you stopped amlodipine.",
+        "Your last consultation was on 12 March.",
+        "Your appointment was booked on 3 May, according to your record.",
+        EMERGENCY_DIRECTIVE,
+    ],
+)
+def test_real_abilities_and_refusals_are_not_banned(reply):
+    assert find_banned(reply) is None
 
 
 # --------------------------------------------------------------------------- #
