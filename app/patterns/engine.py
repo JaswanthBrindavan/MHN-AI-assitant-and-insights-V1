@@ -27,6 +27,7 @@ from datetime import date
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chat.erasure import is_pending
 from app.models.common import tracking_today
 from app.models.rules import PatternArtifact
 from app.patterns.core import Observation, content_hash
@@ -59,7 +60,13 @@ async def recompute_patterns(
     Condition Profiles the chat quotes, never generated: if the corpus has
     nothing, the card carries no "in general" line. A missing fact costs a
     line; a wrong one costs the reader's trust.
+
+    Never runs while an erasure is pending: the artifacts are one of the
+    tables the erasure destroys, and the nightly sweep would otherwise
+    re-derive them every night of the grace window.
     """
+    if await is_pending(db, user_id):
+        return 0
     observations = await compute(db, user_id, today=today)
     written = 0
     # The same anchor `compute` just used for its windows. A stamp naming a

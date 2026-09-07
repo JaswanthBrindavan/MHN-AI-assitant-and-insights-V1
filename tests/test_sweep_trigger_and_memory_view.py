@@ -85,22 +85,30 @@ async def test_sweep_actually_runs_and_records_a_job(
     resp = await client.post("/api/v1/admin/sweep", headers=HEADERS)
     assert resp.status_code == 202
 
-    # The sweep runs as a detached task; yield until it has recorded itself.
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        async with sessionmaker() as db:
-            rows = (
-                await db.execute(
-                    select(JobRun).where(JobRun.name == "nightly_sweep")
-                )
-            ).scalars().all()
-        if rows:
-            break
-    else:  # pragma: no cover - only on a genuinely broken trigger
-        pytest.fail("sweep did not record a job_runs row")
+    # Wait for the detached task, do not poll for its row.
+    #
+    # Every session in this suite shares ONE connection (in-memory SQLite on a
+    # StaticPool), so a 10 ms polling loop and the sweep contend for the same
+    # object: the loop starved the task, which sat at "running" until the
+    # engine fixture disposed the pool underneath it. SQLAlchemy's pool
+    # teardown then does `del self.__dict__["connection"]` on a slot the
+    # live task had already taken, which surfaces as a KeyError teardown
+    # ERROR -- not a failure -- and only on some orderings.
+    #
+    # Draining the task first removes both the contention and the race,
+    # and lets this assert the status it actually cares about: the row
+    # existing says the trigger fired, only 'succeeded' says the sweep ran.
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 30)
+
+    async with sessionmaker() as db:
+        rows = (
+            await db.execute(select(JobRun).where(JobRun.name == "nightly_sweep"))
+        ).scalars().all()
+    assert rows, "sweep did not record a job_runs row"
 
     assert rows[0].trigger == "cron"
-    assert rows[0].status in {"running", "succeeded"}
+    assert rows[0].status == "succeeded"
     # actor_user_id stays NULL: scheduled work has no actor, and NULL means
     # "the system", never "an unknown user".
     assert rows[0].actor_user_id is None

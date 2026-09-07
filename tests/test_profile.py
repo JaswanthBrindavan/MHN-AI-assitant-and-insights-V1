@@ -183,6 +183,23 @@ async def test_forgetting_clears_the_profile_and_the_topic_memory(db_session):
     assert remaining == []
 
 
+async def test_forgetting_removes_the_memory_document_too(db_session):
+    """Its prompt_block is a rendered copy of exactly the fields consent
+    gated, and the read path checks nothing. Leaving it behind after a revoke
+    is the consent theatre this module's docstring warns against."""
+    from app.memory import document as memory_document
+
+    user_id = uuid.uuid4()
+    await grant_personalization(db_session, user_id)
+    await update_profile(db_session, user_id, {"chronic_conditions": ["type 2 diabetes"]})
+    row = await memory_document.refresh(db_session, user_id)
+    assert row is not None and "type 2 diabetes" in row.prompt_block
+
+    deleted = await forget_everything(db_session, user_id)
+    assert deleted["memory_document"] == 1
+    assert await memory_document.get(db_session, user_id) is None
+
+
 async def test_the_consent_ledger_survives_erasure(db_session):
     """The ledger is append-only; the record that consent existed IS the audit
     trail and must outlive the data."""
