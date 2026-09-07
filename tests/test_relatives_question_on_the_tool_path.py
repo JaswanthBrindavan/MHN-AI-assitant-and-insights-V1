@@ -38,6 +38,12 @@ CALLS = {
     "get_section_details": {"kind": "insurance"},
     "get_tracker_total": {"metric": "water", "period": "week"},
     "get_health_summary": {"period": "week"},
+    # Added to READER_ONLY_TOOLS after the coverage invariant found them
+    # unclassified — see tests/test_reader_scoped_reads_decline_family.py.
+    "list_medications": {},
+    "get_medication_adherence": {"name": "metformin"},
+    "get_doctor_consults": {},
+    "get_trends_and_patterns": {"focus": "trend", "metric": "sleep"},
 }
 
 RELATIVE_ASKS = [

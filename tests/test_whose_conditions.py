@@ -78,3 +78,39 @@ async def test_the_reader_still_gets_their_own_record(db_session, message):
     matters is that it is not the GUARD that declined.
     """
     assert not names_another_person(message), message
+
+
+# --------------------------------------------------------------------------
+# A summary is not a lab parameter
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("message", [
+    "what's my health summary of last week?",
+    "what is my health summary for last week",
+    "give me an overview of my health",
+])
+def test_a_summary_ask_does_not_masquerade_as_a_report_parameter(message):
+    """Measured in production: the reader got the safe reply for a question
+    with an exact answer on file.
+
+    parse_report_param_ask matched the "my X of Y" shape and returned the
+    parameter name "health summary of last week". The deterministic summary
+    step stands down whenever another parser claims the turn, so it did -- and
+    the question went to the model, which composed a summary containing a value
+    that did not match the record. The numeric fidelity guard caught it and
+    substituted the safe reply. Every layer behaved correctly; the routing was
+    wrong.
+    """
+    from app.chat.abilities import parse_report_param_ask, parse_summary_query
+
+    assert parse_report_param_ask(message) is None, message
+    assert parse_summary_query(message) is not None, message
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("what is my hba1c", "hba1c"),
+    ("show my cholesterol trend", "cholesterol"),
+])
+def test_a_real_parameter_ask_still_parses(message, expected):
+    from app.chat.abilities import parse_report_param_ask
+
+    assert parse_report_param_ask(message) == expected

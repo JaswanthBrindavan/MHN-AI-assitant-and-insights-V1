@@ -1032,6 +1032,17 @@ async def _latest_report_param(
 async def handle_metric_query(
     db: AsyncSession, user_id: uuid.UUID, message: str
 ) -> dict | None:
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     query: MetricQuery | None = parse_metric_query(message)
     if query is None:
         return None
@@ -1477,6 +1488,17 @@ async def handle_summary_query(
     period as structured data and passes it, rather than synthesising an English
     sentence for this parser to re-read.
     """
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     if query is None:
         query = parse_summary_query(message)
     if query is None:
@@ -2876,6 +2898,17 @@ async def handle_correlation_query(
     engines reach this from the message, so there is nothing for a tool to
     call and no English sentence for an executor to synthesise.
     """
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     from app.chat.abilities import CorrelationQuery
     from app.chat.abilities import medication_candidates as _med_cands
     from app.drugs.service import find_drug
@@ -3062,6 +3095,17 @@ async def handle_tracker_query(
     it must NOT synthesise an English sentence for this parser to re-read. That
     is the bug that made every document tool call return nothing.
     """
+    # Whose record? Guarded HERE, not only at the routes in, because every
+    # entry-point guard so far has been bypassed by a route nobody had thought
+    # of yet -- #72 the parsers, #83 the tools, #86 the prologue. A handler
+    # that reads `user_id` alone cannot answer about anybody else, whatever
+    # reached it. See tests/test_reader_scoped_reads_decline_family.py.
+    #
+    # A no-op on the tool path, where the executor passes a synthesised
+    # first-person sentence with no relation in it.
+    if names_another_person(message):
+        return None
+
     if query is None:
         query = parse_tracker_query(message)
     if query is None:
