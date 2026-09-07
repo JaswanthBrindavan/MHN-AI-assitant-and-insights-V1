@@ -207,10 +207,6 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 # say 27; the read that made it 28 was never accounted for. Re-measure and
 # re-comment when you change it, or the next person inherits the same lie.)
 #
-# A turn for a reader WITH family history on record is one more: the Family
-# Connect AI-context switch (context.py) is asked only once there is history
-# to withhold, so this figure — measured without a pedigree — never sees it.
-#
 #   28 -> 36  Four SAVEPOINT/RELEASE pairs, no new SELECTs: the open-episode
 #             floor read, the health snapshot, the condition-registry load
 #             and the receipt write. Each was a fail-open read with no
@@ -230,8 +226,36 @@ async def test_questions_asked_counts_without_reading_the_transcript(db_session)
 #             two conditions and a red flag went 32 -> 24: one SELECT for the
 #             whole set instead of one per item. tests/test_long_term.py
 #             counts that directly.
-MAX_QUERIES_PER_TURN = 36
-
+#
+#   36 -> 38  Family context: one `family_connect` SELECT asking which
+#             connected members have granted THIS reader AI context, plus the
+#             fifth SAVEPOINT/RELEASE pair, in `context.shared_family_history`.
+#
+#             38, not the 39 this branch measured on its own. That figure was
+#             taken before the batched `record_topics` above landed, and the
+#             two interact: merged, the turn measures 38. Re-measured here on
+#             the merge result with the constant zeroed, which is the only way
+#             to read the real count rather than a ceiling it happens to fit
+#             under — the rule this file states about inheriting the same lie
+#             applies to a merge as much as to an edit.
+#
+#             The SELECT is unconditional and there is no cheaper predicate:
+#             the query IS the consent check, and a reader with no pedigree of
+#             their own can still have a member sharing theirs, so it cannot
+#             hide behind "only when there is history".
+#
+#             The pair is bought for the reason the four above were: this is a
+#             fail-open read, and without a savepoint one broken
+#             `family_connect` read would abort the transaction and take the
+#             memory read and the receipt write with it — audit H8, again.
+#
+#             What it does NOT cost: the mhn-spring entitlements call. That is
+#             an HTTP round trip, not a query, and it is asked only AFTER the
+#             SELECT returns at least one granting member — so a reader nobody
+#             has granted context to (every reader in this test, and most
+#             readers in production) never makes it. `build_patient_context`
+#             memoises, so even a reader who does pays it once per session.
+MAX_QUERIES_PER_TURN = 38
 # A HEALTH SUMMARY is the one turn that deliberately asks for everything:
 # lifestyle logs, the wearable rollups, conditions, allergies, medications,
 # vitals and labs, each behind its OWN savepoint so a failing reader costs its
@@ -287,7 +311,16 @@ MAX_QUERIES_PER_CORRELATION_TURN = 19
 MAX_QUERIES_PER_SUMMARY_TURN = 45
 
 
-async def test_a_turn_stays_within_its_round_trip_budget(db_session, engine):
+async def test_a_turn_stays_within_its_round_trip_budget(
+    db_session, engine, agentic_engine
+):
+    # Pinned to agentic, the engine Railway runs and the only one a reader
+    # meets. CI re-runs this suite under CHAT_ENGINE=legacy, where the same
+    # turn measures 39 rather than 38 — a real difference, and a meaningless
+    # one to hold production to. The ceiling exists to trip when somebody adds
+    # a read to the path that ships; measured against the other engine it
+    # would either report a cost nobody pays or need three queries of slack,
+    # which is the same as not having a ceiling.
     from app.chat.profile import grant_personalization, update_profile
 
     user_id = uuid.uuid4()
