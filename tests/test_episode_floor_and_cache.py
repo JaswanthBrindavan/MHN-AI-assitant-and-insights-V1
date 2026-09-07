@@ -496,6 +496,40 @@ def test_cutting_down_on_food_is_not_self_harm(message):
     assert result.level == NONE, message
 
 
+def test_the_dietary_idiom_guard_itself_fires():
+    """The layer BELOW the phrase list, tested on its own.
+
+    ``test_cutting_down_on_food_is_not_self_harm`` passed for eighteen months
+    while ``_CUTTING_IDIOM_RE`` matched nothing at all: the word boundaries in
+    it had been written as literal 0x08 backspace bytes, so the pattern
+    compiled and never fired. The outcome was still right, because narrowing
+    SELF_HARM_PHRASES away from a bare "been cutting" is what actually keeps
+    those sentences out of the table -- this regex is the second layer.
+
+    Testing only the outcome cannot tell a working guard from a dead one. If
+    the phrase list is ever widened again for recall, this is the assertion
+    that says whether anything is behind it.
+    """
+    from app.triage.red_flags import _CUTTING_IDIOM_RE
+
+    for message in (
+        "i have been cutting down on sugar",
+        "im cutting back on salt",
+        "trying to cut out sweets",
+        "i cut down on carbs",
+    ):
+        assert _CUTTING_IDIOM_RE.search(message), message
+
+    # Narrow on purpose: it must not swallow a real disclosure before the
+    # self-harm scan ever sees it.
+    for message in (
+        "i have been cutting myself",
+        "i keep cutting myself",
+        "i cut my wrists",
+    ):
+        assert not _CUTTING_IDIOM_RE.search(message), message
+
+
 @pytest.mark.parametrize("message", [
     "i have been cutting myself",
     "i keep cutting myself",
