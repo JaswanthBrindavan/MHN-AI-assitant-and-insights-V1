@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import UserMemory
@@ -36,28 +36,40 @@ async def record_topics(
     Bumps mention_count + last_seen_at on repeat mentions. Never raises.
     """
     try:
-        items: list[tuple[str, str, str]] = [
-            ("condition_topic", k, v) for k, v in topics.items()
-        ]
-        items += [("flag", f, f) for f in (flags or [])]
+        # One (kind, key) per call: a term matched twice in one message is one
+        # mention, and adding the same row twice would trip the unique key.
+        items: dict[tuple[str, str], str] = {
+            ("condition_topic", k[:64]): v for k, v in topics.items()
+        }
+        for f in (flags or []):
+            items.setdefault(("flag", f[:64]), f)
         if not items:
             return
         now = utcnow()
-        for kind, key, value in items:
-            key = key[:64]
-            existing = (
-                await db.execute(
-                    select(UserMemory).where(
-                        UserMemory.user_id == user_id,
-                        UserMemory.kind == kind,
-                        UserMemory.mem_key == key,
-                    )
+        # ONE read for the whole turn. This used to SELECT once per topic and
+        # once per flag — three conditions and two flags was five sequential
+        # round trips, on every turn, on both engines. mem_key is not unique
+        # across kinds, so the (kind, key) match is finished in Python.
+        rows = (
+            await db.execute(
+                select(UserMemory).where(
+                    UserMemory.user_id == user_id,
+                    UserMemory.mem_key.in_({key for _, key in items}),
                 )
-            ).scalars().first()
-            if existing is not None:
-                existing.mention_count += 1
-                existing.last_seen_at = now
-            else:
+            )
+        ).scalars().all()
+        existing = {(r.kind, r.mem_key): r for r in rows}
+        bump = [r.id for (kind, key), r in existing.items() if (kind, key) in items]
+        if bump:
+            # And ONE write for the repeat mentions, instead of an UPDATE per
+            # row at flush. The session's copies are synchronised in Python.
+            await db.execute(
+                update(UserMemory)
+                .where(UserMemory.id.in_(bump))
+                .values(mention_count=UserMemory.mention_count + 1, last_seen_at=now)
+            )
+        for (kind, key), value in items.items():
+            if (kind, key) not in existing:
                 db.add(UserMemory(
                     user_id=user_id, kind=kind, mem_key=key,
                     value=value[:200], mention_count=1, last_seen_at=now,

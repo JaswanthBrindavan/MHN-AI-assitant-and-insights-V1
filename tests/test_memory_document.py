@@ -227,7 +227,6 @@ async def test_a_fresh_document_does_not_eat_episodes_or_recall(db_session):
     assert "Penicillin" in memory.profile_text
     assert "chest pain" in memory.episode_text
     assert "SAME ongoing episode" in memory.episode_text
-    assert [e.symptom for e in memory.episodes] == ["chest pain"]
     assert "type 2 diabetes" in memory.recall_text
     # And all three reach the prompt, not just the profile.
     assert len(memory.blocks()) == 3
@@ -403,3 +402,28 @@ async def test_a_private_document_stays_out(db_session):
 
     built = await memory_document.build(db_session, USER)
     assert "Private Report" not in built.prompt_block
+
+
+async def test_freshness_covers_a_nightly_rebuild(db_session):
+    """The sweep is the only builder, so a document must stay usable from one
+    night to the next. At one hour it was usable for one hour in twenty-four
+    (audit M15)."""
+    await _seed(db_session)
+    row = await memory_document.refresh(db_session, USER)
+    assert row is not None
+    assert memory_document.is_fresh(row, now=utcnow() + timedelta(hours=25))
+
+
+async def test_editing_the_profile_invalidates_the_document(db_session):
+    """The profile is the one document source THIS service writes, so it is
+    the one that can be kept honest by an event rather than by the clock."""
+    await _seed(db_session)
+    await memory_document.refresh(db_session, USER)
+    await db_session.flush()
+    assert (await memory_assembly.assemble(db_session, USER)).from_document
+
+    await update_profile(db_session, USER, {"allergies": ["sulfa drugs"]})
+
+    memory = await memory_assembly.assemble(db_session, USER)
+    assert memory.from_document is False
+    assert "sulfa" in memory.profile_text.lower()

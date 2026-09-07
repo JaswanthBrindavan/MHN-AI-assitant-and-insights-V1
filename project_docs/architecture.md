@@ -295,7 +295,7 @@ case-sensitive matching for 3-char abbreviations so "ARM" ≠ "arm").
 |---|---|---|---|
 | **Within-turn** | `_dispatch` locals | patient `[P]` block, health snapshot, retrieved chunks | per request |
 | **Short-term** | `conversation_messages` | last **8** turns verbatim | `KEEP_VERBATIM = 8` |
-| **Mid-term** | `conversation_summaries` | deterministic structured dict — `flags`, `medications`, `boundaries`, `timeline` (sticky, never truncated); `topics`, `open_questions` (capped at 12) | compaction fires past **20** uncompacted messages |
+| **Mid-term** | `conversation_summaries` | deterministic structured dict — `flags`, `medications`, `boundaries`, `timeline` (sticky: survive every pass, each with its own cap — `STICKY_CAPS`); `topics`, `open_questions` (capped at 12) | compaction fires past **20** uncompacted messages |
 | **Long-term** | `user_memories` | condition topics + red-flag terms, with `mention_count` / `last_seen_at`. **No raw text — no PHI.** | recall capped at 8 |
 
 Compaction is regex/table-driven, not model-driven, so it is reproducible and cannot

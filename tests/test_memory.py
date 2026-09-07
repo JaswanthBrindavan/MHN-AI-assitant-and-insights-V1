@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from app.chat.memory import (
     CAP,
     compact_messages,
@@ -113,3 +115,68 @@ async def test_bare_feeling_better_closes_the_only_open_episode(db_session):
         message="feeling better now, thanks",
     )
     assert await open_episodes(db_session, user) == []
+
+
+# --------------------------------------------------------------------------- #
+# Every key is bounded (audit M13)
+#
+# Sticky keys used to merge "without truncation" forever. Retention purges
+# only the SUPERSEDED versions of a summary, so the surviving row of a long
+# session grew without limit — unbounded PHI in a JSON column, re-serialised
+# into the prompt on every turn.
+# --------------------------------------------------------------------------- #
+def test_sticky_keys_hold_their_bound_after_many_merges():
+    from app.chat.memory import STICKY_CAPS, STICKY_KEYS, empty_summary
+
+    merged = empty_summary()
+    for i in range(200):
+        part = empty_summary()
+        part["flags"] = [f"flag {i}"]
+        part["medications"] = [f"drug{i} 5 mg"]
+        part["boundaries"] = [f"I can't help with that ({i}) " + "x" * 90]
+        part["timeline"] = [f"flag {i}", f"drug{i} 5 mg"]
+        merged = merge_summaries(merged, part)
+
+    for k in STICKY_KEYS:
+        assert len(merged[k]) <= STICKY_CAPS[k], (k, len(merged[k]))
+    # And the whole dict stays a bounded prompt cost, not a transcript.
+    assert len(json.dumps(merged)) < 4000
+
+
+def test_an_early_red_flag_still_survives_every_later_pass():
+    """What sticky exists for: message 1's flag stands at message 200."""
+    from app.chat.memory import empty_summary
+
+    merged = empty_summary()
+    merged["flags"] = ["chest pain"]
+    for i in range(100):
+        part = empty_summary()
+        part["flags"] = [f"other {i}"]
+        merged = merge_summaries(merged, part)
+    assert merged["flags"][0] == "chest pain"
+
+
+def test_the_newest_medication_is_the_one_kept():
+    """A dose change matters more than the dose it replaced: over the cap,
+    it is the OLDEST medication that rolls off, not the newest."""
+    from app.chat.memory import STICKY_CAPS, empty_summary
+
+    merged = empty_summary()
+    merged["medications"] = ["metformin 500 mg"]
+    for i in range(STICKY_CAPS["medications"]):
+        part = empty_summary()
+        part["medications"] = [f"drug{i} 5 mg"]
+        merged = merge_summaries(merged, part)
+    assert len(merged["medications"]) == STICKY_CAPS["medications"]
+    assert "metformin 500 mg" not in merged["medications"]  # the oldest rolled off
+    assert merged["medications"][-1] == f"drug{STICKY_CAPS['medications'] - 1} 5 mg"
+
+
+def test_a_single_compaction_batch_is_bounded_too():
+    from app.chat.memory import STICKY_CAPS
+
+    messages = [
+        {"role": "assistant", "message": f"I can't help with that, number {i}."}
+        for i in range(20)
+    ]
+    assert len(compact_messages(messages)["boundaries"]) == STICKY_CAPS["boundaries"]

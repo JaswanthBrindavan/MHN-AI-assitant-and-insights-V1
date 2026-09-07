@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,13 +72,17 @@ def _episode_terms(flags: list[str] | None) -> list[str]:
 
 
 @dataclass(frozen=True)
-class UserMemory:
-    """What is known about this reader, rendered for the [P] block."""
+class AssembledMemory:
+    """What is known about this reader, rendered for the [P] block.
+
+    Not `UserMemory`: that name is the ORM row in app/models/chat.py, and one
+    subsystem carrying two meanings of it cost a function-local import to
+    dodge.
+    """
 
     profile_text: str = ""
     episode_text: str = ""
     recall_text: str = ""
-    episodes: list = field(default_factory=list)
     # True when this came from the stored document rather than a live
     # assembly. Recorded so the hit rate is observable rather than assumed.
     from_document: bool = False
@@ -98,7 +102,7 @@ async def assemble(
     user_id: uuid.UUID,
     *,
     episodes_hint: list | None = None,
-) -> UserMemory:
+) -> AssembledMemory:
     """Read every per-user memory store. Each part fails open independently.
 
     Independently matters: a failure reading episodes must not also cost the
@@ -115,7 +119,7 @@ async def assemble(
     # false for the whole grace period — the assistant would keep greeting the
     # reader with everything it knows about them.
     if await is_pending(db, user_id):
-        return UserMemory()
+        return AssembledMemory()
 
     # The assembled document, when there is a fresh one. It replaces the
     # PROFILE slice and nothing else: its `_gather` holds no episodes and no
@@ -145,14 +149,12 @@ async def assemble(
             logger.warning("profile context failed; continuing", exc_info=True)
             record_fail_open("profile")
 
-    episodes: list = []
     episode_text = ""
     try:
-        episodes = (
+        episode_text = render_episodes(
             episodes_hint if episodes_hint is not None
             else await open_episodes(db, user_id)
         )
-        episode_text = render_episodes(episodes)
     except Exception:  # noqa: BLE001
         logger.warning("episode context failed; continuing", exc_info=True)
         record_fail_open("episodes")
@@ -164,11 +166,10 @@ async def assemble(
         logger.warning("long-term recall failed; continuing", exc_info=True)
         record_fail_open("long_term_recall")
 
-    return UserMemory(
+    return AssembledMemory(
         profile_text=profile_text,
         episode_text=episode_text,
         recall_text=recall_text,
-        episodes=episodes,
         from_document=bool(doc_block),
     )
 
@@ -234,15 +235,18 @@ async def record(
     # asserting an unresolved symptom for two more weeks, and telling Davi
     # you were better could only EXTEND that.
     if message and is_recovery_message(message, has_red_flag=bool(flags)):
-        resolved_any = False
         for term in (flags or []):
             try:
-                if await resolve(db, user_id, term):
-                    resolved_any = True
+                await resolve(db, user_id, term)
             except Exception:  # noqa: BLE001
                 logger.warning("episode resolve failed; continuing",
                                exc_info=True)
-        if not resolved_any and not flags:
+        # A recovery that NAMES a symptom closes that symptom and nothing
+        # else, whether or not a row by that name was open. (This read
+        # `if not resolved_any and not flags:`, which is the same condition —
+        # the variable could only be True when `flags` was non-empty — but the
+        # name suggested a fallback that never existed.)
+        if not flags:
             # "I'm feeling better" with no symptom named closes EVERY open
             # episode.
             #

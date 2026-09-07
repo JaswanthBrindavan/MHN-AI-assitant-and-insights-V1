@@ -695,3 +695,34 @@ async def test_a_failed_receipt_write_does_not_poison_the_turn(
     # The session is still usable, and the half-written receipt is gone
     # rather than waiting to fail the next flush too.
     assert (await db_session.execute(select(RagTurnReceipt.id))).all() == []
+
+
+async def test_a_recovery_that_names_a_symptom_closes_only_that_one(db_session):
+    """Pinning the decision behind `if not flags:` in memory_assembly.record.
+
+    The condition used to read `if not resolved_any and not flags`, which is
+    the same thing — but the name suggested that naming a symptom which
+    matched no open row would fall back to closing everything. It never did,
+    and does not now: name one, close one; name none, close all.
+    """
+    from app.chat import memory_assembly
+    from app.chat.episodes import open_episodes
+
+    user_id = uuid.uuid4()
+    await memory_assembly.record(
+        db_session, user_id,
+        message="chest pain and left arm discomfort",
+        risk=EMERGENCY,
+        flags=["chest pain", "left arm"],
+    )
+    await db_session.flush()
+
+    await memory_assembly.record(
+        db_session, user_id,
+        message="my chest pain is gone",
+        risk=NONE,
+        flags=["chest pain"],
+    )
+    await db_session.flush()
+
+    assert [e.symptom for e in await open_episodes(db_session, user_id)] == ["left arm"]
