@@ -14,6 +14,7 @@ from __future__ import annotations
 from app.chat.abilities import TRACKER_PERIODS
 from app.health.ranges import RANGES
 from app.llm.tools import ToolSpec
+from app.patterns.service import TREND_METRICS
 
 
 def _obj(properties: dict, required: list[str]) -> dict:
@@ -190,6 +191,41 @@ GET_HEALTH_SUMMARY = ToolSpec(
         ["period"],
     ),
 )
+
+GET_TRENDS_AND_PATTERNS = ToolSpec(
+    name="get_trends_and_patterns",
+    description=(
+        "How the reader's own numbers have been CHANGING, computed from their "
+        "records: 'yesterday' reviews the day just gone against their previous "
+        "two weeks; 'trend' compares this week with last for one wearable "
+        "metric and says whether it has moved against their own baseline; "
+        "'patterns' is what their habits (coffee, alcohol, smoking, water) did "
+        "to their readings on the same days over the last 28 days. Use it for "
+        "'how has my sleep been', 'why was yesterday bad', 'is my resting "
+        "heart rate going up' and 'does coffee affect my sleep' — questions "
+        "about change or cause, where a single latest value or a listing "
+        "(get_health_summary) would not answer. Everything it returns compares "
+        "the reader to THEMSELVES: report the direction and the figures, never "
+        "grade a wearable number, and never state a cause — 'might be the "
+        "reason' is as far as the data goes. It also says plainly when there "
+        "is not enough recorded yet; repeat that rather than estimating."
+    ),
+    input_schema=_obj(
+        {
+            "focus": {
+                "type": "string",
+                "enum": ["yesterday", "trend", "patterns"],
+            },
+            "metric": {
+                "type": "string",
+                "enum": list(TREND_METRICS),
+                "description": "For 'trend' only. Defaults to sleep_duration.",
+            },
+        },
+        ["focus"],
+    ),
+)
+
 
 GET_FAMILY_MEMBERS = ToolSpec(
     name="get_family_members",
@@ -486,6 +522,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     LOG_LIFESTYLE_ENTRY,
     GET_HEALTH_SUMMARY,
     GET_TRACKER_TOTAL,
+    GET_TRENDS_AND_PATTERNS,
     GET_FAMILY_MEMBERS,
     GET_CONDITION_GUIDANCE,
     LOOKUP_MEDICINE,

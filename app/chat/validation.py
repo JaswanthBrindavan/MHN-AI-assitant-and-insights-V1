@@ -279,6 +279,26 @@ _SELF_GRADING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A comparison against the reader's OWN earlier days is not a grade. "Your
+# sleep averaged 5.5 h over the last 3 days, below your usual 7.0 h" states
+# two figures from their record and draws no line anyone has to agree with;
+# it is the exact distinction `app/patterns/baseline.py` is built on, and the
+# wording of every Insights card and the yesterday review. Those sentences
+# now reach chat through get_trends_and_patterns, and "below" plus a figure
+# plus "your sleep" is this rule's own shape, so the reader's own trend was
+# being replaced with the safe reply the moment the model quoted it.
+#
+# Only the comparator ANCHORED to the reader's own baseline is lifted out
+# before the verdict check, so "below your usual 7 h and below the
+# recommended 8 h" is still a grade -- the second "below" stands.
+_OWN_BASELINE_RE = re.compile(
+    r"\b(?:below|above"
+    r"|(?:lower|higher|shorter|longer|more|less|better|worse|fewer)\s+than)"
+    r"\s+(?:your\s+(?:own\s+)?(?:usual|recent\s+average|baseline|average"
+    r"|typical|normal)\b|usual\b|you\s+usually\b)",
+    re.IGNORECASE,
+)
+
 
 def grades_a_wearable_figure(text: str) -> bool:
     """True when a sentence puts a verdict on the reader's own wearable number."""
@@ -287,6 +307,7 @@ def grades_a_wearable_figure(text: str) -> bool:
         scope = sentence
         if i and _BACKREF_RE.match(sentence) and _NORMATIVE_RE.search(sentence):
             scope = sentences[i - 1] + " " + sentence
+        scope = _OWN_BASELINE_RE.sub(" ", scope)
         graded = _VERDICT_RE.search(scope)
         # A traffic light or a named score carries the grade on its own, so
         # it is exempt from the figure conjunct: "your sleep score is amber"

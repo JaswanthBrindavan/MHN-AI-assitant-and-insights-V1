@@ -19,9 +19,11 @@ a failed call rather than killing the turn.
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.charts.svg import chart_payload
 from app.chat.abilities import (
     DocumentQuery,
     StatedValue,
@@ -49,8 +51,21 @@ from app.chat.data_handlers import (
     perform_medication_write,
 )
 from app.chat.tools.definitions import VALUE_CHECK_METRICS
-from app.coredata.service import document_owner
+from app.coredata.service import document_owner, wearable_display
 from app.drugs.service import build_drug_reply, find_drug, find_substitutes
+from app.models.common import tracking_today
+from app.patterns.engine import stored_cards
+from app.patterns.render import _amount
+from app.patterns.service import (
+    OUTCOMES,
+    TREND_METRICS,
+    WINDOW_DAYS,
+    attention,
+    daily_series,
+    gather_yesterday,
+    trend,
+)
+from app.patterns.yesterday import summarise_yesterday
 from app.rag.extractive import (
     build_extractive_answer,
     is_focused,
@@ -271,6 +286,223 @@ async def get_tracker_total(
         metric=provenance.get("metric", query.key),
         period=provenance.get("period", query.period),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Trends and patterns — what app/patterns computes for the Insights screens
+# --------------------------------------------------------------------------- #
+# Three payload rules, all learned from get_health_summary:
+#
+# * The reply text carries every figure, formatted the way the screens format
+#   it, and the raw floats behind it are NOT in the payload. `this_week_mean:
+#   390.0` beside a sentence saying "6.5 h" is a fidelity trap: the model
+#   quotes "390 minutes", the guard finds "390.0", and the whole reply is
+#   replaced. The chart carries the series, out of band.
+# * None is never returned. The registry turns None into "nothing on file",
+#   and an empty fortnight, a sweep that has not run and a day nobody logged
+#   are three different things that each get their own honest sentence.
+# * Nothing is graded and nothing is a cause. The wording is the screens' own,
+#   which was written under exactly those two rules.
+
+_TREND_WINDOW_DAYS = 14
+
+_DIRECTION = {
+    "up": "trending up",
+    "down": "trending down",
+    "steady": "about the same",
+}
+
+#: What compare-the-reader-to-themselves means, said once for the model.
+_OWN_BASELINE_NOTE = (
+    "Every comparison is against the reader's OWN earlier days, never a "
+    "reference range: report the direction and the figures, do not call a "
+    "wearable number high, low, normal or good. Nothing here is a cause — "
+    "'might be the reason' is as strong as the data allows."
+)
+
+
+async def _yesterday_review(db: AsyncSession, user_id: uuid.UUID) -> dict:
+    # The clock once, so `as_of` and the day read are the same day.
+    today = tracking_today()
+    day = (today - timedelta(days=1)).isoformat()
+    said = summarise_yesterday(await gather_yesterday(db, user_id, today=today))
+    if said is None:
+        return {
+            "found": False,
+            "as_of": day,
+            "deterministic_reply": (
+                f"Nothing was recorded for {day} — no wearable readings, "
+                "tracker entries or symptoms — so there is no day to review."
+            ),
+            "note": "Nothing recorded that day. Say so; do not guess what it "
+            "was like.",
+            "provenance": {"path": "patterns_yesterday", "as_of": day,
+                           "found": False},
+        }
+    return {
+        "as_of": day,
+        "deterministic_reply": f"{said.headline} {said.detail}",
+        "heading": said.heading,
+        "reasoning": list(said.reasoning),
+        "rests_on": list(said.drivers),
+        "note": _OWN_BASELINE_NOTE,
+        "provenance": {"path": "patterns_yesterday", "as_of": day,
+                       "drivers": list(said.drivers)},
+    }
+
+
+async def _metric_trend(db: AsyncSession, user_id: uuid.UUID, metric: str) -> dict:
+    label, unit = OUTCOMES[metric][1], OUTCOMES[metric][2]
+    # The clock once: the series, the baseline check and the chart's day slots
+    # must all be cut on the same day, or a call that straddles midnight draws
+    # the bars one day off the sentence above them.
+    today = tracking_today()
+    series = await daily_series(
+        db, user_id, metric, days=_TREND_WINDOW_DAYS, today=today
+    )
+    prov = {"path": "patterns_trend", "metric": metric,
+            "window_days": _TREND_WINDOW_DAYS}
+    if not series:
+        return {
+            "found": False,
+            "metric": metric,
+            "deterministic_reply": (
+                f"There are no {label} readings on record for the last "
+                f"{_TREND_WINDOW_DAYS} days."
+            ),
+            "note": "No wearable readings in the window. That is a missing "
+            "feed, not a finding: say nothing is recorded, do not estimate.",
+            "provenance": {**prov, "found": False},
+        }
+    latest = series[-1]
+    moved = trend(series)
+    reply = f"Latest {label}: {_amount(metric, latest.value)} on {latest.day.isoformat()}."
+    if moved:
+        reply += (
+            f" Over the last 7 days it averaged "
+            f"{_amount(metric, moved['this_week_mean'])} "
+            f"({moved['days_this_week']} days with a reading), against "
+            f"{_amount(metric, moved['last_week_mean'])} the week before — "
+            f"{_DIRECTION[moved['direction']]}."
+        )
+    else:
+        reply += (
+            f" Only {len(series)} of the last {_TREND_WINDOW_DAYS} days have a "
+            "reading, which is not enough to compare this week with the one "
+            "before."
+        )
+    # Screen 5: a sustained move against the reader's own baseline. Same code
+    # path as the screen, filtered to the metric asked about.
+    moves = [
+        c for c in await attention(db, user_id, today=today)
+        if c.get("metric") == metric
+    ]
+    if moves:
+        reply += f" {moves[0]['headline']} {moves[0]['note']}"
+
+    # Every day of the window gets a slot, None where the device recorded
+    # nothing — the clients draw a gap, not a zero (see chart_payload).
+    days = [today - timedelta(days=n) for n in range(_TREND_WINDOW_DAYS, 0, -1)]
+    by_day = {p.day: p.value for p in series}
+    values = [
+        wearable_display(metric, by_day[d])[0] if d in by_day else None
+        for d in days
+    ]
+    payload: dict = {
+        "metric": metric,
+        "label": label,
+        "unit": unit,
+        "window_days": _TREND_WINDOW_DAYS,
+        "direction": moved["direction"] if moved else None,
+        "days_with_a_reading": len(series),
+        "moved_against_own_baseline": [
+            {"headline": c["headline"], "note": c["note"]} for c in moves
+        ],
+        "deterministic_reply": reply,
+        "note": _OWN_BASELINE_NOTE + " 'This month' is answered with the "
+        f"{_TREND_WINDOW_DAYS} days the trend covers; say which window it is.",
+        "provenance": {**prov, "days": len(series),
+                       "direction": moved["direction"] if moved else None},
+    }
+    if sum(v is not None for v in values) >= 2:
+        payload[OUT_OF_BAND_VISUAL] = chart_payload(
+            "line",
+            f"{label.capitalize()} — last {_TREND_WINDOW_DAYS} days",
+            [d.strftime("%d %b") for d in days],
+            values,
+            unit=wearable_display(metric, 0.0)[1],
+            source="wearable",
+            metric=metric,
+            grain="day",
+            window_days=_TREND_WINDOW_DAYS,
+        )
+    return payload
+
+
+async def _behaviour_patterns(db: AsyncSession, user_id: uuid.UUID) -> dict:
+    cards = await stored_cards(db, user_id)
+    if not cards:
+        # Stored rows AND the one-off compute both came back empty. That is
+        # the sweep not having produced anything, which is not the reader
+        # having nothing -- the two must never share a sentence.
+        return {
+            "computed": False,
+            "note": (
+                "The behaviour-pattern sweep has not produced results for this "
+                "reader yet. This is NOT a statement that they have no data: "
+                "say the patterns are not ready yet, and do not describe any."
+            ),
+            "provenance": {"path": "patterns_correlations", "computed": False},
+        }
+    ready = [c for c in cards if c.get("enough_data")]
+    waiting = [c for c in cards if not c.get("enough_data")]
+    if ready:
+        reply = " ".join(str(c.get("headline") or "") for c in ready)
+        reply += (
+            " These are patterns in your own records over the last "
+            f"{WINDOW_DAYS} days, not proof that one caused the other."
+        )
+    else:
+        # The card nearest to unlocking already says how many days it needs.
+        closest = max(
+            waiting,
+            key=lambda c: min(int(c.get("days_with") or 0),
+                              int(c.get("days_without") or 0)),
+        )
+        reply = (
+            "None of your habits and readings has enough days side by side "
+            f"yet. {closest.get('detail') or ''}"
+        ).strip()
+    keep = ("key", "title", "headline", "detail", "days_with", "days_without")
+    return {
+        "window_days": WINDOW_DAYS,
+        "patterns": [{k: c.get(k) for k in keep} for c in ready],
+        "not_yet": [
+            {k: c.get(k) for k in ("title", "days_with", "days_without")}
+            for c in waiting
+        ],
+        "deterministic_reply": reply,
+        "note": _OWN_BASELINE_NOTE + " A 'not_yet' entry is a pair short of "
+        "days, not a finding of no effect.",
+        "provenance": {"path": "patterns_correlations", "ready": len(ready),
+                       "not_yet": len(waiting)},
+    }
+
+
+async def get_trends_and_patterns(
+    db: AsyncSession, user_id: uuid.UUID, args: dict, _session_id
+) -> dict | None:
+    # Structured arguments straight through, as get_health_summary does, and
+    # an unrecognised value falls to the most-asked focus rather than to None.
+    focus = str(args.get("focus") or "trend")
+    if focus == "yesterday":
+        return await _yesterday_review(db, user_id)
+    if focus == "patterns":
+        return await _behaviour_patterns(db, user_id)
+    metric = str(args.get("metric") or "sleep_duration")
+    if metric not in TREND_METRICS:
+        metric = "sleep_duration"
+    return await _metric_trend(db, user_id, metric)
 
 
 async def get_family_members(
