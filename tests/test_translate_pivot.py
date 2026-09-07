@@ -37,8 +37,15 @@ async def test_inbound_without_translator_is_inactive_with_local_detection():
     assert p.display_language == "te"
     assert p.english_text == TELUGU
 
-    # Romanized text needs the sidecar (IndicLID) — locally it is English.
+    # Romanized Hindi: the local router names it even with no sidecar, so
+    # the English-fallback notice can fire; nothing is translated.
     p = await pivot_inbound("mujhe bahut dard hai kya karu", None)
+    assert not p.active
+    assert p.display_language == "hi-Latn"
+    assert p.english_text == "mujhe bahut dard hai kya karu"
+
+    # Other romanized Indic still needs the sidecar (IndicLID).
+    p = await pivot_inbound("naaku chala noppi undi", None)
     assert not p.active
     assert p.display_language == "en"
 
@@ -105,7 +112,8 @@ async def test_inbound_latin_sidecar_down_stays_english():
     fake = FakeTranslator(fail=True)
     p = await pivot_inbound("mujhe bahut dard hai kya karu", fake)
     assert not p.active
-    assert p.display_language == "en"  # no word lists — English fail-open
+    # Untranslated (English fail-open) but NAMED, so the reader gets a notice.
+    assert p.display_language == "hi-Latn"
 
 
 # --------------------------------------------------------------------------- #
@@ -320,3 +328,66 @@ async def test_english_followup_after_telugu_stays_english(db_session):
     assert "translation" not in r2.provenance
     assert "Reply in English" in provider.calls[1]["system"]
     assert not r2.response_message.startswith("[te/")
+
+
+# --------------------------------------------------------------------------- #
+# Romanized-Hindi router × sidecar
+# --------------------------------------------------------------------------- #
+HINGLISH = "mera sugar kitna hai"
+
+
+async def test_router_is_the_floor_when_sidecar_calls_hinglish_english():
+    fake = FakeTranslator(
+        detect_result={"language": "en", "script": "latin", "confidence": 0.9},
+    )
+    p = await pivot_inbound(HINGLISH, fake)
+    assert p.active
+    assert p.language == "hi" and p.script == "latin"
+    assert p.english_text == f"[en] {HINGLISH}"
+
+
+async def test_router_is_the_floor_when_sidecar_detect_is_down():
+    # /detect fails but /translate works (partial outage): still pivots.
+    class DetectDown(FakeTranslator):
+        async def detect(self, text: str) -> dict | None:
+            return None
+
+    p = await pivot_inbound(HINGLISH, DetectDown())
+    assert p.active and p.language == "hi" and p.script == "latin"
+
+
+async def test_confident_sidecar_verdict_outranks_router():
+    # IndicLID says Punjabi with confidence: the router's "hi" does not win.
+    fake = FakeTranslator(
+        detect_result={"language": "pa", "script": "latin", "confidence": 0.8},
+    )
+    p = await pivot_inbound(HINGLISH, fake)
+    assert p.active and p.language == "pa"
+
+
+async def test_sidecar_fully_down_keeps_hinglish_message_untranslated():
+    p = await pivot_inbound(HINGLISH, FakeTranslator(fail=True))
+    assert not p.active
+    assert p.display_language == "hi-Latn"
+    assert p.english_text == HINGLISH
+
+
+async def test_english_still_never_pivots_without_sidecar_verdict():
+    fake = FakeTranslator(
+        detect_result={"language": "en", "script": "latin", "confidence": 0.9},
+    )
+    p = await pivot_inbound("what should my blood sugar be after meals", fake)
+    assert not p.active and p.display_language == "en"
+    assert not any(c[0] == "to_english" for c in fake.calls)
+
+
+async def test_hinglish_without_sidecar_gets_english_plus_latin_notice(db_session):
+    from app.i18n.notices import ENGLISH_FALLBACK_NOTICE
+
+    result = await handle_chat(
+        db_session, uuid.uuid4(), HINGLISH, FakeProvider(), translator=None,
+    )
+    assert result.response_message.endswith(ENGLISH_FALLBACK_NOTICE["hi-Latn"])
+    assert result.provenance["translation"] == {
+        "language": "hi-Latn", "status": "english_notice",
+    }

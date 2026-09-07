@@ -170,7 +170,7 @@ def lang_hint(pivot, message: str) -> str:
     """The reader's language for notice selection — pivot detection first,
     script-range detection as the fallback."""
     if pivot is not None and pivot.language and pivot.language != "en":
-        return pivot.language
+        return pivot.display_language  # keeps "-Latn", so the notice can too
     return detect_language(message)
 
 

@@ -145,11 +145,20 @@ async def pivot_inbound(
 
     Native-script detection is deterministic (Unicode ranges) and authoritative;
     the sidecar only refines the Devanagari hi/mr ambiguity. Latin-script
-    language ID is entirely the sidecar's job (IndicLID) — without a sidecar,
-    Latin-script text is treated as English.
+    language ID is the sidecar's job (IndicLID) when it is up and confident;
+    the local function-word router (app/i18n/language.py) is the floor under
+    it — "hi-Latn" when the sidecar is absent, failing, or calls a message
+    English that reads as Hinglish. A confident sidecar verdict for ANY
+    supported language wins, so pa-Latn/mr-Latn are never mislabelled Hindi
+    by the router when the sidecar can tell them apart.
     """
     local = detect_language(message)
-    base, script = ("en", "latin") if local == "en" else (local, "native")
+    if local == "en":
+        base, script = "en", "latin"
+    elif local.endswith("-Latn"):
+        base, script = local[: -len("-Latn")], "latin"
+    else:
+        base, script = local, "native"
 
     if translator is None or len(message.strip()) < 3:
         return InboundPivot(base, script, message, active=False)
@@ -176,20 +185,21 @@ async def pivot_inbound(
             return InboundPivot(lang, "native", english, active=True)
         return InboundPivot(lang, "native", message, active=False)
 
-    # Latin script: the sidecar decides between English and romanized Indic.
-    det = await translator.detect(message)
-    if det is None:
-        return InboundPivot(base, script, message, active=False)
+    # Latin script: the sidecar decides between English and romanized Indic;
+    # the local router is the floor when it cannot.
+    det = await translator.detect(message) or {}
     lang = str(det.get("language", "en"))
     confidence = float(det.get("confidence", 0.0) or 0.0)
-    if lang in SUPPORTED_LANGUAGES and confidence >= MIN_DETECT_CONFIDENCE:
-        english = await translator.translate(message, lang, "to_english", "latin")
-        if english is not None:
-            if not digits_preserved(message, english):  # see native branch
-                return InboundPivot(lang, "latin", message, active=False)
-            return InboundPivot(lang, "latin", english, active=True)
-        return InboundPivot(lang, "latin", message, active=False)
-    return InboundPivot("en", "latin", message, active=False)
+    if lang not in SUPPORTED_LANGUAGES or confidence < MIN_DETECT_CONFIDENCE:
+        lang = base
+    if lang == "en":
+        return InboundPivot("en", "latin", message, active=False)
+    english = await translator.translate(message, lang, "to_english", "latin")
+    if english is not None:
+        if not digits_preserved(message, english):  # see native branch
+            return InboundPivot(lang, "latin", message, active=False)
+        return InboundPivot(lang, "latin", english, active=True)
+    return InboundPivot(lang, "latin", message, active=False)
 
 
 # digits_preserved lives in app/grounding/fidelity.py now, next to the guard
