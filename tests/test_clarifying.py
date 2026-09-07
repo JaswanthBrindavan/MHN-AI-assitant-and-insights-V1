@@ -125,3 +125,44 @@ async def test_asking_a_question_increments_the_count_for_the_next_turn(db_sessi
     result = await handle_chat(db_session, user_id, "I feel dizzy", provider)
     assert result.session_id is not None
     assert await questions_asked(db_session, result.session_id) == 1
+
+
+# --------------------------------------------------------------------------- #
+# A medication confirmation is not a clarifying question (audit M7)
+# --------------------------------------------------------------------------- #
+async def test_medication_confirmations_do_not_spend_the_budget(db_session):
+    """The deterministic flow confirms every write with a question and never
+    consults the budget; counting those used to let two logged medicines
+    silence clarifying questions for the rest of the session."""
+    sid = await ensure_session(db_session, uuid.uuid4(), None)
+    for text in ("Just to confirm: add Dolo 650, twice a day — shall I add it?",
+                 "Did you mean Metformin 500? Shall I stop it?",
+                 "You have 3 matching entries. Shall I remove all 3 of them?"):
+        await add_message(db_session, sid, "assistant", text,
+                          extracted_intent={"action": "medication_flow",
+                                            "pending_med": {"stage": "confirm"}})
+    assert await questions_asked(db_session, sid) == 0
+
+    # The model's own question still counts, alongside them.
+    await add_message(db_session, sid, "assistant", "How long has this lasted?",
+                      extracted_intent={"action": "general_guidance"})
+    await add_message(db_session, sid, "assistant", "Any fever?")
+    assert await questions_asked(db_session, sid) == 2
+
+
+async def test_two_logged_medicines_leave_the_model_free_to_ask(db_session):
+    """End to end: two medication drafts (each confirmed with a question, each
+    declined) and the model is STILL invited to clarify on the next turn."""
+    user_id = uuid.uuid4()
+    provider = FakeProvider(turns=[LLMTurn(text="How long has that been going on?")])
+    sid = None
+    for text in ("add dolo 650 twice a day", "no",
+                 "add metformin 500 once a day", "no"):
+        r = await handle_chat(db_session, user_id, text, provider, session_id=sid)
+        sid = r.session_id
+        assert r.provenance.get("path") == "medication_flow", r.response_message
+    assert provider.calls == [] and sid is not None
+    assert await questions_asked(db_session, sid) == 0
+
+    await handle_chat(db_session, user_id, "I feel dizzy", provider, session_id=sid)
+    assert "clarifying question" in provider.calls[0]["system"]

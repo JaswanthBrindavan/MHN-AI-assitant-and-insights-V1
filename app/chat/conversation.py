@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat.memory import compact_messages, empty_summary, merge_summaries
@@ -144,11 +144,38 @@ async def maybe_compact(
     """
     try:
         summary_row = await latest_summary(db, session_id)
-        messages = await _ordered_messages(db, session_id)
-
         covered_id = (
             summary_row.covers_through_message_id if summary_row else None
         )
+
+        # Gate on a COUNT before touching a single message body. This runs on
+        # EVERY turn and almost always finds nothing to fold; reading the
+        # whole transcript to learn that moved every row the reader has ever
+        # written, per turn (see `_recent_messages` for why that is
+        # unacceptable). Rows at or after the covered message's created_at
+        # are the uncompacted ones — plus, on a timestamp tie, the covered
+        # row itself: an OVERcount, which only means the exact path below
+        # runs and finds what it always did. No covered row — no summary
+        # yet, or one retention has since deleted — makes the subquery NULL,
+        # which counts everything, exactly as the exact path does.
+        M = ConversationMessage
+        since = (
+            select(M.created_at).where(M.id == covered_id).scalar_subquery()
+        )
+        pending_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(M)
+                .where(
+                    M.session_id == session_id,
+                    or_(since.is_(None), M.created_at >= since),
+                )
+            )
+        ).scalar() or 0
+        if pending_count <= COMPACT_THRESHOLD:
+            return None
+
+        messages = await _ordered_messages(db, session_id)
         if covered_id is not None:
             ids = [m.id for m in messages]
             start = ids.index(covered_id) + 1 if covered_id in ids else 0
@@ -270,11 +297,23 @@ async def questions_asked(db: AsyncSession, session_id: uuid.UUID) -> int:
     Counted in SQL. It used to pull every assistant message's full TEXT across
     the whole session and count in Python — transferring the entire transcript
     once per turn to learn a single integer.
+
+    Only the MODEL's questions count. The deterministic medication flow
+    confirms every write with a question ("shall I add it?", "Did you mean
+    Dolo 650? Shall I stop it?") and never consults this budget — that is a
+    confirmation, not the assistant interrogating anyone. Those replies used
+    to count all the same, so two logged medicines spent the whole budget and
+    the reader could not be asked a clarifying question about anything for
+    the rest of the session. The flow's replies are persisted with
+    ``extracted_intent.action`` = ``medication_*`` (the orchestrator stores
+    the recommended action on every reply that has one), so the same COUNT
+    leaves them out.
     """
     try:
         # rtrim(col, chars) mirrors Python's str.rstrip() closely enough for a
         # loop-stopping counter, and the two-argument form exists on both
         # PostgreSQL and SQLite.
+        action = ConversationMessage.extracted_intent["action"].as_string()
         return (
             await db.execute(
                 select(func.count())
@@ -283,6 +322,7 @@ async def questions_asked(db: AsyncSession, session_id: uuid.UUID) -> int:
                     ConversationMessage.session_id == session_id,
                     ConversationMessage.role == "assistant",
                     func.rtrim(ConversationMessage.message, " \t\n\r").like("%?"),
+                    func.coalesce(action, "").not_like("medication%"),
                 )
             )
         ).scalar() or 0
