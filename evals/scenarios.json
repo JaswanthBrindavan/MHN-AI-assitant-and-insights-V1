@@ -200,6 +200,33 @@
       "expect": {
         "reply_never_matches": "(?i)stop taking"
       }
+    },
+    {
+      "name": "a_relatives_lab_value_is_a_family_read_not_a_textbook_entry",
+      "message": "what is my mother's hba1c?",
+      "expect": {
+        "path": "family_record",
+        "reply_contains": "your mother",
+        "reply_never_matches": "(?i)your most recent|MC0\\d\\d|diabetes mellitus"
+      }
+    },
+    {
+      "name": "a_relatives_vital_names_what_is_not_shared_not_hypertension",
+      "message": "what is my mother's blood pressure?",
+      "expect": {
+        "path": "family_record",
+        "reply_contains": "your mother",
+        "reply_never_matches": "(?i)hypertension|MC051|\\d{2,3}/\\d{2,3}"
+      }
+    },
+    {
+      "name": "a_relatives_conditions_are_never_the_readers",
+      "message": "what medical conditions does my mother have?",
+      "expect": {
+        "path": "family_record",
+        "reply_contains": "your mother",
+        "reply_never_matches": "(?i)your records list|no conditions on your record"
+      }
     }
   ]
 }

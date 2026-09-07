@@ -53,10 +53,18 @@ def _parse_quantity(raw: str) -> float | None:
 
 
 def find_relation(message: str) -> str | None:
-    """Return the canonical relation named with a possessive ("my father's")."""
+    """Return the canonical relation named with a possessive ("my father's").
+
+    A bare relation possessive ("mom's sugar levels", "dad's report") names
+    the same person: readers drop the "my" as often as they keep it, and a
+    gate that needs it answered "mom's sugar" from the reader's own rows.
+    """
     low = message.lower()
     for term in RELATION_TERMS:
         if re.search(rf"\bmy {term}\b", low):
+            return _RELATION_CANON.get(term, term)
+    for term in RELATION_TERMS:
+        if re.search(rf"\b{term}['\u2019]s\b", low):
             return _RELATION_CANON.get(term, term)
     return None
 
@@ -151,14 +159,14 @@ def _relation_is_only_history(message: str) -> bool:
     for term in RELATION_TERMS:
         if re.search(rf"\bmy {term}(?:'|\u2019)s\b", low):
             return False
-    # "did my father drink", "how much does my mother walk" -- an action by
-    # them is a question about them.
+    # "did my father drink", "how much does my mother walk", "does my father
+    # have any conditions" -- a verb in FRONT of the relation is a question
+    # about them, whatever verb follows. The lookahead this used to carry
+    # (excluding has/had/have/is/was after the relation) made "does my father
+    # have any conditions" read as history, and a history mention is exactly
+    # what lets a reader-only tool answer from the READER's rows.
     for term in RELATION_TERMS:
-        if re.search(
-            rf"\b(?:did|does|do|is|was|has|have)\s+my\s+{term}\b\s+"
-            rf"(?!has\b|had\b|have\b|is\b|was\b)",
-            low,
-        ):
+        if re.search(rf"\b(?:did|does|do|is|was|has|have)\s+my\s+{term}\b", low):
             return False
     return True
 
@@ -1656,3 +1664,193 @@ def is_about_me_query(message: str) -> bool:
 def is_my_conditions_query(message: str) -> bool:
     """"What health do I have" — the conditions on their record."""
     return bool(_MY_CONDITIONS_RE.search(message or ""))
+
+
+# --------------------------------------------------------------------------- #
+# A connected family member's shared record ("what is my mother's hba1c")
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class FamilyRecordQuery:
+    """Whose record, and which part of it.
+
+    ``ask`` is one of ``parameter`` (one lab value, named in ``parameter``),
+    ``parameters`` (every value in their latest shared report) or
+    ``conditions``. A ``pronoun`` with no relation or name means "her hba1c"
+    after the mother was already the subject: the handler resolves it from
+    the conversation, and answers nothing when it cannot.
+    """
+
+    ask: str
+    relation: str | None = None
+    owner_name: str | None = None
+    pronoun: str | None = None
+    parameter: str | None = None
+
+
+# "mom's", "my mother's", "my dad" -- a relation with or without "my", with or
+# without the possessive. Longest terms first, as RELATION_TERMS is ordered.
+_FAMILY_SUBJECT_RE = re.compile(
+    r"\b(?:my\s+)?(" + "|".join(RELATION_TERMS) + r")(?:['\u2019]s)?\b",
+    re.IGNORECASE,
+)
+_FAMILY_PRONOUN_RE = re.compile(r"\b(his|her|their)\b", re.IGNORECASE)
+
+_FAMILY_CONDITIONS_RE = re.compile(
+    r"\b(?:conditions?|illness(?:es)?|diseases?|ailments?|disorders?"
+    r"|health (?:issues?|problems?|conditions?)"
+    r"|medical (?:history|conditions?|problems?|issues?|records?)"
+    r"|diagnos(?:is|es|ed)|suffer(?:s|ing|ed)? from)\b",
+    re.IGNORECASE,
+)
+# "any THP in their latest doc", "what did dad's report show" -- every value in
+# the newest shared report, as opposed to one named parameter.
+_FAMILY_ALL_VALUES_RE = re.compile(
+    r"\bthps?\b|\bparameters?\b|\b(?:lab |test |blood )?(?:values|readings|results|findings)\b"
+    r"|\b(?:reports?|docs?|documents?|tests?|scans?|checkups?)\s+"
+    r"(?:show|shows|showed|say|says|said|contains?|mentions?|has|have)\b"
+    r"|\bwhat(?:'s| is| was| are)?\s+(?:all\s+)?in\b",
+    re.IGNORECASE,
+)
+# A stated value ("my mother's hba1c is 7.2") is not a lookup. A digit inside
+# a word (hba1c, d3, b12) is spelling, not a value.
+_FAMILY_STATED_VALUE_RE = re.compile(r"(?<![a-z])\d+(?:\.\d+)?")
+
+# Words that say HOW or WHERE to look, not WHAT for. What survives them is the
+# parameter's name.
+_FAMILY_FILLER = frozenset({
+    "what", "whats", "is", "was", "are", "were", "the", "a", "an", "any",
+    "latest", "last", "recent", "most", "newest", "current", "level", "levels",
+    "value", "values", "count", "reading", "readings", "number", "numbers",
+    "result", "results", "finding", "findings", "in", "of", "for", "from",
+    "on", "at", "show", "shows", "showed", "say", "says", "said", "me", "tell",
+    "check", "give", "get", "pull", "find", "please", "do", "does", "did",
+    "have", "has", "had", "there", "report", "reports", "doc", "docs",
+    "document", "documents", "test", "tests", "lab", "labs", "scan", "scans",
+    "checkup", "checkups", "thp", "thps", "parameter", "parameters", "and",
+    "according", "to", "as", "per", "she", "he", "they", "about", "know",
+    "can", "you", "could", "i", "want", "would", "like", "see", "look", "up",
+    "with", "mention", "mentioned", "mentions", "contain", "contains", "all",
+    "how", "much", "many", "its", "it", "how's", "hows", "so", "then", "now",
+    "today", "this", "that", "out", "come", "came", "back", "over", "time",
+    "trend", "trends", "history", "graph", "chart", "his", "her", "their",
+})
+# "blood report" / "lab test" / "blood work" say where, not what -- but a bare
+# "blood" must survive, or "blood sugar" becomes "sugar" and "blood pressure"
+# becomes "pressure".
+_FAMILY_WHERE_RE = re.compile(
+    r"\b(?:blood|lab|test|full body|body)\s+(?:reports?|tests?|work|checkups?|"
+    r"results?|panel)\b",
+    re.IGNORECASE,
+)
+_FAMILY_SYNONYMS = {"sugar": "glucose", "sugars": "glucose", "bp": "blood pressure",
+                    "haemoglobin": "hemoglobin", "a1c": "hba1c"}
+
+# ponytail: a fixed lab vocabulary decides whether a bare "my mother's X" is a
+# lab ask or something else ("my mother's doctor"). Anything not listed falls
+# through to the model, which has the same handler as a tool. Extend the list
+# when the deployed app shows a lab term that fell through.
+_FAMILY_LAB_WORDS = frozenset({
+    "hba1c", "a1c", "glucose", "sugar", "sugars", "cholesterol", "hdl", "ldl",
+    "vldl", "triglycerides", "triglyceride", "lipid", "lipids", "tsh", "t3",
+    "t4", "thyroid", "hemoglobin", "haemoglobin", "hb", "creatinine", "urea",
+    "uric", "egfr", "vitamin", "b12", "d3", "ferritin", "iron", "platelet",
+    "platelets", "wbc", "rbc", "esr", "crp", "sgot", "sgpt", "alt", "ast",
+    "bilirubin", "albumin", "protein", "sodium", "potassium", "calcium",
+    "magnesium", "phosphorus", "insulin", "psa", "cbc", "kidney", "liver",
+    "hematocrit", "mcv", "mch", "mchc", "rdw", "basophils", "eosinophils",
+    "neutrophils", "lymphocytes", "monocytes", "ggt", "hscrp", "homocysteine",
+    "cortisol", "prolactin", "testosterone", "estrogen", "fsh", "lh", "hcg",
+    "urine", "chloride", "bicarbonate", "globulin", "amylase", "lipase", "ldh",
+    "ck", "troponin", "bnp", "folate", "zinc", "copper", "selenium", "lead",
+    "ige", "ana", "ra", "rheumatoid", "hepatitis", "hiv", "vdrl", "dengue",
+    "malaria", "typhoid", "widal", "glycated", "glycosylated",
+    "fasting", "postprandial", "pp", "pressure", "bp", "pulse", "heart",
+    "spo2", "oxygen", "saturation", "weight", "bmi", "temperature", "height",
+    # Qualifiers a lab prints in the name.
+    "blood", "total", "free", "serum", "random", "direct", "indirect",
+    "absolute", "ratio", "rate", "level", "levels",
+})
+# Registry entries that are VITALS or body measurements -- not lab values, and
+# not shareable through Family Connect at all.
+_FAMILY_VITAL_TERMS = frozenset({
+    "blood pressure", "bp", "heart rate", "pulse", "spo2", "oxygen saturation",
+    "weight", "bmi", "temperature", "height", "steps", "sleep", "hrv",
+})
+
+
+def is_family_vital_term(parameter: str) -> bool:
+    """True for a metric that only ever lives in vitals or trackers."""
+    low = " ".join(parameter.lower().split())
+    return low in _FAMILY_VITAL_TERMS or any(
+        re.search(rf"\b{re.escape(v)}\b", low) for v in _FAMILY_VITAL_TERMS
+    )
+
+
+def parse_family_record_query(message: str) -> FamilyRecordQuery | None:
+    """A question about a connected relative's shared record, or None.
+
+    Answers three shapes, tolerant of phrasing: one lab value ("what is my
+    mother's hba1c", "mom's sugar levels", "what did dad's last report show
+    for cholesterol"), every value in their latest report ("any THP in their
+    latest doc"), and their conditions ("does my father have any
+    conditions"). It claims nothing without a subject other than the reader,
+    and it leaves a document LISTING ("show my mother's reports") and an
+    INSIGHTS ask ("insights from my father's report") to the handlers that
+    already own them.
+    """
+    low = message.lower()
+    subject = _FAMILY_SUBJECT_RE.search(low)
+    relation = _RELATION_CANON.get(subject.group(1), subject.group(1)) if subject else None
+    owner_name = None
+    pronoun = None
+    if relation is None:
+        m = _POSSESSIVE_NAME_RE.search(low)
+        if m and m.group(1) not in _POSSESSIVE_STOP:
+            owner_name = m.group(1)
+    if relation is None and owner_name is None:
+        pm = _FAMILY_PRONOUN_RE.search(low)
+        if pm is None:
+            return None
+        pronoun = pm.group(1).lower()
+    if relation is not None and _relation_is_only_history(message):
+        return None                     # "my father has diabetes, is my sugar ok"
+    if _FAMILY_STATED_VALUE_RE.search(low):
+        return None                     # a value stated, not asked for
+    if parse_ai_result_query(message) is not None:
+        return None                     # insights: the pipeline's result path
+
+    if _FAMILY_CONDITIONS_RE.search(low):
+        return FamilyRecordQuery(
+            ask="conditions", relation=relation, owner_name=owner_name,
+            pronoun=pronoun,
+        )
+
+    # What is left once the subject and the filler are gone is the parameter.
+    text = _FAMILY_SUBJECT_RE.sub(" ", low) if subject else low
+    if owner_name:
+        text = re.sub(rf"\b{re.escape(owner_name)}['\u2019]s\b", " ", text)
+    text = _FAMILY_WHERE_RE.sub(" ", text)
+    text = re.sub(r"['\u2019]s\b", "", text)       # "what's" -> "what"
+    text = re.sub(r"[^a-z0-9 /%.-]", " ", text)
+    words = [
+        _FAMILY_SYNONYMS.get(w, w)
+        for w in text.split()
+        if len(w.strip(".-/")) > 1 and w.strip(".-/") not in _FAMILY_FILLER
+    ]
+    term = " ".join(words).strip()
+    if not term:
+        if _FAMILY_ALL_VALUES_RE.search(low):
+            return FamilyRecordQuery(
+                ask="parameters", relation=relation, owner_name=owner_name,
+                pronoun=pronoun,
+            )
+        return None
+    if not all(w in _FAMILY_LAB_WORDS for w in term.split()):
+        # "my mother's doctor" is not a lab ask, and "how mum's sugar control
+        # has been lately" is one this parser cannot name cleanly. Both go to
+        # the model, which has the same handler as a tool.
+        return None
+    return FamilyRecordQuery(
+        ask="parameter", relation=relation, owner_name=owner_name,
+        pronoun=pronoun, parameter=term,
+    )

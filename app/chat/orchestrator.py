@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chat import memory_assembly
 from app.chat.abilities import (
+    names_another_person,
     parse_correlation_query,
     parse_document_query_fuzzy,
     parse_metric_query,
@@ -54,6 +55,7 @@ from app.chat.data_handlers import (
     handle_doctor_consult_query,
     handle_document_query,
     handle_family_list_query,
+    handle_family_record_query,
     handle_metric_query,
     handle_report_param_ask,
     handle_section_detail_query,
@@ -998,6 +1000,9 @@ async def _summary_reply(
         or parse_document_query_fuzzy(message) is not None
         or parse_report_param_ask(message) is not None
         or parse_section_detail_query(message) is not None
+        # "summary of my mother's health" is not the READER's summary
+        # (audit H7): this handler reads only their rows.
+        or names_another_person(message)
     ):
         return None
     try:
@@ -1455,6 +1460,52 @@ async def _dispatch(
                     risk, about["reply"], about["action"]
                 ),
                 provenance=about["provenance"],
+                language=lang,
+                trace=trace,
+            )
+
+    # 3.50) A connected family member's SHARED record — one lab value out of
+    #       their shared reports, every value in the latest one, or their
+    #       non-private conditions. SHARED and deterministic for the reason
+    #       3.49 is, and for one more: what may be read here is decided by
+    #       consent gates, not by a model. Live in production, "what is my
+    #       mother's blood pressure?" fell through to RAG and came back as a
+    #       textbook entry on hypertension that never mentioned the mother.
+    if tr.level == NONE:
+        try:
+            async with db.begin_nested():
+                family = await handle_family_record_query(
+                    db, user_id, message, session_id
+                )
+        except Exception:  # noqa: BLE001 — a records read must not break a turn
+            logger.warning("family record read failed", exc_info=True)
+            record_fail_open("family_record")
+            family = None
+        if family is not None:
+            t("Records",
+              f"looked up: what {family['provenance'].get('about')} shares with you")
+            reply = _lead(escalation, risk, family["reply"])
+            verdict = validate_reply(reply, risk)
+            provenance = dict(family["provenance"])
+            if not verdict.ok:
+                t("Output validation",
+                  f"blocked ({redact_reason(verdict.reason)}) — replaced with the safe reply")
+                reply = safe_reply(risk, session_id)
+                provenance["degraded"] = "validation"
+            else:
+                t("Output validation", "passed all safety checks")
+            await _write_receipt(
+                db, user_id=user_id, session_id=session_id, message=message,
+                model_name=provider.model_name,
+            )
+            return ChatResult(
+                response_message=reply,
+                risk_level=risk,
+                recommended_action=_led_action(
+                    risk, family["reply"], family["action"]
+                ),
+                provenance=provenance,
+                documents=None if provenance.get("degraded") else family.get("documents"),
                 language=lang,
                 trace=trace,
             )

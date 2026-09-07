@@ -264,16 +264,28 @@ async def _genders_of(
     return {uid: _norm_gender(g) for uid, g in rows}
 
 
-async def resolve_family_member(
-    db: AsyncSession, user_id: uuid.UUID, relation_term: str
-) -> uuid.UUID | None:
-    """Resolve "father"/"mother"/… to a connected user id, honouring consent.
+@dataclass(frozen=True)
+class FamilyLookup:
+    """Who a relation or name resolved to, and WHY it did not when it did not.
 
-    Only accepted links where the OWNER's read grant is on qualify. The
-    relation name is matched from the requester's perspective (relations row)
-    or its inverse for the acceptor side.
+    ``member_id`` is set only for an accepted link whose owner-side read grant
+    is on. ``connected`` says whether an accepted link matched at all, so a
+    caller can tell "not connected" from "connected but not sharing" — two
+    different things to tell a reader, and one ``None`` conflated them.
     """
-    term = relation_term.strip().lower()
+
+    member_id: uuid.UUID | None
+    connected: bool
+
+
+NOT_CONNECTED = FamilyLookup(member_id=None, connected=False)
+
+
+async def _accepted_links(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[tuple[uuid.UUID, bool, str | None]]:
+    """(other user id, owner shares, relation name from the viewer's side)
+    for every ACCEPTED link the viewer is on."""
     rows = (
         await db.execute(
             select(FamilyConnect, Relation)
@@ -286,85 +298,104 @@ async def resolve_family_member(
             .order_by(FamilyConnect.id)
         )
     ).all()
-    candidates: list[uuid.UUID] = []
+    out: list[tuple[uuid.UUID, bool, str | None]] = []
     for fc, rel in rows:
-        if rel is None:
-            continue
         if fc.requester_id == user_id:
             # Viewer sent the request → owner is the acceptor → acc_read.
             other = fc.acceptor_id
-            other_shares = _owner_read_grant(fc, owner_is_requester=False)
-            name = rel.name
+            shares = _owner_read_grant(fc, owner_is_requester=False)
+            name = rel.name if rel is not None else None
         else:
             # Viewer accepted → owner is the requester → req_read.
             other = fc.requester_id
-            other_shares = _owner_read_grant(fc, owner_is_requester=True)
-            name = rel.inverse
-        if other_shares and _relation_matches(term, name):
-            candidates.append(other)
-    if not candidates:
-        return None
+            shares = _owner_read_grant(fc, owner_is_requester=True)
+            name = rel.inverse if rel is not None else None
+        out.append((other, shares, name))
+    return out
+
+
+async def lookup_family_member(
+    db: AsyncSession, user_id: uuid.UUID, relation_term: str
+) -> FamilyLookup:
+    """Resolve "father"/"mother"/… to a connected user, honouring consent.
+
+    The relation name is matched from the requester's perspective (relations
+    row) or its inverse for the acceptor side. Only accepted links count as
+    connected; only an owner-side read grant yields a member id.
+    """
+    term = relation_term.strip().lower()
+    matched = [
+        (other, shares) for other, shares, name in await _accepted_links(db, user_id)
+        if name and _relation_matches(term, name)
+    ]
+    if not matched:
+        return NOT_CONNECTED
     # A gendered ask ("grandmother") against generic relation rows
     # ("Grandparent") is settled by the member's own gender: contradicting
     # candidates are excluded, unknown gender passes (fail-open).
     want = _TERM_GENDER.get(term)
-    if want is not None and len({*candidates}) >= 1:
-        genders = await _genders_of(db, candidates)
-        candidates = [
-            c for c in candidates
-            if genders.get(c) is None or genders.get(c) == want
+    if want is not None:
+        genders = await _genders_of(db, [m[0] for m in matched])
+        matched = [
+            m for m in matched
+            if genders.get(m[0]) is None or genders.get(m[0]) == want
         ]
-    return candidates[0] if candidates else None
+    if not matched:
+        return NOT_CONNECTED
+    shared = [other for other, shares in matched if shares]
+    return FamilyLookup(member_id=shared[0] if shared else None, connected=True)
 
 
-async def resolve_family_member_by_name(
-    db: AsyncSession, user_id: uuid.UUID, name_term: str
+async def resolve_family_member(
+    db: AsyncSession, user_id: uuid.UUID, relation_term: str
 ) -> uuid.UUID | None:
+    """The connected AND sharing member for a relation term, or None."""
+    return (await lookup_family_member(db, user_id, relation_term)).member_id
+
+
+async def lookup_family_member_by_name(
+    db: AsyncSession, user_id: uuid.UUID, name_term: str
+) -> FamilyLookup:
     """Resolve "Bhargava's reports" — a connected member named by name.
 
     Same consent gate as relation resolution: accepted link + the owner-side
     read grant. The term matches a word of the member's display name or
     their username, prefix-tolerant in both directions ("bhargav" finds
-    "Bhargava Ram" and vice versa). None when nobody qualifies — a stray
-    possessive then just falls through to the normal not-found reply.
+    "Bhargava Ram" and vice versa). Not connected when nobody matches — a
+    stray possessive then just falls through to the normal not-found reply.
     """
     term = name_term.strip().lower()
     if len(term) < 3:
-        return None
-    rows = (
-        await db.execute(
-            select(FamilyConnect).where(
-                FamilyConnect.accepted.is_(True),
-                (FamilyConnect.requester_id == user_id)
-                | (FamilyConnect.acceptor_id == user_id),
-            )
-        )
-    ).scalars().all()
-    shared: list[uuid.UUID] = []
-    for fc in rows:
-        viewer_is_requester = fc.requester_id == user_id
-        other = fc.acceptor_id if viewer_is_requester else fc.requester_id
-        if _owner_read_grant(fc, owner_is_requester=not viewer_is_requester):
-            shared.append(other)
-    if not shared:
-        return None
+        return NOT_CONNECTED
+    links = {other: shares for other, shares, _name in await _accepted_links(db, user_id)}
+    if not links:
+        return NOT_CONNECTED
     try:
         name_rows = (
             await db.execute(
                 select(User.id, User.name, User.user_name).where(
-                    User.id.in_(shared)
+                    User.id.in_(list(links))
                 )
             )
         ).all()
     except Exception:  # noqa: BLE001 — user table may be absent standalone
-        return None
+        return NOT_CONNECTED
     for uid, display, login in name_rows:
         for word in f"{display or ''} {login or ''}".lower().split():
             if len(word) >= 3 and (
                 word.startswith(term) or term.startswith(word)
             ):
-                return uid
-    return None
+                return FamilyLookup(
+                    member_id=uid if links[uid] else None, connected=True
+                )
+    return NOT_CONNECTED
+
+
+async def resolve_family_member_by_name(
+    db: AsyncSession, user_id: uuid.UUID, name_term: str
+) -> uuid.UUID | None:
+    """The connected AND sharing member named by name, or None."""
+    return (await lookup_family_member_by_name(db, user_id, name_term)).member_id
 
 
 # --------------------------------------------------------------------------- #
@@ -653,6 +684,49 @@ async def latest_documents(
     # sorts last rather than to the epoch, so it cannot displace a dated one.
     hits.sort(key=lambda h: (h.when is None, _sort_key(h.when)))
     return hits[:limit]
+
+
+async def shared_report_contents(
+    db: AsyncSession,
+    viewer_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    *,
+    owner_label: str,
+    limit: int = 20,
+) -> list[tuple[DocumentHit, object]]:
+    """A family member's newest shared reports and scans WITH their content.
+
+    The family read of lab values. It goes through ``latest_documents`` with
+    the viewer, so production's own gate applies — not private, and no
+    ``file_access_exclusions`` row for this viewer — on top of the link and
+    read-grant check the caller did to obtain ``owner_id``.
+
+    Deliberately NOT ``user_thp_series``: that feed is privacy-agnostic — a
+    private report's readings are stored there too — so reading it for a
+    viewer would hand them values from reports that were never shared.
+    """
+    hits = await latest_documents(
+        db, owner_id, ["report", "scan"],
+        owner_label=owner_label, include_private=False,
+        viewer_id=viewer_id, limit=limit,
+    )
+    contents: dict[tuple[str, int], object] = {}
+    for kind in ("report", "scan"):
+        ids = [h.doc_id for h in hits if h.kind == kind]
+        if not ids:
+            continue
+        model, _label = DOCUMENT_KINDS[kind]
+        rows = (
+            await db.execute(
+                select(model).where(
+                    model.id.in_(ids),  # type: ignore[attr-defined]
+                    model.user_id == owner_id,  # type: ignore[attr-defined]
+                )
+            )
+        ).scalars().all()
+        for r in rows:
+            contents[(kind, r.id)] = getattr(r, "content", None)
+    return [(h, contents.get((h.kind, h.doc_id))) for h in hits]
 
 
 # --------------------------------------------------------------------------- #
@@ -1861,9 +1935,13 @@ _WARNING_SEVERITIES = frozenset({"severe", "medium"})
 
 
 async def medical_records(
-    db: AsyncSession, user_id: uuid.UUID, *, type_: str | None = None
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    type_: str | None = None,
+    shared_only: bool = False,
 ) -> list[MedicalCondition]:
-    """The reader's own conditions / surgeries / allergies — one table, one read.
+    """Conditions / surgeries / allergies — one table, one read.
 
     THE single place the invisibility rule is applied, because it is a column a
     reader can easily forget:
@@ -1880,10 +1958,13 @@ async def medical_records(
     the deployed app was that EVERY condition in production was invisible to
     its own owner — "what health issues do I have?" was answered "There are no
     conditions on your record" for a reader with two. The flag belongs on a
-    family read, and there is no family path into this table.
+    family read — and ``shared_only=True`` IS that read: a connected relative
+    sees only ``private IS FALSE``, exactly mhn-spring's
+    ``getByUserIdAndIsPrivateFalse`` (a NULL, from a row that predates the
+    column, is not a decision to share). Callers must have resolved
+    ``user_id`` through the consent gate first; this only applies the flag.
 
-    Own data only. Callers split by ``type`` in Python rather than issuing one
-    query per type.
+    Callers split by ``type`` in Python rather than issuing one query per type.
     """
     return list(
         (
@@ -1893,6 +1974,7 @@ async def medical_records(
                     MedicalCondition.user_id == user_id,
                     MedicalCondition.deleted_at.is_(None),
                     *([MedicalCondition.type == type_] if type_ else []),
+                    *([MedicalCondition.private.is_(False)] if shared_only else []),
                 )
                 .order_by(MedicalCondition.id)
             )

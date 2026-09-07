@@ -22,15 +22,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.charts.svg import chart_payload
 from app.chat.abilities import (
+    _POSSESSIVE_NAME_RE,
+    _POSSESSIVE_STOP,
     METRIC_REGISTRY,
     DocumentQuery,
+    FamilyRecordQuery,
     MedicationCommand,
     MetricQuery,
     StatedValue,
     SummaryQuery,
     TrackerAdd,
     TrackerQuery,
+    find_relation,
     is_about_me_query,
+    is_family_vital_term,
     is_my_conditions_query,
     param_aliases,
     param_tokens,
@@ -39,6 +44,7 @@ from app.chat.abilities import (
     parse_doctor_consult_query,
     parse_document_query_fuzzy,
     parse_family_list_query,
+    parse_family_record_query,
     parse_medication_command,
     parse_metric_query,
     parse_report_param_ask,
@@ -58,10 +64,12 @@ from app.chat.episodes import history as symptom_history
 from app.coredata.service import (
     _MANUAL_UNIT,
     _RESOURCE_TYPE,
+    _TERM_GENDER,
     DOCUMENT_KINDS,
     HRV_SIBLING,
     DocumentHit,
     WearablePoint,
+    _collect_params,
     active_medications,
     add_lifestyle_log,
     allergy_rank,
@@ -80,6 +88,8 @@ from app.coredata.service import (
     lifestyle_phrase,
     lifestyle_totals,
     list_family_connections,
+    lookup_family_member,
+    lookup_family_member_by_name,
     medical_records,
     plural_unit,
     recent_doctor_consults,
@@ -87,6 +97,7 @@ from app.coredata.service import (
     resolve_family_member,
     resolve_family_member_by_name,
     sahha_meta,
+    shared_report_contents,
     target_phrase,
     targets,
     thp_series,
@@ -119,6 +130,11 @@ _T = TypeVar("_T")
 _NOT_MEDICAL_ADVICE = (
     "This is your own recorded data, not medical advice — please discuss any "
     "concerns with your doctor."
+)
+# The same line for a family member's record: it is THEIR data, not the reader's.
+_NOT_MEDICAL_ADVICE_FAMILY = (
+    "This is what their record shows, not medical advice — please discuss any "
+    "concerns with their doctor."
 )
 
 # Never diagnoses; always routes an out-of-range reading to a clinician.
@@ -436,6 +452,19 @@ def _document_card(h: DocumentHit, *, owner_slug: str | None = None) -> dict:
     }
 
 
+async def _member_slug(db: AsyncSession, member: uuid.UUID) -> str | None:
+    """A family member's username — the /family/{slug} route key on a card."""
+    try:
+        async with db.begin_nested():  # a failed read must not poison the rest
+            return (
+                await db.execute(
+                    select(User.user_name).where(User.id == member)
+                )
+            ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 — user table may be absent standalone
+        return None
+
+
 async def handle_document_query(
     db: AsyncSession, user_id: uuid.UUID, message: str,
     *,
@@ -479,17 +508,7 @@ async def handle_document_query(
                                "resolved": False},
             }
         owner_id, owner_label, include_private = member, label, False
-        try:
-            from app.models.core import User
-
-            async with db.begin_nested():  # a failed read must not poison the rest
-                owner_slug = (
-                    await db.execute(
-                        select(User.user_name).where(User.id == member)
-                    )
-                ).scalar_one_or_none()
-        except Exception:  # noqa: BLE001 — user table may be absent standalone
-            owner_slug = None
+        owner_slug = await _member_slug(db, member)
 
     hits = await latest_documents(
         db, owner_id, list(query.kinds),
@@ -585,6 +604,279 @@ async def handle_document_query(
             ],
         },
     }
+
+
+# --------------------------------------------------------------------------- #
+# A connected family member's shared record
+# --------------------------------------------------------------------------- #
+_FAMILY_PRONOUN_GENDER = {"his": "male", "her": "female"}
+
+
+async def _recent_family_subject(
+    db: AsyncSession, session_id: uuid.UUID | None, message: str, pronoun: str
+) -> tuple[str | None, str | None]:
+    """"her hba1c" — the relative the reader named earlier in this session.
+
+    Newest turn first, skipping the message being answered. A pronoun whose
+    gender contradicts the relation ("his" after "my mother") is not resolved
+    to it. Nothing found means nothing is answered: guessing whose record to
+    read is not an option.
+    """
+    want = _FAMILY_PRONOUN_GENDER.get(pronoun)
+    for earlier in await _recent_user_messages(db, session_id):
+        if earlier == message:
+            continue
+        relation = find_relation(earlier)
+        if relation is not None:
+            have = _TERM_GENDER.get(relation)
+            if want is None or have is None or have == want:
+                return relation, None
+            continue
+        m = _POSSESSIVE_NAME_RE.search(earlier.lower())
+        if m and m.group(1) not in _POSSESSIVE_STOP:
+            return None, m.group(1)
+    return None, None
+
+
+def _param_matcher(parameter: str):
+    """name -> bool for the asked parameter, by the registry's spellings
+    where it has them ("hba1c" finds "Glycosylated Hemoglobin (HbA1c)") and
+    by whole-token containment for the long tail."""
+    want = param_tokens(parameter)
+    aliases = param_aliases(want)
+    if aliases is None:
+        for key, spec in METRIC_REGISTRY.items():
+            if want in (param_tokens(key), param_tokens(spec.get("display", ""))) and spec.get(
+                "param_terms"
+            ):
+                aliases = tuple(spec["param_terms"]), tuple(spec.get("param_exclude", ()))
+                break
+    if aliases is not None:
+        terms, exclude = aliases
+        return lambda name: (
+            any(t in name.lower() for t in terms)
+            and not any(x in name.lower() for x in exclude)
+        )
+    return lambda name: want <= param_tokens(name)
+
+
+def _shared_doc_phrase(hit: DocumentHit) -> str:
+    title = hit.title or hit.filepath.rsplit("/", 1)[-1]
+    when = hit.when.strftime("%d %b %Y") if hit.when else "date unknown"
+    return f"'{title}' ({hit.kind}, {when})"
+
+
+async def handle_family_record_query(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    message: str,
+    session_id: uuid.UUID | None = None,
+    *,
+    query: FamilyRecordQuery | None = None,
+) -> dict | None:
+    """A connected relative's SHARED lab value, latest report or conditions.
+
+    Every read is consent-gated, and the four ways of having nothing to say
+    are four different sentences:
+
+    * not connected — no accepted Family Connect link matches;
+    * connected but not sharing — the owner-side read grant is off;
+    * nothing on file — connected and sharing, and the shared records hold
+      no such thing. A document excluded through ``file_access_exclusions``
+      or marked private is simply not among the shared records, so its
+      values never appear and its existence is never asserted;
+    * this KIND is never shared — a vital, tracker or lifestyle reading, for
+      which ``resource_type_enum`` has no entry and no consent exists.
+
+    Lab values come from the member's shared documents through
+    ``shared_report_contents`` (never ``user_thp_series``, which holds private
+    reports' readings too); conditions from ``medical_records(shared_only=True)``.
+    Vitals, trackers and lifestyle logs have no consent mechanism and are
+    never read for anyone but the reader.
+
+    ``message`` is parsed unless a TOOL CALL passes ``query`` directly.
+    """
+    if query is None:
+        query = parse_family_record_query(message)
+    if query is None:
+        return None
+
+    relation, owner_name = query.relation, query.owner_name
+    if relation is None and owner_name is None:
+        if not query.pronoun:
+            return None
+        relation, owner_name = await _recent_family_subject(
+            db, session_id, message, query.pronoun
+        )
+        if relation is None and owner_name is None:
+            return None
+
+    if relation:
+        lookup = await lookup_family_member(db, user_id, relation)
+        asked, label = relation, f"your {relation}"
+    else:
+        lookup = await lookup_family_member_by_name(db, user_id, owner_name or "")
+        asked = owner_name or ""
+        label = asked.title()
+    provenance: dict = {"path": "family_record", "ask": query.ask,
+                        "about": label, "resolved": lookup.member_id is not None}
+
+    if lookup.member_id is None:
+        if not lookup.connected:
+            reply = (
+                f"I couldn't find {label} among your Family Connect members "
+                f"(no accepted connection matches '{asked}'). Once they are "
+                "connected and sharing with you, I can read the documents "
+                "and conditions they choose to share."
+            )
+            provenance["reason"] = "not_connected"
+        else:
+            reply = (
+                f"{label.capitalize()} is connected in Family Connect, but "
+                "hasn't turned on sharing with you, so I can't read their "
+                "records. They can switch it on from their Family Connect "
+                "settings in the app."
+            )
+            provenance["reason"] = "not_sharing"
+        return {"reply": reply, "action": "none", "provenance": provenance}
+
+    member = lookup.member_id
+    cap = label[0].upper() + label[1:]
+
+    if query.ask == "conditions":
+        rows = await medical_records(db, member, type_="condition", shared_only=True)
+        provenance["conditions"] = sorted(c.name for c in rows if c.name)
+        if rows:
+            named = "; ".join(
+                f"{c.name}" + (f" ({c.status})" if c.status else "")
+                for c in rows[:8]
+            )
+            reply = (
+                f"The records {label} has shared with you list: {named}. "
+                f"{_NOT_MEDICAL_ADVICE_FAMILY}"
+            )
+        else:
+            reply = (
+                f"There are no conditions in the records {label} has shared "
+                "with you. That is what is shared here, not a statement that "
+                "they have none."
+            )
+        return {"reply": reply, "action": "review_with_clinician",
+                "provenance": provenance}
+
+    docs = await shared_report_contents(db, user_id, member, owner_label=label)
+    slug = await _member_slug(db, member)
+    ask = query.ask if query.parameter or query.ask != "parameter" else "parameters"
+
+    if ask == "parameters":
+        for hit, content in docs:
+            params: list[tuple[str, str, str | None]] = []
+            _collect_params(content, params)
+            if not params:
+                continue
+            lines = [
+                f"Here's what was read from {label}'s latest shared report, "
+                f"{_shared_doc_phrase(hit)}:"
+            ]
+            for name, value, unit in params[:8]:
+                lines.append(f"• {name}: {value}" + (f" {unit}" if unit else ""))
+            if len(params) > 8:
+                lines.append(f"…and {len(params) - 8} more values.")
+            lines.append(_NOT_MEDICAL_ADVICE_FAMILY)
+            provenance.update(document={"kind": hit.kind, "id": hit.doc_id,
+                                        "date": hit.when.isoformat() if hit.when else None},
+                              found=len(params))
+            return {
+                "reply": "\n".join(lines),
+                "action": "review_with_clinician",
+                "documents": [_document_card(hit, owner_slug=slug)],
+                "provenance": provenance,
+            }
+        provenance["found"] = 0
+        reply = (
+            f"None of the documents {label} has shared with you carry "
+            "extracted values yet."
+            if docs else
+            f"{cap} hasn't shared any reports with you yet, so there are no "
+            "values I can read."
+        )
+        return {"reply": reply, "action": "none", "provenance": provenance}
+
+    parameter = query.parameter or ""
+    if is_family_vital_term(parameter):
+        # The fourth answer: connected and sharing, but this KIND of data is
+        # never shared. Vitals, trackers and lifestyle logs are not in
+        # resource_type_enum and have no consent mechanism, so they are not
+        # looked up for anyone but the reader -- not even inside a shared
+        # report. Say so, and say what IS available.
+        provenance["reason"] = "kind_not_shared"
+        shown_param = parameter.upper() if len(parameter) <= 4 else (
+            parameter[0].upper() + parameter[1:]
+        )
+        reply = (
+            f"{shown_param} is a vital reading, and Family Connect shares "
+            f"only documents and conditions -- so I can't see {label}'s "
+            f"{parameter} here. What I can show is what {label} has shared "
+            "with you. "
+        )
+        reply += (
+            f"The latest shared report is {_shared_doc_phrase(docs[0][0])}."
+            if docs else f"{cap} hasn't shared any reports with you yet."
+        )
+        shared = await medical_records(db, member, type_="condition", shared_only=True)
+        provenance["conditions"] = sorted(c.name for c in shared if c.name)
+        if shared:
+            reply += (
+                " Shared conditions on record: "
+                + "; ".join(c.name for c in shared[:8]) + "."
+            )
+        return {"reply": reply, "action": "none", "provenance": provenance}
+
+    matches = _param_matcher(parameter)
+    for hit, content in docs:
+        params = []
+        _collect_params(content, params)
+        for name, value, unit in params:
+            if not matches(name):
+                continue
+            flagged = value.endswith("(high)") or value.endswith("(low)")
+            flag_note = (
+                " It is flagged " + value.rsplit("(", 1)[1].rstrip(")")
+                + " against the printed reference range."
+                if flagged else ""
+            )
+            shown = value.rsplit(" (", 1)[0] if flagged else value
+            provenance.update(matched=name, document={
+                "kind": hit.kind, "id": hit.doc_id,
+                "date": hit.when.isoformat() if hit.when else None,
+            })
+            return {
+                "reply": (
+                    f"{cap}'s most recent {name} in the reports shared with "
+                    f"you is {shown}" + (f" {unit}" if unit else "")
+                    + f", from {_shared_doc_phrase(hit)}.{flag_note} "
+                    f"{_NOT_MEDICAL_ADVICE_FAMILY}"
+                ),
+                "action": (
+                    "discuss_with_clinician" if flagged else "review_with_clinician"
+                ),
+                "documents": [_document_card(hit, owner_slug=slug)],
+                "provenance": provenance,
+            }
+
+    provenance["found"] = 0
+    reply = (
+        f"I couldn't find {parameter} in the reports {label} has shared "
+        "with you. "
+    )
+    if docs:
+        reply += (
+            f"The latest shared report is {_shared_doc_phrase(docs[0][0])}; "
+            "I can list the shared documents if that helps."
+        )
+    else:
+        reply += f"{cap} hasn't shared any reports with you yet."
+    return {"reply": reply, "action": "none", "provenance": provenance}
 
 
 # --------------------------------------------------------------------------- #
