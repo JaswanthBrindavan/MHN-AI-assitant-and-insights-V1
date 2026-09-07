@@ -29,6 +29,7 @@ from app.auth import get_current_user_id
 from app.db import get_db
 from app.patterns.core import MIN_DAYS_PER_GROUP, WINDOW_DAYS
 from app.patterns.engine import stored_cards
+from app.patterns.render import waiting_note
 from app.patterns.service import (
     OUTCOMES,
     TREND_METRICS,
@@ -102,21 +103,47 @@ async def summary(
     ready = [c for c in cards if c.get("enough_data")]
     waiting = [c for c in cards if not c.get("enough_data")]
 
-    # How close the nearest pair is to unlocking. Screen 1's progress bar.
+    # How close the nearest pair is to unlocking, and WHAT IT IS WAITING FOR.
+    # Screen 1's progress bar plus the line under it. The bar alone reads as a
+    # countdown that runs on its own; it does not, and a reader who is not
+    # told which two things have to land on the same day can log for a month
+    # against the wrong half and watch the number sit still.
     needed = None
+    needed_note = None
     if waiting:
-        needed = min(
-            max(0, MIN_DAYS_PER_GROUP - min(
-                int(c.get("days_with") or 0), int(c.get("days_without") or 0)
+        def _short(card: dict) -> int:
+            return max(0, MIN_DAYS_PER_GROUP - min(
+                int(card.get("days_with") or 0),
+                int(card.get("days_without") or 0),
             ))
-            for c in waiting
-        )
+
+        closest = min(waiting, key=_short)
+        needed = _short(closest)
+        # `key` is exposure__outcome__lag, written by `Observation.key`. Read
+        # back from there rather than stored a second time on the card: the
+        # card is a frozen artifact, and a copy change that needed every
+        # reader's rows re-derived before it showed up is a copy change
+        # nobody can make.
+        parts = str(closest.get("key") or "").split("__")
+        if len(parts) == 3:
+            needed_note = waiting_note(
+                parts[0], parts[1],
+                int(closest.get("days_with") or 0),
+                int(closest.get("days_without") or 0),
+                title=str(closest.get("title") or ""),
+                min_days=MIN_DAYS_PER_GROUP,
+                window=WINDOW_DAYS,
+            )
 
     series = await daily_series(db, current_user, metric, days=14)
     label, unit = OUTCOMES[metric][1], OUTCOMES[metric][2]
     return {
         "building_baseline": not ready,
         "days_needed": needed,
+        # Written here, not in each app: three clients draw this card, and
+        # wording that lives in a client can only be changed by shipping an
+        # app-store release.
+        "days_needed_note": needed_note,
         "this_week": {
             "metric": metric,
             "label": label,

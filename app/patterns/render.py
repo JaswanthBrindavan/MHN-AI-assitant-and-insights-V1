@@ -21,7 +21,12 @@ thing without the false precision.
 
 from __future__ import annotations
 
-from app.patterns.core import LAG_NEXT_DAY, Observation
+from app.patterns.core import (
+    LAG_NEXT_DAY,
+    MIN_DAYS_PER_GROUP,
+    WINDOW_DAYS,
+    Observation,
+)
 
 #: How the exposure is named mid-sentence.
 EXPOSURE_PHRASE: dict[str, str] = {
@@ -42,6 +47,32 @@ OUTCOME_PHRASE: dict[str, str] = {
     "blood_sugar": "blood sugar",
     "heart_rate": "heart rate",
     "mood": "mood score",
+}
+
+#: What the reader has to keep RECORDING for a pair to become answerable,
+#: as an instruction rather than as the past-tense clause above. "Log your
+#: coffee, with the time" is a request for a record; "have less coffee" would
+#: be advice, and nothing on this screen gives any.
+EXPOSURE_ASK: dict[str, str] = {
+    "coffee": "log your coffee with the time you had it",
+    "tea": "log your tea",
+    "alcohol": "log your drinks on the days you have one",
+    "smoking": "log your cigarettes on the days you smoke",
+    "water_low": "log your water every day",
+}
+
+#: How the OUTCOME half gets on to the record. A wearable metric is worn, not
+#: logged, and telling somebody to "log your HRV" is telling them to do a
+#: thing the app cannot accept.
+OUTCOME_ASK: dict[str, str] = {
+    "sleep_duration": "wear your watch overnight",
+    "steps": "wear your watch",
+    "heart_rate": "wear your watch",
+    "heart_rate_resting": "wear your watch",
+    "heart_rate_variability_sdnn": "wear your watch",
+    "blood_pressure": "take a blood-pressure reading",
+    "blood_sugar": "take a blood-sugar reading",
+    "mood": "log your mood",
 }
 
 WHEN_PHRASE = {
@@ -156,3 +187,52 @@ def to_card(o: Observation, *, title: str = "", fact: str | None = None) -> dict
         # did. A direction, NOT a grade and NOT advice.
         "favourable": o.favourable,
     }
+
+
+def waiting_note(
+    exposure: str,
+    outcome: str,
+    days_with: int,
+    days_without: int,
+    *,
+    title: str = "",
+    min_days: int = MIN_DAYS_PER_GROUP,
+    window: int = WINDOW_DAYS,
+) -> str:
+    """What the reader has to keep doing for the nearest pair to open.
+
+    "3 more days to unlock" on its own is a countdown with no instructions,
+    and readers reasonably assume it counts down by itself. It does not: it
+    moves only when BOTH halves of the comparison land on the record on the
+    same day, and a reader who was never told what the two halves are can log
+    diligently for a month against the wrong one and watch the number sit
+    still. So name them, in the order they have to happen.
+
+    Which half is short is worth one more clause. Somebody with 25 logged days
+    and 2 without is not short of logging — they are short of days the habit
+    did not happen, and "log more" is exactly the wrong thing to tell them.
+
+    Counts are stated rather than converted into a percentage: they are small
+    integers the reader can check against their own week.
+    """
+    ask = EXPOSURE_ASK.get(exposure, f"log your {exposure.replace('_', ' ')}")
+    record = OUTCOME_ASK.get(
+        outcome, f"record your {OUTCOME_PHRASE.get(outcome, outcome)}"
+    )
+    # Naming the pair costs a clause and turns an anonymous instruction into
+    # one the reader can picture. The title is already on the card.
+    opening = (
+        f"{title} is the nearest one. Two things have to be on the record on "
+        f"the same day: " if title else
+        "Two things have to be on the record on the same day for this one: "
+    )
+    note = (
+        f"{opening}{record}, and {ask}. Over the last {window} days you have "
+        f"{days_with} with and {days_without} without a reading to compare, "
+        f"and it takes {min_days} of each."
+    )
+    if days_without < min_days <= days_with:
+        note += " The days without are the half that is short."
+    elif days_with < min_days <= days_without:
+        note += " The days with are the half that is short."
+    return note
