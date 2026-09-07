@@ -194,3 +194,23 @@ async def test_an_unrelated_message_is_not_claimed(db_session):
     assert await handle_about_me_query(
         db_session, USER, "what is diabetes"
     ) is None
+
+
+async def test_a_failed_condition_read_is_not_a_clinical_absence(db_session):
+    """"No conditions on your record" was rendered from a CRASHED read.
+
+    The read used to fail into `[]`, which is the same value an empty record
+    gives — so an outage was reported as a clean bill. A failed read must say
+    it failed.
+    """
+    from sqlalchemy import text
+
+    await _seed(db_session)
+    await db_session.execute(text("DROP TABLE medical_condition"))
+
+    out = await handle_about_me_query(db_session, USER, "what health do i have")
+    assert out is not None
+    low = out["reply"].lower()
+    assert "no conditions on your record" not in low
+    assert "could not read your conditions" in low
+    assert out["provenance"]["conditions"] == []

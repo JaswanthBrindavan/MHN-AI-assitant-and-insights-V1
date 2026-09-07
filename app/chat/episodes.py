@@ -244,8 +244,16 @@ async def open_episodes(
 
     Stale ones are filtered on read rather than deleted on a timer: a chat turn
     is the wrong place to run a cleanup, and the nightly sweep is the right one.
+
+    A failed read RAISES. This used to swallow it and return ``[]``, which made
+    "nothing open" and "could not look" the same value — and the orchestrator
+    raises the risk floor from this list, so a broken read silently dropped a
+    carried seek-care banner. Every caller already catches; each decides for
+    itself what a failure means (the floor fails closed, the prompt block fails
+    open). The SAVEPOINT is so that on PostgreSQL the failed statement does not
+    abort the whole transaction and take every later read in the turn with it.
     """
-    try:
+    async with db.begin_nested():
         rows = (
             await db.execute(
                 select(ActiveSymptomState)
@@ -253,9 +261,6 @@ async def open_episodes(
                 .order_by(ActiveSymptomState.last_seen_at.desc())
             )
         ).scalars().all()
-    except Exception:  # noqa: BLE001
-        logger.warning("episode read failed", exc_info=True)
-        return []
 
     cutoff = utcnow() - STALE_AFTER
     fresh: list[Episode] = []
