@@ -221,7 +221,9 @@ def _fmt_date(dt) -> str:
         return ""
 
 
-async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
+async def build_health_snapshot(
+    db: AsyncSession, user_id: uuid.UUID, *, from_document: bool = False
+) -> str:
     """A compact, factual [P]-ready summary of ALL of the reader's recorded data.
 
     Pulls every available personal source: recent lifestyle totals, sleep /
@@ -230,6 +232,15 @@ async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
     nothing is on record (empty accounts stay lean). Purely descriptive — no
     thresholds, no interpretation; the model does the (cautious, correlational)
     reasoning under the prompt's rules.
+
+    ``from_document`` — the memory document (`app.memory.document`) is already
+    in this prompt (`UserMemory.from_document`). That document renders the
+    reader's medications and lab results itself, at its own caps, so with it
+    present the labs and medications here are left out: the same lists
+    rendered twice at different lengths cost the token budget the document
+    exists to protect, and the model could not tell which one was current.
+    Everything the document does NOT carry — vitals, sleep/steps, body
+    measurements, the past-week lifestyle totals — still renders.
     """
     lines: list[str] = []
 
@@ -291,18 +302,24 @@ async def build_health_snapshot(db: AsyncSession, user_id: uuid.UUID) -> str:
             lines.append("Body measurements: " + ", ".join(parts) + ".")
 
     # 5) Lab values — every extracted parameter from recent reports/scans.
-    labs = await recent_lab_values(db, user_id)
-    if labs:
-        parts = [
-            f"{lv.name} {lv.value}{(' ' + lv.unit) if lv.unit else ''}"
-            for lv in labs
-        ]
-        lines.append("Recent lab results on record: " + "; ".join(parts) + ".")
-
     # 6) Active medications.
-    meds = await active_medications(db, user_id)
-    if meds:
-        lines.append("Current medications on record: " + ", ".join(meds) + ".")
+    # Both already in the prompt when the memory document is (see docstring),
+    # and not queried again either.
+    # ponytail: a document over its 900-token budget trims its labs first, and
+    # this path does not know that; pass "document carries labs" instead of a
+    # bare bool if that trim turns out to be common.
+    if not from_document:
+        labs = await recent_lab_values(db, user_id)
+        if labs:
+            parts = [
+                f"{lv.name} {lv.value}{(' ' + lv.unit) if lv.unit else ''}"
+                for lv in labs
+            ]
+            lines.append("Recent lab results on record: " + "; ".join(parts) + ".")
+
+        meds = await active_medications(db, user_id)
+        if meds:
+            lines.append("Current medications on record: " + ", ".join(meds) + ".")
 
     if not lines:
         return ""
