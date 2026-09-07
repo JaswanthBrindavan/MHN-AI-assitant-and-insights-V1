@@ -471,13 +471,23 @@ async def test_a_manual_tracker_week_carries_its_daily_chart(db_session):
 async def test_the_manual_bars_add_up_to_the_sentence_above_them(db_session):
     """Both read `lifestyle_daily_total`, so a reader who adds the bars up
     gets the figure the reply printed. Reading either side from `lifestyle_log`
-    would put a late-evening glass on a different day and break that."""
+    would put a late-evening glass on a different day and break that.
+
+    Anchored on LAST week, which is a complete seven days whatever the weekday.
+    It used to seed `THIS_WEEK + 0..2` and assert the total was 1,500 ml, which
+    made it a calendar bomb: run it on a Sunday or a Monday and the third day
+    is still in the FUTURE. The chart lays out the whole week by design (see
+    `_lifestyle_week_chart` -- a four-bar Wednesday under a seven-day title
+    would be worse), while the sentence counts the week TO DATE, so the seeded
+    tomorrow appeared in the bars and not in the total and the two disagreed.
+    Nothing was wrong with either: an overnight rollup never writes tomorrow a
+    row. The fixture was describing a day that cannot happen."""
     for offset in range(3):
-        _daily(db_session, "water", THIS_WEEK + timedelta(days=offset), 500.0)
+        _daily(db_session, "water", LAST_WEEK + timedelta(days=offset), 500.0)
     await db_session.flush()
 
     out = await handle_tracker_query(
-        db_session, USER, "how much water did i drink this week"
+        db_session, USER, "how much water did i drink last week"
     )
 
     assert out is not None
